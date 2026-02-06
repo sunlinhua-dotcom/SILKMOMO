@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
 import { PromptEditors } from '@/components/PromptEditor';
 import { TaskList } from '@/components/TaskList';
-import { Sparkles, Clock, ChevronDown, Wand2, ArrowRight, History } from 'lucide-react';
+import { Clock, ChevronDown, Wand2, ArrowRight, History } from 'lucide-react';
+import { Logo } from '@/components/Logo';
 import type { CompressedImage } from '@/lib/image-compressor';
 import { db } from '@/lib/db';
 import Link from 'next/link';
@@ -58,8 +59,8 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16 sm:h-18">
             <Link href="/" className="flex items-center gap-3 group">
-              <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gradient-to-br from-[#0A0A0A] to-[#1a1a1a] flex items-center justify-center shadow-lg group-hover:shadow-xl transition-shadow">
-                <Sparkles className="w-5 h-5 text-[#C9A86C]" strokeWidth={1.5} />
+              <div className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center transition-transform hover:scale-105">
+                <Logo width={44} height={44} />
               </div>
               <span className="text-lg sm:text-xl font-semibold tracking-tight">
                 SILKMOMO

@@ -1,7 +1,8 @@
 'use client';
 
 import { TaskList } from '@/components/TaskList';
-import { ArrowLeft, Sparkles } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
+import { Logo } from '@/components/Logo';
 import Link from 'next/link';
 
 export default function TasksPage() {
@@ -12,8 +13,8 @@ export default function TasksPage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <Link href="/" className="flex items-center gap-3 group">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#0A0A0A] to-[#1a1a1a] flex items-center justify-center shadow-lg group-hover:shadow-xl transition-shadow">
-                <Sparkles className="w-5 h-5 text-[#C9A86C]" strokeWidth={1.5} />
+              <div className="w-10 h-10 flex items-center justify-center transition-transform hover:scale-105">
+                <Logo width={40} height={40} />
               </div>
               <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
             </Link>

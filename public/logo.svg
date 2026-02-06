@@ -1,0 +1,43 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gold-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C9A86C" />
+      <stop offset="50%" stop-color="#F2E6C9" />
+      <stop offset="100%" stop-color="#A8863F" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="512" height="512" fill="#0A0A0A" />
+  
+  <!-- Icon: Abstract Silk 'S' -->
+  <g transform="translate(256, 220) scale(1)">
+     <!-- Stylized S shape composed of flowing ribbon -->
+     <path d="M-100 -80 C -150 -80, -150 20, 0 20 C 150 20, 150 120, 100 120 C 50 120, 50 20, -100 20" 
+           stroke="url(#gold-gradient)" 
+           stroke-width="32" 
+           stroke-linecap="round" 
+           fill="none"
+           filter="url(#glow)" />
+     
+     <!-- Highlight stroke -->
+     <path d="M-100 -80 C -150 -80, -150 20, 0 20 C 150 20, 150 120, 100 120" 
+           stroke="rgba(255,255,255,0.4)" 
+           stroke-width="4" 
+           stroke-linecap="round" 
+           fill="none"
+           transform="translate(0, -5)" />
+  </g>
+
+  <!-- Text -->
+  <text x="50%" y="400" text-anchor="middle" font-family="Montserrat, serif" font-size="56" font-weight="600" letter-spacing="0.15em" fill="#FFFFFF">
+    SILKMOMO
+  </text>
+  <text x="50%" y="440" text-anchor="middle" font-family="Montserrat, sans-serif" font-size="18" font-weight="400" letter-spacing="0.4em" fill="#C9A86C">
+    SILK ARTISTRY
+  </text>
+</svg>
