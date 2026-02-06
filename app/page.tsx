@@ -3,6 +3,9 @@
 import { useState } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
 import { PromptEditors } from '@/components/PromptEditor';
+import { ModelSelector } from '@/components/ModelSelector';
+import { BodyTypeSelector } from '@/components/BodyTypeSelector';
+import { DEFAULT_MODEL, DEFAULT_BODY_TYPE } from '@/lib/models';
 import { TaskList } from '@/components/TaskList';
 import { Clock, ChevronDown, Wand2, ArrowRight, History } from 'lucide-react';
 import { Logo } from '@/components/Logo';
@@ -14,6 +17,8 @@ export default function HomePage() {
   const [productImages, setProductImages] = useState<CompressedImage[]>([]);
   const [styleImages, setStyleImages] = useState<CompressedImage[]>([]);
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState(DEFAULT_MODEL.id);
+  const [selectedBodyType, setSelectedBodyType] = useState<'slim' | 'curvy'>(DEFAULT_BODY_TYPE.id);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [projectName, setProjectName] = useState('');
@@ -30,7 +35,9 @@ export default function HomePage() {
         createdAt: new Date(),
         updatedAt: new Date(),
         status: 'pending',
-        name: projectName || `丝绸组图 ${new Date().toLocaleString('zh-CN')}`
+        name: projectName || `丝绸组图 ${new Date().toLocaleString('zh-CN')}`,
+        modelId: selectedModelId,
+        bodyType: selectedBodyType
       });
 
       for (const img of productImages) {
@@ -142,11 +149,27 @@ export default function HomePage() {
                 />
               </div>
 
+              {/* 模特选择 */}
+              <div className="animate-fade-in-up animate-fade-in-delay-3">
+                <ModelSelector
+                  selectedModel={selectedModelId}
+                  onSelect={setSelectedModelId}
+                />
+              </div>
+
+              {/* 体型选择 */}
+              <div className="animate-fade-in-up animate-fade-in-delay-3">
+                <BodyTypeSelector
+                  selectedBodyType={selectedBodyType}
+                  onSelect={setSelectedBodyType}
+                />
+              </div>
+
               {/* 风格参考 - 灰色边框变体 */}
               <div className="animate-fade-in-up animate-fade-in-delay-3">
                 <ImageUploader
                   title="风格参考"
-                  description="可选，默认 INS 极简风格"
+                  description="可选，不上传则使用默认复古风格"
                   maxFiles={5}
                   images={styleImages}
                   onImagesChange={setStyleImages}

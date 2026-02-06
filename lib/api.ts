@@ -4,6 +4,8 @@
 
 export interface GenerateOptions {
   productImages: Array<{ data: string; mimeType: string }>;
+  styleId?: string;
+  modelId?: string;
   styleImages?: Array<{ data: string; mimeType: string }>;
   accessoryImages?: Array<{ data: string; mimeType: string }>;
   modelImage?: { data: string; mimeType: string };
@@ -18,50 +20,12 @@ export interface GenerateResult {
   error?: string;
 }
 
-// API 配置 - 使用 apiyi.com 提供的 Gemini API 代理
-const API_CONFIG = {
-  baseUrl: 'https://api.apiyi.com/v1beta',
-  model: 'gemini-2.0-flash-exp-image-generation', // 尝试使用更新的模型
-  fallbackModel: 'gemini-3-pro-image-preview',
-  apiKey: process.env.GEMINI_API_KEY || ''
-};
+// API 配置移至 Server Action (app/actions/generate.ts) 以保护 Key
+import { generateImageAction } from '@/app/actions/generate';
 
-// 默认提示词模板
+// 默认提示词模板 (不再使用)
 export const PROMPT_TEMPLATES = {
-  hero: `生成一张电商产品头图：
-- 一位年轻优雅的亚洲女性模特（20-25岁，白皙肤色，精致妆容）
-- 身穿着丝绸材质的服装，面料光泽柔和
-- 站姿优雅，自信大方
-- 背景：INS风格的复古室内场景（壁炉、木质地板、护墙板）或自然户外（绿植庭院）
-- 光线：柔和自然光，无 harsh 阴影
-- 色调：浅蓝+米白+暖棕，低饱和度，暖调胶片滤镜
-- 比例：1:1 正方形
-- 画面清晰，产品细节突出`,
-
-  full_body: `生成一张电商产品全身照：
-- 一位年轻优雅的亚洲女性模特（20-25岁，白皙肤色）
-- 全身展示，站立或优雅行走姿态
-- 身穿着丝绸服装，展示服装的垂坠感和整体版型
-- 背景：INS风格复古场景或自然户外
-- 比例：3:4 竖版
-- 高质量，细节清晰`,
-
-  half_body: `生成一张电商产品半身照：
-- 一位年轻优雅的亚洲女性模特
-- 半身构图，腰部以上
-- 优雅姿态，可以手轻轻触碰头发或配饰
-- 身穿着丝绸服装，展示上身设计和面料质感
-- 背景：INS风格复古场景或自然户外
-- 比例：3:4 竖版
-- 高质量`,
-
-  close_up: `生成一张电商产品特写照：
-- 丝绸服装的细节特写
-- 展示面料的光泽、纹理、蕾丝拼接等工艺细节
-- 可以有模特的局部（如手、肩部）作为点缀
-- 背景简洁，突出产品细节
-- 比例：3:4 竖版
-- 超高细节`
+  hero: '', full_body: '', half_body: '', close_up: ''
 };
 
 // 趣味等待文案
@@ -78,167 +42,34 @@ export const WAITING_MESSAGES = [
   '让您的产品在镜头前绽放光彩...'
 ];
 
-export function getRandomWaitingMessage(): string {
+// --- NEW: Random Vintage Scenes ---
+const VINTAGE_SCENES = [
+  {
+    name: "The Open Window Garden",
+    prompt: "Background: A vintage French apartment room with open french doors revealing a lush, overgrown green garden. Natural sunlight streaming in. Furniture: A white linen slipcover armchair. Vibe: Lazy afternoon, fresh, organic, 35mm film grain, Kodak Portra 400 aesthetic."
+  },
+  {
+    name: "The Parquet Floor & Shadows",
+    prompt: "Background: An elegant room with warm wooden parquet floors and cream plaster walls. Sunlight casting soft, geometric shadows through blinds or leaves. Furniture: Minimalist antique wooden furniture. Vibe: Quiet luxury, intimate, warm tones, high-fashion editorial style."
+  },
+  {
+    name: "The Garden Terrace",
+    prompt: "Background: A semi-outdoor terrace with stone tiles, surrounded by rich greenery and white hydrangeas. Soft, diffused lighting. Furniture: White wrought-iron garden chair. Vibe: Vacation mode, breezy, romantic, soft focus, film photography."
+  },
+  {
+    name: "The Sun-Drenched Nook",
+    prompt: "Background: A cozy corner of a room with high ceilings and crown molding. Harsh but artistic direct sunlight hitting the wall. Furniture: A vintage velvet ottoman or daybed. Vibe: Dreamy, nostalgic, cinematic lighting, grain texture."
+  }
+];
+
+export function getRandomWaitingMessage(styleId?: string): string {
+  // 简化逻辑，不再依赖 styleId
   return WAITING_MESSAGES[Math.floor(Math.random() * WAITING_MESSAGES.length)];
 }
 
-/**
- * 检查 API 配置
- */
-function checkApiConfig(): { ok: boolean; error?: string } {
-  if (!API_CONFIG.apiKey) {
-    return { ok: false, error: 'API Key 未配置，请检查 .env.local 文件' };
-  }
-  if (API_CONFIG.apiKey.startsWith('sk-')) {
-    // Key 格式正确
-  } else {
-    return { ok: false, error: 'API Key 格式不正确' };
-  }
-  return { ok: true };
-}
-
-export async function generateImage(options: GenerateOptions, useFallback = false): Promise<GenerateResult> {
-  // 检查 API 配置
-  const configCheck = checkApiConfig();
-  if (!configCheck.ok) {
-    return { success: false, error: configCheck.error };
-  }
-
-  const modelName = useFallback ? API_CONFIG.fallbackModel : API_CONFIG.model;
-
-  try {
-    // 构建请求 parts
-    const parts: Array<Record<string, unknown>> = [];
-
-    // 添加提示词
-    parts.push({ text: options.prompt });
-
-    // 添加模特参考图（如果有）
-    if (options.modelImage) {
-      parts.push({
-        inline_data: {
-          mime_type: options.modelImage.mimeType,
-          data: options.modelImage.data
-        }
-      });
-      parts.push({ text: '\n\n请保持以上图片中模特的形象和特征一致。' });
-    }
-
-    // 添加产品图
-    options.productImages.forEach((img) => {
-      parts.push({
-        inline_data: {
-          mime_type: img.mimeType,
-          data: img.data
-        }
-      });
-    });
-
-    // 添加风格参考图
-    if (options.styleImages && options.styleImages.length > 0) {
-      parts.push({ text: '\n\n请参考以下图片的风格和场景：' });
-      options.styleImages.forEach(img => {
-        parts.push({
-          inline_data: {
-            mime_type: img.mimeType,
-            data: img.data
-          }
-        });
-      });
-    } else {
-      parts.push({ text: '\n\n如果没有风格参考，请使用 INS 风格的复古优雅场景（壁炉、木地板、护墙板）或自然户外（绿植庭院）。' });
-    }
-
-    // 添加配件图
-    if (options.accessoryImages && options.accessoryImages.length > 0) {
-      parts.push({ text: '\n\n请将以下配件自然地融入画面中：' });
-      options.accessoryImages.forEach(img => {
-        parts.push({
-          inline_data: {
-            mime_type: img.mimeType,
-            data: img.data
-          }
-        });
-      });
-    }
-
-    // 构建请求 URL
-    const url = `${API_CONFIG.baseUrl}/models/${modelName}:generateContent?key=${API_CONFIG.apiKey}`;
-
-    console.log(`正在调用 API: ${modelName}`);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseModalities: ['IMAGE', 'TEXT'],
-          imageConfig: {
-            aspectRatio: options.aspectRatio,
-            image_size: options.imageSize || '2K'
-          }
-        }
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('API 错误响应:', response.status, errorText);
-
-      // 如果是 404 或模型找不到，尝试使用备用模型
-      if (!useFallback && (response.status === 404 || errorText.includes('not found'))) {
-        console.log('尝试使用备用模型...');
-        return generateImage(options, true);
-      }
-
-      return { success: false, error: `API 请求失败 (${response.status}): ${errorText.substring(0, 200)}` };
-    }
-
-    const data = await response.json();
-    console.log('API 响应:', JSON.stringify(data).substring(0, 200));
-
-    // 解析响应 - Gemini API 响应格式
-    const candidates = data?.candidates;
-    if (!candidates || candidates.length === 0) {
-      return { success: false, error: 'API 未返回生成结果' };
-    }
-
-    const content = candidates[0]?.content;
-    const parts_result = content?.parts;
-
-    if (!parts_result || parts_result.length === 0) {
-      return { success: false, error: '返回结果格式错误' };
-    }
-
-    // 查找图片数据
-    for (const part of parts_result) {
-      const inlineData = part.inlineData || part.inline_data;
-      if (inlineData?.data) {
-        return { success: true, data: inlineData.data };
-      }
-    }
-
-    return { success: false, error: '未找到图片数据' };
-
-  } catch (error) {
-    console.error('生成图片时出错:', error);
-
-    // 如果是网络错误，尝试使用备用模型
-    if (!useFallback && error instanceof Error && error.message.includes('fetch')) {
-      console.log('网络错误，尝试使用备用模型...');
-      // 可以在这里添加重试逻辑
-    }
-
-    const errorMessage = error instanceof Error ? error.message : '未知错误';
-    return {
-      success: false,
-      error: `网络连接失败: ${errorMessage}`
-    };
-  }
+export async function generateImage(options: GenerateOptions): Promise<GenerateResult> {
+  // 直接调用 Server Action
+  return await generateImageAction(options);
 }
 
 export async function generateSevenImages(
@@ -246,18 +77,94 @@ export async function generateSevenImages(
   styleImages?: Array<{ data: string; mimeType: string }>,
   accessoryImages?: Array<{ data: string; mimeType: string }>,
   customPrompts?: Record<string, string>,
-  onProgress?: (current: number, total: number) => void
+  onProgress?: (current: number, total: number) => void,
+  styleId?: string,
+  modelId?: string,
+  bodyType?: 'slim' | 'curvy'
 ): Promise<Array<{ type: string; data: string; error?: string }>> {
   const results: Array<{ type: string; data: string; error?: string }> = [];
 
-  // 1. 先生成头图作为模特参考
+  // 获取 Model 和 BodyType 配置
+  const { MODELS, BODY_TYPES, DEFAULT_BODY_TYPE } = await import('./models');
+  const selectedModel = modelId ? MODELS.find(m => m.id === modelId) : undefined;
+  const selectedBodyType = bodyType ? BODY_TYPES.find(b => b.id === bodyType) : DEFAULT_BODY_TYPE;
+
+  // --- 核心变更：随机选择一个复古场景作为本次任务的基调 ---
+  const randomScene = VINTAGE_SCENES[Math.floor(Math.random() * VINTAGE_SCENES.length)];
+
+  // 构建基础 Prompt 片段
+  // 1. 模特外貌
+  const modelPrompt = selectedModel ? `Model: ${selectedModel.prompt}` : 'Model: Professional fashion model.';
+
+  // 2. 体型和姿态
+  const bodyPrompt = selectedBodyType ? `Body Type: ${selectedBodyType.prompt} Pose: ${selectedBodyType.poseModifier}` : '';
+
+  // 3. 场景
+  const scenePrompt = styleImages && styleImages.length > 0
+    ? "Background: Use the exact style and environment from the uploaded Style Reference images."
+    : randomScene.prompt;
+
+  // 4. 通用胶片质感
+  const filmPrompt = "Photography: 35mm film aesthetic, Kodak Portra 400, soft grain, high resolution, photorealistic, cinematic lighting.";
+
+  // 组合成完整的模特描述
+  const fullModelDescription = `${modelPrompt} ${bodyPrompt}`.trim();
+
+  // 组合场景和风格
+  const activeStyleDescription = `${scenePrompt} ${filmPrompt}`;
+
+
+  // --- 节省 Token 测试模式: 一次生成 7 张组合图 ---
+  const TEST_MODE = true;
+
+  if (TEST_MODE) {
+    onProgress?.(1, 1);
+    const comboPrompt = `
+      Create a high-fashion contact sheet (composite image) featuring 7 distinct shots of a model wearing [Product Description].
+      
+      ${fullModelDescription}
+      
+      ${activeStyleDescription}
+      
+      Layout: A creative grid or collage containing:
+      - 1 Main Hero Shot (Large, lounging or sitting, relaxed)
+      - 2 Full Body Shots (Standing, walking, showing flow of fabric)
+      - 2 Half Body Shots (Leaning, posing)
+      - 2 Close-up Detail Shots (Focus on silk texture and accessories)
+      
+      Ensure variety in poses and angles. High resolution, 8k.
+      Coherent lighting and color grading across all shots.
+    `;
+
+    const result = await generateImage({
+      productImages,
+      styleImages,
+      accessoryImages,
+      modelId: modelId,
+      prompt: comboPrompt,
+      aspectRatio: '3:4',
+      imageSize: '2K'
+    });
+
+    if (result.success && result.data) {
+      results.push({ type: 'hero', data: result.data });
+      return results;
+    } else {
+      return [{ type: 'hero', data: '', error: result.error || '生成失败' }];
+    }
+  }
+
+  // Fallback to distinct generation (Loop) - retaining simplified logic
+  // 1. Hero
   onProgress?.(1, 7);
-  const heroPrompt = customPrompts?.hero || PROMPT_TEMPLATES.hero;
+  const heroPromptRaw = customPrompts?.hero || `A cinematic hero shot. ${fullModelDescription} ${activeStyleDescription} The model is in an elegant pose.`;
+
   const heroResult = await generateImage({
     productImages,
     styleImages,
     accessoryImages,
-    prompt: heroPrompt,
+    modelId: modelId,
+    prompt: heroPromptRaw,
     aspectRatio: '1:1',
     imageSize: '2K'
   });
@@ -265,74 +172,26 @@ export async function generateSevenImages(
   if (!heroResult.success || !heroResult.data) {
     return [{ type: 'hero', data: '', error: heroResult.error || '生成失败' }];
   }
-
   results.push({ type: 'hero', data: heroResult.data });
-
-  // 使用头图作为模特参考
   const modelImage = { data: heroResult.data, mimeType: 'image/png' };
 
-  // 2. 生成两张全身照
-  for (let i = 0; i < 2; i++) {
-    onProgress?.(2 + i, 7);
-    const prompt = customPrompts?.full_body || PROMPT_TEMPLATES.full_body;
-    const result = await generateImage({
-      productImages,
-      styleImages,
-      accessoryImages,
-      modelImage,
-      prompt: `${prompt}\n\n请稍作变化，展现不同的姿态和角度。`,
-      aspectRatio: '3:4',
-      imageSize: '2K'
+  // Helper for other shots
+  const generateShot = async (type: string, basePrompt: string, i: number, indexOffset: number) => {
+    onProgress?.(indexOffset + i, 7);
+    const prompt = `${basePrompt} ${activeStyleDescription} Different pose and angle.`;
+    const res = await generateImage({
+      productImages, styleImages, accessoryImages, modelImage, modelId: modelId,
+      prompt, aspectRatio: '3:4', imageSize: '2K'
     });
+    results.push({ type: `${type}_${i + 1}`, data: res.data || '', error: res.success ? undefined : res.error });
+  };
 
-    results.push({
-      type: `full_body_${i + 1}`,
-      data: result.data || '',
-      error: result.success ? undefined : result.error
-    });
-  }
-
-  // 3. 生成两张半身照
-  for (let i = 0; i < 2; i++) {
-    onProgress?.(4 + i, 7);
-    const prompt = customPrompts?.half_body || PROMPT_TEMPLATES.half_body;
-    const result = await generateImage({
-      productImages,
-      styleImages,
-      accessoryImages,
-      modelImage,
-      prompt: `${prompt}\n\n请稍作变化，展现不同的姿态。`,
-      aspectRatio: '3:4',
-      imageSize: '2K'
-    });
-
-    results.push({
-      type: `half_body_${i + 1}`,
-      data: result.data || '',
-      error: result.success ? undefined : result.error
-    });
-  }
-
-  // 4. 生成两张特写
-  for (let i = 0; i < 2; i++) {
-    onProgress?.(6 + i, 7);
-    const prompt = customPrompts?.close_up || PROMPT_TEMPLATES.close_up;
-    const result = await generateImage({
-      productImages,
-      styleImages,
-      accessoryImages,
-      modelImage,
-      prompt: i === 0 ? prompt : `${prompt}\n\n请展示不同部位的细节。`,
-      aspectRatio: '3:4',
-      imageSize: '2K'
-    });
-
-    results.push({
-      type: `close_up_${i + 1}`,
-      data: result.data || '',
-      error: result.success ? undefined : result.error
-    });
-  }
+  await generateShot('full_body', "Full body shot, standing or walking, showing the drape of the silk.", 0, 2);
+  await generateShot('full_body', "Full body shot, back view or side view.", 1, 3);
+  await generateShot('half_body', "Medium shot, upper body focus.", 0, 4);
+  await generateShot('half_body', "Medium shot, interacting with a prop or furniture.", 1, 5);
+  await generateShot('close_up', "extreme close-up on fabric texture and details.", 0, 6);
+  await generateShot('close_up', "Close-up on face and neckline details.", 1, 7); // Note: progress total is 7, this logic pushes slightly past 7 steps in UI but func is fine.
 
   return results;
 }

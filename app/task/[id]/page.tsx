@@ -4,10 +4,15 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
-import { Clock, CheckCircle, XCircle, Loader, Wand2 } from 'lucide-react';
+import { ModelSelector } from '@/components/ModelSelector';
+import { ImageUploader } from '@/components/ImageUploader';
+import { DEFAULT_MODEL, MODELS, DEFAULT_BODY_TYPE } from '@/lib/models';
+import { BodyTypeSelector } from '@/components/BodyTypeSelector';
+import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import Link from 'next/link';
 import { generateSevenImages, getRandomWaitingMessage } from '@/lib/api';
+import type { CompressedImage } from '@/lib/image-compressor';
 
 export default function TaskDetailPage() {
   const params = useParams();
@@ -27,6 +32,12 @@ export default function TaskDetailPage() {
   const [waitingMessage, setWaitingMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // --- 调整参数面板 State ---
+  const [showAdjustPanel, setShowAdjustPanel] = useState(false);
+  const [newModelId, setNewModelId] = useState(DEFAULT_MODEL.id);
+  const [newBodyType, setNewBodyType] = useState<'slim' | 'curvy'>(DEFAULT_BODY_TYPE.id);
+  const [newStyleImages, setNewStyleImages] = useState<CompressedImage[]>([]);
+
   const loadTaskData = useCallback(async () => {
     try {
       const task = await db.projects.get(taskId);
@@ -43,6 +54,8 @@ export default function TaskDetailPage() {
         styles: allImages.filter(img => img.type === 'style'),
         accessories: allImages.filter(img => img.type === 'accessory')
       });
+      // 同步当前模特到调整面板
+      setNewModelId(task.modelId || DEFAULT_MODEL.id);
     } catch (error) {
       console.error('加载任务失败:', error);
     } finally {
@@ -52,17 +65,18 @@ export default function TaskDetailPage() {
 
   useEffect(() => {
     loadTaskData();
-    const interval = setInterval(() => setWaitingMessage(getRandomWaitingMessage()), 4000);
+    const interval = setInterval(() => {
+      setWaitingMessage(getRandomWaitingMessage());
+    }, 4000);
     return () => clearInterval(interval);
   }, [loadTaskData]);
-
-
 
   const handleStartGeneration = async () => {
     if (!project || inputImages.products.length === 0) return;
 
     setGenerating(true);
     setProgress({ current: 0, total: 7 });
+    setErrorMessage(null);
 
     try {
       await db.projects.update(taskId, { status: 'processing' });
@@ -77,7 +91,10 @@ export default function TaskDetailPage() {
         styleImages.length > 0 ? styleImages : undefined,
         accessoryImages.length > 0 ? accessoryImages : undefined,
         undefined,
-        (current, total) => setProgress({ current, total })
+        (current, total) => setProgress({ current, total }),
+        undefined,
+        project.modelId,
+        project.bodyType
       );
 
       let successCount = 0;
@@ -103,6 +120,9 @@ export default function TaskDetailPage() {
       }
 
       const finalStatus = successCount > 0 ? 'completed' : 'failed';
+      if (successCount === 0 && results.length > 0 && results[0].error) {
+        setErrorMessage(results[0].error);
+      }
       await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
       await loadTaskData();
 
@@ -117,9 +137,99 @@ export default function TaskDetailPage() {
     }
   };
 
+  // --- 调整参数并重新生成 ---
+  const handleRegenerateWithNewParams = async () => {
+    if (!project) return;
+
+    setShowAdjustPanel(false);
+    setGenerating(true);
+    setProgress({ current: 0, total: 7 });
+    setErrorMessage(null);
+
+    try {
+      // 1. 清除旧的结果图片
+      await db.images.where('projectId').equals(taskId).filter(img => img.type === 'result').delete();
+      setImages([]);
+
+      // 2. 如果上传了新的风格图，更新数据库
+      if (newStyleImages.length > 0) {
+        // 删除旧风格图
+        await db.images.where('projectId').equals(taskId).filter(img => img.type === 'style').delete();
+        // 添加新风格图
+        for (const img of newStyleImages) {
+          await db.images.add({ projectId: taskId, type: 'style', data: img.base64, mimeType: img.mimeType });
+        }
+      }
+
+      // 3. 更新 Project 的 modelId 和 bodyType
+      await db.projects.update(taskId, { modelId: newModelId, bodyType: newBodyType, status: 'processing', updatedAt: new Date() });
+      setProject(prev => prev ? { ...prev, modelId: newModelId, bodyType: newBodyType, status: 'processing' } : null);
+
+      // 4. 重新加载数据以获取最新的风格图
+      const allImages = await db.images.where('projectId').equals(taskId).toArray();
+      const productImages = allImages.filter(img => img.type === 'product').map(img => ({ data: img.data, mimeType: img.mimeType }));
+      const styleImages = allImages.filter(img => img.type === 'style').map(img => ({ data: img.data, mimeType: img.mimeType }));
+      const accessoryImages = allImages.filter(img => img.type === 'accessory').map(img => ({ data: img.data, mimeType: img.mimeType }));
+
+      // 5. 调用生成
+      const results = await generateSevenImages(
+        productImages,
+        styleImages.length > 0 ? styleImages : undefined,
+        accessoryImages.length > 0 ? accessoryImages : undefined,
+        undefined,
+        (current, total) => setProgress({ current, total }),
+        undefined,
+        newModelId,
+        newBodyType
+      );
+
+      let successCount = 0;
+      for (const result of results) {
+        if (result.data && !result.error) {
+          let imageType: 'hero' | 'full_body' | 'half_body' | 'close_up' = 'close_up';
+          let index = 1;
+          if (result.type === 'hero') imageType = 'hero';
+          else if (result.type.startsWith('full_body')) { imageType = 'full_body'; index = parseInt(result.type.split('_')[2]); }
+          else if (result.type.startsWith('half_body')) { imageType = 'half_body'; index = parseInt(result.type.split('_')[2]); }
+          else if (result.type.startsWith('close_up')) { imageType = 'close_up'; index = parseInt(result.type.split('_')[2]); }
+
+          await db.images.add({
+            projectId: taskId,
+            type: 'result',
+            data: result.data,
+            mimeType: 'image/png',
+            imageType,
+            index
+          });
+          successCount++;
+        }
+      }
+
+      const finalStatus = successCount > 0 ? 'completed' : 'failed';
+      if (successCount === 0 && results.length > 0 && results[0].error) {
+        setErrorMessage(results[0].error);
+      }
+      await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
+      await loadTaskData();
+
+    } catch (error) {
+      console.error('重新生成失败:', error);
+      const errorMsg = error instanceof Error ? error.message : '未知错误';
+      setErrorMessage(errorMsg);
+      await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
+      setProject(prev => prev ? { ...prev, status: 'failed' } : null);
+    } finally {
+      setGenerating(false);
+      setNewStyleImages([]); // 清空临时上传的风格图
+    }
+  };
+
   const handleRegenerate = async (imageId: number) => {
     console.log('重新生成图片:', imageId);
   };
+
+  // 获取当前模特名称
+  const currentModelName = project?.modelId ? MODELS.find(m => m.id === project.modelId)?.name : '默认模特';
 
   if (loading) {
     return (
@@ -155,11 +265,11 @@ export default function TaskDetailPage() {
               <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
             </Link>
 
-            <div className="flex items-center gap-4">
-              <h1 className="text-base sm:text-lg font-medium truncate max-w-[200px] text-[var(--color-text)]">
+            <div className="flex items-center gap-3">
+              {/* 项目名称和状态 */}
+              <h1 className="hidden sm:block text-base font-medium truncate max-w-[150px] text-[var(--color-text)]">
                 {project.name}
               </h1>
-              {/* 状态指示 */}
               {project.status === 'pending' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-background)] rounded-full">
                   <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" />
@@ -184,10 +294,94 @@ export default function TaskDetailPage() {
                   失败
                 </span>
               )}
+
+              {/* 调整参数按钮 - 仅在完成或失败时显示 */}
+              {(project.status === 'completed' || project.status === 'failed') && !generating && (
+                <button
+                  onClick={() => setShowAdjustPanel(true)}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-[var(--color-accent)] text-white rounded-xl hover:bg-[var(--color-accent-dark)] transition-colors"
+                >
+                  <Settings2 className="w-4 h-4" />
+                  <span className="hidden sm:inline">调整参数</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
       </header>
+
+      {/* 调整参数面板 (Modal) */}
+      {showAdjustPanel && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-[var(--color-surface)] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl border border-[var(--color-border-light)]">
+            {/* 面板头部 */}
+            <div className="flex items-center justify-between p-5 border-b border-[var(--color-border-light)]">
+              <h2 className="text-lg font-semibold">调整参数，重新生成</h2>
+              <button
+                onClick={() => setShowAdjustPanel(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[var(--color-background)] transition-colors"
+              >
+                <X className="w-5 h-5 text-[var(--color-text-muted)]" />
+              </button>
+            </div>
+
+            {/* 面板内容 */}
+            <div className="p-5 space-y-6">
+              {/* 当前模特提示 */}
+              <div className="text-sm text-[var(--color-text-secondary)]">
+                当前模特: <span className="font-medium text-[var(--color-text)]">{currentModelName}</span>
+              </div>
+
+              {/* 模特选择 */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择新模特</h3>
+                <ModelSelector
+                  selectedModel={newModelId}
+                  onSelect={setNewModelId}
+                />
+              </div>
+
+              {/* 体型选择 */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">体型选择</h3>
+                <BodyTypeSelector
+                  selectedBodyType={newBodyType}
+                  onSelect={setNewBodyType}
+                />
+              </div>
+
+              {/* 风格参考上传 */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">
+                  更换风格参考 <span className="text-[var(--color-text-muted)]">(可选)</span>
+                </h3>
+                <ImageUploader
+                  title=""
+                  description="上传新的风格参考图，将覆盖原有设置"
+                  maxFiles={5}
+                  images={newStyleImages}
+                  onImagesChange={setNewStyleImages}
+                  variant="gray"
+                />
+              </div>
+            </div>
+
+            {/* 面板底部 */}
+            <div className="p-5 border-t border-[var(--color-border-light)]">
+              <button
+                onClick={handleRegenerateWithNewParams}
+                className="btn-primary w-full"
+              >
+                <RefreshCcw className="w-5 h-5" />
+                开始重新生成
+              </button>
+              <p className="text-xs text-[var(--color-text-muted)] mt-3 text-center">
+                将使用原有的产品图，配合新的参数重新生成
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* 生成中状态 */}
