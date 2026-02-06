@@ -6,6 +6,9 @@ export interface Project {
   updatedAt: Date;
   status: 'pending' | 'processing' | 'completed' | 'failed';
   name: string;
+  styleId?: string;
+  modelId?: string; // 选中的模特 ID
+  bodyType?: 'slim' | 'curvy'; // 体型选择
 }
 
 export interface ImageItem {
