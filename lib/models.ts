@@ -59,9 +59,9 @@ export const BODY_TYPES: BodyType[] = [
     {
         id: 'curvy',
         name: '性感',
-        description: '丰满曲线，适合蕾丝/内衣款式',
-        prompt: 'Curvy, voluptuous body with fuller bust, defined waist, full hips and shapely thighs. Sensual and confident.',
-        poseModifier: 'Confident, expressive poses that accentuate curves. Highlight the bust, waist-to-hip ratio, and thigh contours. Alluring and self-assured body language.'
+        description: '拉美超模身材，适合蕾丝/内衣款式',
+        prompt: 'Curvaceous build with Latin-inspired body proportions (this refers ONLY to body shape, NOT ethnicity - keep the model face and skin tone as specified). Pronounced bust, dramatically defined waist, full rounded hips and shapely thighs.',
+        poseModifier: 'Confident, glamorous stance that accentuates the bust-waist-hip ratio. Natural body language that shows off the garment fit on curves.'
     }
 ];
 
