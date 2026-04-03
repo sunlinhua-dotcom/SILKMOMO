@@ -39,3 +39,33 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/lib/generated/prisma
+
+# database
+/data/*.db
+/data/*.db-journal
+*.db
+*.db-journal
+
+# 大型本地素材文件（不上传到 Git）
+*.zip
+*.xlsx
+*.xls
+SKMM_LOGO.jpeg
+微信图片_*.jpg
+
+# 本地调性图库（体积过大，不入仓库）
+/public/aesthetic_database/
+/public/presets/
+
+# Instaloader 产生的乱码目录（防止意外提交）
+"∕Users*"
+
+# 本地日志
+LOG.md
+
+# macOS
+.DS_Store
+**/.DS_Store
+*.tsbuildinfo

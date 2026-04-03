@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ═══ 用户表 ═══
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique           // 用户名登录
+  passwordHash String                     // bcrypt 哈希
+  name         String   @default("")      // 昵称
+  role         String   @default("user")  // "user" | "admin"
+  balanceFen   Int      @default(0)       // 余额（单位：分），¥1.00 = 100分
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  transactions Transaction[]
+  brandProfiles BrandProfile[]
+  generations  GenerationRecord[]
+}
+
+// ═══ 交易流水表（Ledger 模式）═══
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String                     // "recharge" | "consume" | "refund" | "bonus"
+  amountFen   Int                        // 金额（分）：正数=入账，负数=扣费
+  balanceAfter Int                       // 交易后余额快照
+  description String   @default("")     // 描述
+  apiModel    String?                    // API 模型名
+  projectId   Int?                       // 关联的项目 ID
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ═══ 系统配置表 ═══
+model SystemConfig {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
+
+// ═══ 品牌 DNA 记忆（Phase 4A）═══
+model BrandProfile {
+  id              String   @id @default(cuid())
+  userId          String
+  name            String   @default("默认品牌")  // 品牌名称
+  isDefault       Boolean  @default(true)        // 是否为用户默认品牌
+
+  // 模特偏好
+  defaultModelId  String   @default("elena")
+  defaultBodyType String   @default("standard")
+  defaultSkinTone String   @default("light")
+
+  // 视觉风格
+  lightingStyle   String   @default("soft_studio")   // 光影风格
+  bgPreference    String   @default("warm_cream")     // 背景偏好
+  colorPalette    String   @default("[]")             // JSON: 品牌调色板
+  promptSuffix    String   @default("")               // 品牌专属 prompt 后缀
+
+  // 输出偏好
+  defaultModule   String   @default("product")        // "product" | "scene"
+  defaultAspectRatio String @default("3:4")           // 默认比例
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+// ═══ 生成记录 + 反馈（Phase 4B）═══
+model GenerationRecord {
+  id           String   @id @default(cuid())
+  userId       String
+  module       String   @default("product")  // "product" | "scene"
+  shotIndex    Int?                           // 镜次编号（产品图）
+  promptHash   String                         // prompt 的 hash（去重统计）
+  promptText   String                         // 完整 prompt（truncated if needed）
+
+  // 参数快照
+  modelId      String?
+  bodyType     String?
+  skinTone     String?
+  aspectRatio  String   @default("3:4")
+  apiModel     String   @default("")
+
+  // 结果
+  success      Boolean  @default(true)
+  apiLatencyMs Int      @default(0)           // API 耗时（毫秒）
+  errorMessage String?                        // 失败原因
+
+  // 用户反馈
+  rating       Int      @default(0)           // -1=差, 0=未评, 1=好
+  feedback     String   @default("")          // 用户文字反馈
+  feedbackTags String   @default("[]")        // JSON: 标签 ["服装错误","光影差","构图好"]
+  downloaded   Boolean  @default(false)       // 是否下载过
+
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([promptHash])
+  @@index([rating])
+  @@index([module, shotIndex])
+  @@index([createdAt])
+}
+
