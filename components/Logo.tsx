@@ -12,11 +12,11 @@ export function Logo({ className = '', width = 40, height = 40 }: LogoProps) {
     return (
         <div className={`relative flex items-center justify-center ${className}`}>
             <Image
-                src="/logo.svg"
+                src="/logo.jpeg"
                 alt="SILKMOMO"
                 width={width}
                 height={height}
-                className="object-contain"
+                className="object-contain rounded-sm"
                 priority
             />
         </div>
