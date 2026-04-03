@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev -p 13721",
     "build": "prisma generate && next build",
-    "start": "prisma migrate deploy && next start -p ${PORT:-8080}",
+    "start": "next start -p ${PORT:-8080}",
     "lint": "eslint"
   },
   "dependencies": {
@@ -16,6 +16,7 @@
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.8.0",
     "dexie": "^4.3.0",
+    "dotenv": "^17.4.0",
     "file-saver": "^2.0.5",
     "inngest": "^3.51.0",
     "jose": "^6.2.2",
