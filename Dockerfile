@@ -28,15 +28,16 @@ COPY --from=builder /app/.next/standalone ./
 # 复制 static 文件 (standalone 不自带)
 COPY --from=builder /app/.next/static ./.next/static
 
-# 复制 public 目录 (standalone 不自带，包含预设图片等静态资源)
+# 复制 public 目录 (standalone 不自带)
 COPY --from=builder /app/public ./public
 
 # 复制 Prisma 相关文件 (migrate deploy 需要)
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+COPY --from=builder /app/package.json ./package.json
+
+# 安装 prisma CLI + 运行时依赖
+RUN npm install prisma @prisma/client @prisma/adapter-pg pg dotenv --no-save
 
 EXPOSE 8080
 
