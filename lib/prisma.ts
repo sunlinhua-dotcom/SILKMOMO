@@ -1,20 +1,21 @@
 /**
- * Prisma 单例（Prisma v7 + SQLite adapter）
+ * Prisma 单例（Prisma v7 + PostgreSQL adapter）
  */
 import { PrismaClient } from '@prisma/client';
-import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3';
-import path from 'path';
-
-// 数据库文件路径
-const dbPath = process.env.DATABASE_URL?.replace('file:', '') || './data/silkmomo.db';
-const resolvedPath = path.resolve(process.cwd(), dbPath);
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
 function createPrismaClient() {
-  const adapter = new PrismaBetterSqlite3({ url: `file:${resolvedPath}` });
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL 环境变量未设置');
+  }
+  const pool = new Pool({ connectionString });
+  const adapter = new PrismaPg(pool);
   return new PrismaClient({ adapter });
 }
 
