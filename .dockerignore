@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+data
+public/aesthetic_database
+*.zip
+*.xlsx
+.env
+.env.local
