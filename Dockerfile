@@ -18,5 +18,5 @@ RUN npm run build
 # 暴露端口
 EXPOSE 8080
 
-# 启动：先迁移数据库，再启动服务
-CMD ["sh", "-c", "npx prisma migrate deploy && npm run start"]
+# 启动：映射 Zeabur PG 变量 → DATABASE_URL，然后迁移+启动
+CMD ["sh", "-c", "export DATABASE_URL=${DATABASE_URL:-${POSTGRES_URL:-${POSTGRES_URI:-$POSTGRESQL_URL}}} && echo \"DATABASE_URL=$DATABASE_URL\" && npx prisma migrate deploy && npm run start"]
