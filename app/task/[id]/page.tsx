@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
@@ -13,14 +13,15 @@ import {
   PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES,
   DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE,
 } from '@/lib/models';
-import {
-  generateProductShots, generateSceneShots,
-  getRandomWaitingMessage,
-} from '@/lib/api';
-import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw } from 'lucide-react';
+import { getRandomWaitingMessage } from '@/lib/api';
+import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw, AlertTriangle, Ban } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import Link from 'next/link';
 import type { CompressedImage } from '@/lib/image-compressor';
+
+// ═══ SSE 事件类型 ═══
+type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
+interface GenerationError { shotIndex: number; message: string; fatal: boolean; }
 
 export default function TaskDetailPage() {
   const params = useParams();
@@ -41,7 +42,15 @@ export default function TaskDetailPage() {
   const [progress, setProgress] = useState({ current: 0, total: 1, shotIndex: 0 });
   const [waitingMessage, setWaitingMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [trialDone, setTrialDone] = useState(false); // 试生成已完成
+  const [trialDone, setTrialDone] = useState(false);
+
+  // ═══ SSE 实时状态 ═══
+  const [generationPhase, setGenerationPhase] = useState<GenerationPhase>('idle');
+  const [generationErrors, setGenerationErrors] = useState<GenerationError[]>([]);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [liveImages, setLiveImages] = useState<ImageItem[]>([]); // 生成中实时追加的图片
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // --- 调整参数面板 State ---
   const [showAdjustPanel, setShowAdjustPanel] = useState(false);
@@ -87,316 +96,244 @@ export default function TaskDetailPage() {
     return () => clearInterval(interval);
   }, [loadTaskData]);
 
-  // ===== 核心：先试一张（省钱模式） =====
+  // ═══════════════════════════════════════════════
+  // 试生成：只选第 1 个镜次（传对应的 selectedShotIndexes 只含第一个）
+  // ═══════════════════════════════════════════════
   const handleTrialGeneration = async () => {
     if (!project || inputImages.products.length === 0) return;
     const moduleType = project.moduleType || 'product';
-    if (moduleType !== 'product') {
-      // 场景图只有 1 张，直接走全量生成
-      return handleStartGeneration();
-    }
+    if (moduleType !== 'product') return handleStartGeneration();
 
-    setGenerating(true);
-    setErrorMessage(null);
-
-    const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const modelRefImgs = inputImages.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const accessoryImgs = inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const bgRefImgs = inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-
-    const modelConfig = project.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
-    const bodyTypeConfig = BODY_TYPES.find(b => b.id === (project.bodyType || DEFAULT_BODY_TYPE.id));
-    const skinToneConfig = SKIN_TONES.find(s => s.id === (project.skinTone || DEFAULT_SKIN_TONE.id));
-    const selectedShotIndexes: number[] = project.selectedShots ? JSON.parse(project.selectedShots) : [1, 2, 3, 4, 9];
-    const firstShotConfig = PRODUCT_SHOTS.find(s => s.index === selectedShotIndexes[0]);
-
-    if (!firstShotConfig) {
-      setGenerating(false);
-      return;
-    }
-
-    const outputSizeConfig = PRODUCT_OUTPUT_SIZES.find(s => s.id === project.outputSize) || PRODUCT_OUTPUT_SIZES[0];
-
-    try {
-      await db.projects.update(taskId, { status: 'processing' });
-      setProject(prev => prev ? { ...prev, status: 'processing' } : null);
-      setProgress({ current: 1, total: 1, shotIndex: firstShotConfig.index });
-
-      // 只生成第 1 张
-      const results = await generateProductShots(
-        [firstShotConfig],
-        productImgs,
-        {
-          modelConfig,
-          bodyTypeConfig,
-          skinToneConfig,
-          modelRefImages: modelRefImgs.length > 0 ? modelRefImgs : undefined,
-          bgRefImages: bgRefImgs.length > 0 ? bgRefImgs : undefined,
-          accessoryImages: accessoryImgs.length > 0 ? accessoryImgs : undefined,
-          outputSize: outputSizeConfig,
-        },
-        (current, total, shotIdx) => setProgress({ current, total, shotIndex: shotIdx })
-      );
-
-      if (results[0]?.data && !results[0]?.error) {
-        const shotConfig = PRODUCT_SHOTS.find(s => s.index === results[0].shotIndex);
-        await db.images.add({
-          projectId: taskId,
-          type: 'result',
-          data: results[0].data,
-          mimeType: 'image/png',
-          shotIndex: results[0].shotIndex,
-          frameType: shotConfig?.frameType,
-          shootingAngle: shotConfig?.angle,
-          hasModel: shotConfig?.hasModel,
-          imageType: shotConfig?.frameType === 'full_body' ? 'full_body' : shotConfig?.frameType === 'upper_body' ? 'half_body' : 'close_up',
-          index: results[0].shotIndex,
-        });
-        setTrialDone(true);
-        await db.projects.update(taskId, { status: 'completed', updatedAt: new Date() });
-      } else {
-        setErrorMessage(results[0]?.error || '试生成失败');
-        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-      }
-
-      await loadTaskData();
-    } catch (error) {
-      console.error('试生成失败:', error);
-      setErrorMessage(error instanceof Error ? error.message : '未知错误');
-      await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-    } finally {
-      setGenerating(false);
-    }
+    const selectedShotIndexes: number[] = project.selectedShots
+      ? JSON.parse(project.selectedShots)
+      : [1, 2, 3, 4, 9];
+    await handleStartGeneration([selectedShotIndexes[0]]);
   };
 
-  // ===== 生成剩余（试过 1 张后追加生成） =====
+  // ═══════════════════════════════════════════════
+  // 生成剩余（排除已有镜次）
+  // ═══════════════════════════════════════════════
   const handleGenerateRemaining = async () => {
     if (!project || inputImages.products.length === 0) return;
 
+    const selectedShotIndexes: number[] = project.selectedShots
+      ? JSON.parse(project.selectedShots)
+      : [1, 2, 3, 4, 9];
+
+    const existingResults = await db.images
+      .where('projectId').equals(taskId)
+      .filter(img => img.type === 'result')
+      .toArray();
+    const existingShotIndexes = existingResults
+      .map(img => img.shotIndex)
+      .filter(Boolean) as number[];
+    const remainingIndexes = selectedShotIndexes.filter(
+      idx => !existingShotIndexes.includes(idx)
+    );
+
+    if (remainingIndexes.length === 0) return;
+    await handleStartGeneration(remainingIndexes);
+  };
+
+  // ═══════════════════════════════════════════════════════════════
+  // 核心：SSE 流式生成（全量 / 试生成 / 剩余，统一入口）
+  // overrideShotIndexes: 不传 = 用 project 里的配置；传 = 只生成指定镜次
+  // ═══════════════════════════════════════════════════════════════
+  const handleStartGeneration = async (overrideShotIndexes?: number[]) => {
+    if (!project || inputImages.products.length === 0) return;
+
+    // —— 重置状态 ——
     setGenerating(true);
     setErrorMessage(null);
+    setGenerationErrors([]);
+    setGenerationPhase('analyzing');
+    setElapsedSeconds(0);
+    setLiveImages([]);
+    setTrialDone(false);
 
-    const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const modelRefImgs = inputImages.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const accessoryImgs = inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const bgRefImgs = inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
+    // —— 计时器 ——
+    const timerStart = Date.now();
+    if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
+    elapsedTimerRef.current = setInterval(() => {
+      setElapsedSeconds(Math.round((Date.now() - timerStart) / 1000));
+    }, 1000);
 
-    const modelConfig = project.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
-    const bodyTypeConfig = BODY_TYPES.find(b => b.id === (project.bodyType || DEFAULT_BODY_TYPE.id));
-    const skinToneConfig = SKIN_TONES.find(s => s.id === (project.skinTone || DEFAULT_SKIN_TONE.id));
-    const selectedShotIndexes: number[] = project.selectedShots ? JSON.parse(project.selectedShots) : [1, 2, 3, 4, 9];
+    // —— AbortController（取消用）——
+    const ac = new AbortController();
+    abortControllerRef.current = ac;
 
-    // 排除已生成的镜次
-    const existingResults = await db.images.where('projectId').equals(taskId).filter(img => img.type === 'result').toArray();
-    const existingShotIndexes = existingResults.map(img => img.shotIndex).filter(Boolean) as number[];
-    const remainingIndexes = selectedShotIndexes.filter(idx => !existingShotIndexes.includes(idx));
-    const remainingShots = PRODUCT_SHOTS.filter(s => remainingIndexes.includes(s.index));
-
-    if (remainingShots.length === 0) {
-      setGenerating(false);
-      return;
-    }
-
-    const outputSizeConfig = PRODUCT_OUTPUT_SIZES.find(s => s.id === project.outputSize) || PRODUCT_OUTPUT_SIZES[0];
+    const moduleType = project.moduleType || 'product';
+    const selectedShotIndexes: number[] = overrideShotIndexes
+      ?? (project.selectedShots ? JSON.parse(project.selectedShots) : [1, 2, 3, 4, 9]);
 
     try {
       await db.projects.update(taskId, { status: 'processing' });
       setProject(prev => prev ? { ...prev, status: 'processing' } : null);
-      setProgress({ current: 0, total: remainingShots.length, shotIndex: 0 });
 
-      const results = await generateProductShots(
-        remainingShots,
-        productImgs,
-        {
-          modelConfig,
-          bodyTypeConfig,
-          skinToneConfig,
-          modelRefImages: modelRefImgs.length > 0 ? modelRefImgs : undefined,
-          bgRefImages: bgRefImgs.length > 0 ? bgRefImgs : undefined,
-          accessoryImages: accessoryImgs.length > 0 ? accessoryImgs : undefined,
-          outputSize: outputSizeConfig,
-        },
-        (current, total, shotIdx) => setProgress({ current, total, shotIndex: shotIdx })
-      );
+      const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
 
+      const response = await fetch('/api/generate/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ac.signal,
+        body: JSON.stringify({
+          taskId,
+          moduleType,
+          productImages: productImgs,
+          modelRefImages: inputImages.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          bgRefImages: inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          sceneRefImages: inputImages.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          accessoryImages: inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          modelId: project.modelId,
+          bodyType: project.bodyType || DEFAULT_BODY_TYPE.id,
+          skinTone: project.skinTone || DEFAULT_SKIN_TONE.id,
+          selectedShotIndexes,
+          outputSize: project.outputSize,
+          sceneOutputSize: project.sceneOutputSize,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+
+      // —— 读取 SSE 流 ——
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
       let successCount = 0;
-      for (const result of results) {
-        if (result.data && !result.error) {
-          const shotConfig = PRODUCT_SHOTS.find(s => s.index === result.shotIndex);
-          await db.images.add({
-            projectId: taskId,
-            type: 'result',
-            data: result.data,
-            mimeType: 'image/png',
-            shotIndex: result.shotIndex,
-            frameType: shotConfig?.frameType,
-            shootingAngle: shotConfig?.angle,
-            hasModel: shotConfig?.hasModel,
-            imageType: shotConfig?.frameType === 'full_body' ? 'full_body' : shotConfig?.frameType === 'upper_body' ? 'half_body' : 'close_up',
-            index: result.shotIndex,
-          });
-          successCount++;
+      let currentEventType = ''; // 必须在 while 外，跨 chunk 保持事件类型
+      console.log('[SSE] 开始读取流...');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log('[SSE] 流结束, successCount=', successCount);
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const eventType = currentEventType; // 捕获当前事件类型
+            currentEventType = ''; // 消费后重置，防止下一个 data 行误匹配
+            let payload: Record<string, unknown>;
+            try { payload = JSON.parse(line.slice(6)); } catch { continue; }
+
+            console.log(`[SSE] 事件: ${eventType}`, eventType === 'result' ? '(有图片数据)' : payload);
+
+            if (eventType === 'status') {
+              const phase = payload.phase as string;
+              setGenerationPhase(phase === 'analyzing' ? 'analyzing' : 'generating');
+              if (payload.current !== undefined) {
+                setProgress({
+                  current: (payload.current as number),
+                  total: (payload.total as number),
+                  shotIndex: (payload.shotIndex as number) ?? 0,
+                });
+              }
+
+            } else if (eventType === 'result') {
+              const shotIndex = payload.shotIndex as number;
+              const imageData = payload.imageData as string;
+              const currentN = payload.current as number;
+              const total = payload.total as number;
+              successCount++;
+              console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
+              setProgress({ current: currentN, total, shotIndex });
+
+              // 实时写入 IndexedDB + 追加到 liveImages
+              const shotConfig = PRODUCT_SHOTS.find(s => s.index === shotIndex);
+              const newImgId = await db.images.add({
+                projectId: taskId,
+                type: 'result',
+                data: imageData,
+                mimeType: 'image/png',
+                shotIndex: shotIndex > 0 ? shotIndex : undefined,
+                frameType: shotConfig?.frameType,
+                shootingAngle: shotConfig?.angle,
+                hasModel: shotConfig?.hasModel,
+                imageType: shotConfig
+                  ? (shotConfig.frameType === 'full_body' ? 'full_body'
+                    : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
+                  : 'hero',
+                index: shotIndex,
+              });
+              const newImg: ImageItem = {
+                id: newImgId as number,
+                projectId: taskId,
+                type: 'result',
+                data: imageData,
+                mimeType: 'image/png',
+                shotIndex: shotIndex > 0 ? shotIndex : undefined,
+                imageType: shotConfig
+                  ? (shotConfig.frameType === 'full_body' ? 'full_body'
+                    : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
+                  : 'hero',
+                index: shotIndex,
+              };
+              setLiveImages(prev => [...prev, newImg]);
+
+            } else if (eventType === 'error') {
+              const errPayload: GenerationError = {
+                shotIndex: payload.shotIndex as number,
+                message: payload.message as string,
+                fatal: payload.fatal as boolean,
+              };
+              console.error(`[SSE] 错误事件:`, errPayload);
+              setGenerationErrors(prev => [...prev, errPayload]);
+              if (payload.fatal) {
+                setErrorMessage(payload.message as string);
+              }
+
+            } else if (eventType === 'done') {
+              console.log(`[SSE] done 事件, successCount=${successCount}`);
+              // 最终状态写入
+              const finalStatus = successCount > 0 ? 'completed' : 'failed';
+              await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
+              setProject(prev => prev ? { ...prev, status: finalStatus } : null);
+              setGenerationPhase(successCount > 0 ? 'done' : 'error');
+              // 如果是试生成（只生成 1 张），标记 trialDone
+              if (overrideShotIndexes?.length === 1 && successCount === 1) {
+                setTrialDone(true);
+              }
+            }
+          }
         }
       }
 
-      const finalStatus = successCount > 0 ? 'completed' : 'failed';
-      await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
-      setTrialDone(false); // 已全量生成
-      await loadTaskData();
-    } catch (error) {
-      console.error('生成剩余失败:', error);
-      setErrorMessage(error instanceof Error ? error.message : '未知错误');
-      await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
+    } catch (err) {
+      console.error('[生图前端] catch 错误:', err);
+      if ((err as Error).name === 'AbortError') {
+        setGenerationPhase('cancelled');
+        setErrorMessage('已取消生成');
+        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
+        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
+      } else {
+        const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
+        console.error('[生图前端] 错误详情:', msg);
+        setErrorMessage(msg);
+        setGenerationPhase('error');
+        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
+        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
+      }
     } finally {
+      if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setGenerating(false);
+      abortControllerRef.current = null;
+      // 刷新最终图片列表
+      await loadTaskData();
     }
   };
 
-  // ===== 核心：根据 moduleType 分流生成（全量）  =====
-  const handleStartGeneration = async () => {
-    if (!project || inputImages.products.length === 0) return;
-
-    setGenerating(true);
-    setErrorMessage(null);
-
-    const moduleType = project.moduleType || 'product';
-
-    // 准备共用数据
-    const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const modelRefImgs = inputImages.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-    const accessoryImgs = inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType }));
-
-    // 解析配置
-    const modelConfig = project.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
-    const bodyTypeConfig = BODY_TYPES.find(b => b.id === (project.bodyType || DEFAULT_BODY_TYPE.id));
-    const skinToneConfig = SKIN_TONES.find(s => s.id === (project.skinTone || DEFAULT_SKIN_TONE.id));
-
-    try {
-      await db.projects.update(taskId, { status: 'processing' });
-      setProject(prev => prev ? { ...prev, status: 'processing' } : null);
-
-      if (moduleType === 'product') {
-        // ─── 产品图模块 ───
-        const selectedShotIndexes: number[] = project.selectedShots
-          ? JSON.parse(project.selectedShots)
-          : [1, 2, 3, 4, 9]; // fallback
-        const selectedShotConfigs = PRODUCT_SHOTS.filter(s => selectedShotIndexes.includes(s.index));
-        const bgRefImgs = inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-
-        // 解析输出尺寸
-        const outputSizeConfig = PRODUCT_OUTPUT_SIZES.find(s => s.id === project.outputSize)
-          || PRODUCT_OUTPUT_SIZES[0];
-
-        setProgress({ current: 0, total: selectedShotConfigs.length, shotIndex: 0 });
-
-        const results = await generateProductShots(
-          selectedShotConfigs,
-          productImgs,
-          {
-            modelConfig,
-            bodyTypeConfig,
-            skinToneConfig,
-            modelRefImages: modelRefImgs.length > 0 ? modelRefImgs : undefined,
-            bgRefImages: bgRefImgs.length > 0 ? bgRefImgs : undefined,
-            accessoryImages: accessoryImgs.length > 0 ? accessoryImgs : undefined,
-            outputSize: outputSizeConfig,
-          },
-          (current, total, shotIdx) => setProgress({ current, total, shotIndex: shotIdx })
-        );
-
-        let successCount = 0;
-        for (const result of results) {
-          if (result.data && !result.error) {
-            const shotConfig = PRODUCT_SHOTS.find(s => s.index === result.shotIndex);
-            await db.images.add({
-              projectId: taskId,
-              type: 'result',
-              data: result.data,
-              mimeType: 'image/png',
-              shotIndex: result.shotIndex,
-              frameType: shotConfig?.frameType,
-              shootingAngle: shotConfig?.angle,
-              hasModel: shotConfig?.hasModel,
-              imageType: shotConfig?.frameType === 'full_body' ? 'full_body'
-                : shotConfig?.frameType === 'upper_body' ? 'half_body'
-                : 'close_up',
-              index: result.shotIndex,
-            });
-            successCount++;
-          }
-        }
-
-        const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        if (successCount === 0 && results.length > 0 && results[0].error) {
-          setErrorMessage(results[0].error);
-        }
-        await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
-
-      } else {
-        // ─── 场景图模块 ───
-        const sceneRefImgs = inputImages.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType }));
-
-        if (sceneRefImgs.length === 0) {
-          setErrorMessage('场景图模块需要上传场景参考图');
-          await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-          setGenerating(false);
-          return;
-        }
-
-        const outputSizeConfig = SCENE_OUTPUT_SIZES.find(s => s.id === project.sceneOutputSize)
-          || SCENE_OUTPUT_SIZES[0];
-
-        setProgress({ current: 0, total: 1, shotIndex: 0 });
-
-        const results = await generateSceneShots(
-          1,
-          productImgs,
-          sceneRefImgs,
-          {
-            modelConfig,
-            bodyTypeConfig,
-            skinToneConfig,
-            modelRefImages: modelRefImgs.length > 0 ? modelRefImgs : undefined,
-            accessoryImages: accessoryImgs.length > 0 ? accessoryImgs : undefined,
-            outputSize: outputSizeConfig,
-            hasModel: true, // 可扩展：从 project 中读取
-          },
-          (current, total) => setProgress({ current, total, shotIndex: 0 })
-        );
-
-        let successCount = 0;
-        for (const result of results) {
-          if (result.data && !result.error) {
-            await db.images.add({
-              projectId: taskId,
-              type: 'result',
-              data: result.data,
-              mimeType: 'image/png',
-              imageType: 'hero',
-              index: result.index,
-            });
-            successCount++;
-          }
-        }
-
-        const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        if (successCount === 0 && results.length > 0 && results[0].error) {
-          setErrorMessage(results[0].error);
-        }
-        await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
-      }
-
-      await loadTaskData();
-
-    } catch (error) {
-      console.error('生成失败:', error);
-      const errorMsg = error instanceof Error ? error.message : '未知错误';
-      setErrorMessage(errorMsg);
-      await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-      setProject(prev => prev ? { ...prev, status: 'failed' } : null);
-    } finally {
-      setGenerating(false);
-    }
+  // ─── 取消生成 ───
+  const cancelGeneration = () => {
+    abortControllerRef.current?.abort();
   };
 
   // --- 调整参数并重新生成 ---
@@ -658,30 +595,107 @@ export default function TaskDetailPage() {
       )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        {/* 生成中状态 */}
+        {/* ═══ 生成中状态（SSE 实时） ═══ */}
         {generating && (
-          <div className="mb-12 text-center py-16 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
-            <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center shadow-lg">
-              <Wand2 className="w-10 h-10 text-white animate-pulse" strokeWidth={1.5} />
-            </div>
-            <h2 className="text-2xl font-semibold mb-3">
-              {moduleType === 'product' ? '正在生成产品图组' : '正在生成场景图'}
-            </h2>
-            <p className="text-[var(--color-text-secondary)] mb-8 max-w-md mx-auto">{waitingMessage}</p>
-            <div className="max-w-sm mx-auto">
-              <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-[var(--color-accent)] to-[var(--color-accent-light)] transition-all duration-500 rounded-full"
-                  style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                />
+          <div className="mb-8">
+            {/* 主进度卡 */}
+            <div className="mb-4 text-center py-10 px-6 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center shadow-lg">
+                {generationPhase === 'analyzing'
+                  ? <Loader className="w-8 h-8 text-white animate-spin" strokeWidth={1.5} />
+                  : <Wand2 className="w-8 h-8 text-white animate-pulse" strokeWidth={1.5} />
+                }
               </div>
-              <p className="text-sm text-[var(--color-text-muted)] mt-3">
-                {moduleType === 'product'
-                  ? `正在生成第 ${progress.current} 张，共 ${progress.total} 张（镜次 #${progress.shotIndex}）`
-                  : `正在生成场景图...`
+
+              {/* 阶段标题 */}
+              <h2 className="text-xl font-semibold mb-1">
+                {generationPhase === 'analyzing' ? '正在分析服装特征...' :
+                  moduleType === 'product'
+                    ? `正在生成第 ${progress.current} 张 / 共 ${progress.total} 张`
+                    : '正在生成场景图...'
+                }
+              </h2>
+
+              {/* 副标题文案 */}
+              <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                {generationPhase === 'analyzing'
+                  ? '这将帮助 AI 更精准地还原面料细节'
+                  : waitingMessage
                 }
               </p>
+
+              {/* 进度条 */}
+              <div className="max-w-sm mx-auto">
+                <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-[var(--color-accent)] to-[var(--color-accent-light)] transition-all duration-700 rounded-full"
+                    style={{
+                      width: generationPhase === 'analyzing'
+                        ? '8%'
+                        : `${Math.max(8, (progress.current / Math.max(progress.total, 1)) * 100)}%`
+                    }}
+                  />
+                </div>
+                <div className="flex justify-between items-center mt-2">
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    {generationPhase === 'analyzing' ? '服装分析中' :
+                      moduleType === 'product'
+                        ? `镜次 #${progress.shotIndex}`
+                        : '场景图'
+                    }
+                  </p>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    已耗时 {elapsedSeconds}s
+                    {elapsedSeconds > 90 && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
+                  </p>
+                </div>
+              </div>
+
+              {/* 取消按钮 */}
+              <button
+                onClick={cancelGeneration}
+                className="mt-6 flex items-center gap-1.5 mx-auto text-xs text-[var(--color-text-muted)] hover:text-red-500 transition-colors"
+              >
+                <Ban className="w-3.5 h-3.5" />
+                取消生成
+              </button>
             </div>
+
+            {/* 实时已生成图片追加区 */}
+            {liveImages.length > 0 && (
+              <div className="mb-4">
+                <h3 className="text-xs font-medium text-[var(--color-text-muted)] mb-3 flex items-center gap-1.5">
+                  <CheckCircle className="w-3.5 h-3.5 text-green-500" />
+                  已完成 {liveImages.length} 张（生成中实时追加）
+                </h3>
+                <ResultGallery
+                  images={liveImages.map(img => ({
+                    id: img.id!,
+                    type: img.imageType || 'close_up',
+                    imageType: img.imageType || 'close_up',
+                    data: img.data,
+                    prompt: img.prompt,
+                    index: img.index
+                  }))}
+                  onRegenerate={() => {}}
+                />
+              </div>
+            )}
+
+            {/* 错误汇总（非 fatal，继续生成中的部分失败） */}
+            {generationErrors.filter(e => !e.fatal).length > 0 && (
+              <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-500" />
+                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（生成继续）</p>
+                </div>
+                {generationErrors.filter(e => !e.fatal).map((e, i) => (
+                  <p key={i} className="text-xs text-amber-600 font-mono mt-1">
+                    镜次 #{e.shotIndex}: {e.message}
+                  </p>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -803,7 +817,7 @@ export default function TaskDetailPage() {
                 </button>
                 {/* 全量生成 */}
                 <button
-                  onClick={handleStartGeneration}
+                  onClick={() => handleStartGeneration()}
                   className="flex items-center gap-2 px-6 py-3 text-sm font-medium border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
                 >
                   {getGenerateLabel()}
@@ -811,7 +825,7 @@ export default function TaskDetailPage() {
               </div>
             ) : (
               <button
-                onClick={handleStartGeneration}
+                onClick={() => handleStartGeneration()}
                 className="btn-primary"
               >
                 <Wand2 className="w-5 h-5" strokeWidth={1.5} />
@@ -879,23 +893,44 @@ export default function TaskDetailPage() {
 
         {/* 失败状态 */}
         {project.status === 'failed' && images.length === 0 && (
-          <div className="text-center py-20 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
-            <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-red-50 flex items-center justify-center">
-              <XCircle className="w-10 h-10 text-red-400" />
+          <div className="text-center py-16 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-50 flex items-center justify-center">
+              <XCircle className="w-8 h-8 text-red-400" />
             </div>
             <h2 className="text-xl font-semibold mb-2">生成失败</h2>
-            <p className="text-[var(--color-text-secondary)] mb-4 text-sm max-w-md mx-auto">
-              请检查网络连接或稍后重试
-            </p>
-            {errorMessage && (
-              <div className="max-w-md mx-auto mb-8 p-4 bg-[var(--color-background)] rounded-xl">
-                <p className="text-xs text-[var(--color-text-muted)] font-mono break-all">
-                  {errorMessage}
-                </p>
+
+            {/* 优先展示具体错误信息 */}
+            {errorMessage ? (
+              <div className="max-w-lg mx-auto mb-6">
+                <div className="p-4 bg-red-50 rounded-2xl border border-red-100">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                    <p className="text-sm text-red-700 text-left break-all">{errorMessage}</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-[var(--color-text-secondary)] mb-4 text-sm max-w-md mx-auto">
+                请检查网络连接或稍后重试
+              </p>
+            )}
+
+            {/* SSE 过程中的详细错误列表 */}
+            {generationErrors.length > 0 && (
+              <div className="max-w-lg mx-auto mb-6">
+                <div className="p-4 bg-[var(--color-background)] rounded-2xl text-left">
+                  <p className="text-xs font-medium text-[var(--color-text-muted)] mb-2">错误详情</p>
+                  {generationErrors.map((e, i) => (
+                    <p key={i} className="text-xs text-red-600 font-mono mt-1">
+                      {e.shotIndex >= 0 ? `镜次 #${e.shotIndex}: ` : ''}{e.message}
+                    </p>
+                  ))}
+                </div>
               </div>
             )}
+
             <button
-              onClick={handleStartGeneration}
+              onClick={() => handleStartGeneration()}
               className="btn-primary"
             >
               重试
