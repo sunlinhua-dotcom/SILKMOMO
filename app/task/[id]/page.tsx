@@ -12,10 +12,12 @@ import {
   MODELS, BODY_TYPES, SKIN_TONES,
   PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES,
   DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE,
+  ETHNICITY_LABELS, SKU_LABELS,
 } from '@/lib/models';
 import { getRandomWaitingMessage } from '@/lib/api';
 import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw, AlertTriangle, Ban } from 'lucide-react';
 import { Logo } from '@/components/Logo';
+import { ImageLightbox } from '@/components/ImageLightbox';
 import Link from 'next/link';
 import type { CompressedImage } from '@/lib/image-compressor';
 
@@ -402,29 +404,17 @@ export default function TaskDetailPage() {
     console.log('重新生成图片:', imageId);
   };
 
-  // 获取当前模特名称
-  const currentModelName = project?.modelId ? MODELS.find(m => m.id === project.modelId)?.name : '未选择预设模特';
+  const currentModel = project?.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
+  const currentModelName = currentModel?.name ?? '未选择预设模特';
   const currentBodyTypeName = BODY_TYPES.find(b => b.id === project?.bodyType)?.name || DEFAULT_BODY_TYPE.name;
   const currentSkinToneName = SKIN_TONES.find(s => s.id === project?.skinTone)?.name || DEFAULT_SKIN_TONE.name;
+  const currentEthnicityLabel = currentModel ? ETHNICITY_LABELS[currentModel.ethnicity] : null;
+  const currentSkuLabel = project?.skuType ? SKU_LABELS[project.skuType] : null;
 
-  // ───── 参数中文化（用于完整参数概览展示） ─────
-  const currentEthnicityLabel = (() => {
-    if (!project?.modelId) return null;
-    const eth = MODELS.find(m => m.id === project.modelId)?.ethnicity;
-    if (eth === 'Caucasian') return '欧美人';
-    if (eth === 'East Asian') return '亚洲人';
-    if (eth === 'Black') return '黑人';
-    return null;
+  const currentShotCount = (() => {
+    if (!project?.selectedShots) return null;
+    try { return JSON.parse(project.selectedShots).length as number; } catch { return null; }
   })();
-
-  const currentShotCount = project?.selectedShots
-    ? (() => { try { return JSON.parse(project.selectedShots).length; } catch { return null; } })()
-    : null;
-
-  const currentSkuLabel = project?.skuType === 'outfit' ? '套装'
-    : project?.skuType === 'top' ? '上装'
-    : project?.skuType === 'bottom' ? '下装'
-    : null;
 
   const currentOutputSizeLabel = (() => {
     if (!project) return null;
@@ -475,6 +465,58 @@ export default function TaskDetailPage() {
   }
 
   const moduleType = project.moduleType || 'product';
+
+  // 已生成图片数追上目标数 = 等待 SSE done 事件收尾的窗口期
+  const isFinishingUp = liveImages.length >= progress.total && progress.total > 0;
+
+  const phaseTitle = (() => {
+    if (generationPhase === 'analyzing') return '正在分析服装特征...';
+    if (isFinishingUp) return '图片处理中，即将完成...';
+    if (moduleType === 'product') return `已生成 ${liveImages.length} / ${progress.total} 张`;
+    return '正在生成场景图...';
+  })();
+
+  const phaseSubLabel = (() => {
+    if (generationPhase === 'analyzing') return '服装分析中';
+    if (isFinishingUp) return '收尾中';
+    if (moduleType === 'product') return `正在生成镜次 #${progress.shotIndex}`;
+    return '场景图';
+  })();
+
+  const progressBarWidth = generationPhase === 'analyzing'
+    ? '8%'
+    : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`;
+
+  const paramChips = (
+    <div className="flex flex-wrap gap-2">
+      {project.modelId && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
+        </span>
+      )}
+      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+        体型: {currentBodyTypeName}
+      </span>
+      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+        肤色: {currentSkinToneName}
+      </span>
+      {moduleType === 'product' && currentSkuLabel && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          SKU: {currentSkuLabel}
+        </span>
+      )}
+      {moduleType === 'product' && currentShotCount !== null && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          镜次: {currentShotCount} 张
+        </span>
+      )}
+      {currentOutputSizeLabel && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          尺寸: {currentOutputSizeLabel}
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
@@ -640,18 +682,8 @@ export default function TaskDetailPage() {
                 }
               </div>
 
-              {/* 阶段标题 — 用 liveImages.length 驱动，避免 status/result 事件错位 */}
-              <h2 className="text-xl font-semibold mb-1">
-                {generationPhase === 'analyzing' ? '正在分析服装特征...' :
-                  liveImages.length >= progress.total && progress.total > 0
-                    ? '图片处理中，即将完成...'
-                    : moduleType === 'product'
-                      ? `已生成 ${liveImages.length} / ${progress.total} 张`
-                      : '正在生成场景图...'
-                }
-              </h2>
+              <h2 className="text-xl font-semibold mb-1">{phaseTitle}</h2>
 
-              {/* 副标题文案 */}
               <p className="text-sm text-[var(--color-text-secondary)] mb-6">
                 {generationPhase === 'analyzing'
                   ? '这将帮助 AI 更精准地还原面料细节'
@@ -659,28 +691,15 @@ export default function TaskDetailPage() {
                 }
               </p>
 
-              {/* 进度条 — 按真实已完成图片数计算 */}
               <div className="max-w-sm mx-auto">
                 <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-[var(--color-accent)] to-[var(--color-accent-light)] transition-all duration-700 rounded-full"
-                    style={{
-                      width: generationPhase === 'analyzing'
-                        ? '8%'
-                        : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`
-                    }}
+                    style={{ width: progressBarWidth }}
                   />
                 </div>
                 <div className="flex justify-between items-center mt-2">
-                  <p className="text-xs text-[var(--color-text-muted)]">
-                    {generationPhase === 'analyzing' ? '服装分析中' :
-                      liveImages.length >= progress.total && progress.total > 0
-                        ? '收尾中'
-                        : moduleType === 'product'
-                          ? `正在生成镜次 #${progress.shotIndex}`
-                          : '场景图'
-                    }
-                  </p>
+                  <p className="text-xs text-[var(--color-text-muted)]">{phaseSubLabel}</p>
                   <p className="text-xs text-[var(--color-text-muted)]">
                     已耗时 {elapsedSeconds}s
                     {elapsedSeconds > 90 && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
@@ -830,35 +849,7 @@ export default function TaskDetailPage() {
             ))}
           </div>
 
-          {/* 参数概览 — 完整记录所有用户选择 */}
-          <div className="mt-4 flex flex-wrap gap-2">
-            {project.modelId && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
-              </span>
-            )}
-            <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-              体型: {currentBodyTypeName}
-            </span>
-            <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-              肤色: {currentSkinToneName}
-            </span>
-            {moduleType === 'product' && currentSkuLabel && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                SKU: {currentSkuLabel}
-              </span>
-            )}
-            {moduleType === 'product' && currentShotCount !== null && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                镜次: {currentShotCount} 张
-              </span>
-            )}
-            {currentOutputSizeLabel && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                尺寸: {currentOutputSizeLabel}
-              </span>
-            )}
-          </div>
+          <div className="mt-4">{paramChips}</div>
         </div>
 
         {/* 开始生成按钮 */}
@@ -950,35 +941,7 @@ export default function TaskDetailPage() {
               生成结果 · {images.length} 张
             </h2>
 
-            {/* 参数记录 — 让用户回看是用什么参数生成的 */}
-            <div className="mb-6 flex flex-wrap gap-2">
-              {project.modelId && (
-                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                  模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
-                </span>
-              )}
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                体型: {currentBodyTypeName}
-              </span>
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                肤色: {currentSkinToneName}
-              </span>
-              {moduleType === 'product' && currentSkuLabel && (
-                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                  SKU: {currentSkuLabel}
-                </span>
-              )}
-              {moduleType === 'product' && currentShotCount !== null && (
-                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                  镜次: {currentShotCount} 张
-                </span>
-              )}
-              {currentOutputSizeLabel && (
-                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                  尺寸: {currentOutputSizeLabel}
-                </span>
-              )}
-            </div>
+            <div className="mb-6">{paramChips}</div>
 
             <ResultGallery
               images={images.map(img => ({
@@ -994,30 +957,18 @@ export default function TaskDetailPage() {
           </div>
         )}
 
-        {/* 输入图片放大预览 Lightbox */}
         {previewImage && (
-          <div
-            className="fixed inset-0 bg-black/95 flex items-center justify-center z-[110] p-4 animate-fade-in"
-            onClick={() => setPreviewImage(null)}
-          >
-            <div className="relative max-w-5xl max-h-[90vh] w-full" onClick={(e) => e.stopPropagation()}>
-              <button
-                onClick={() => setPreviewImage(null)}
-                className="absolute -top-14 right-0 w-11 h-11 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
-                aria-label="关闭"
-              >
-                <X className="w-6 h-6" />
-              </button>
-              <img
-                src={previewImage.src}
-                alt={previewImage.label}
-                className="w-full h-auto max-h-[85vh] object-contain rounded-2xl shadow-2xl"
-              />
-              <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 px-4 py-1.5 bg-white/10 backdrop-blur-md text-white text-sm rounded-full">
+          <ImageLightbox
+            src={previewImage.src}
+            alt={previewImage.label}
+            onClose={() => setPreviewImage(null)}
+            zIndex={110}
+            footer={
+              <div className="px-4 py-1.5 bg-white/10 backdrop-blur-md text-white text-sm rounded-full whitespace-nowrap">
                 {previewImage.label}
               </div>
-            </div>
-          </div>
+            }
+          />
         )}
 
         {/* 失败状态 */}
