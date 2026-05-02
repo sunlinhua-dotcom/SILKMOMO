@@ -3,13 +3,29 @@
  * Phase 2: 支持体型三选（纤细/标准/饱满）+ 肤色三选（浅/中/深）
  */
 
+import type { SkuType } from './db';
+
 // ===== 预设模特（保留快捷选项）=====
+export type Ethnicity = 'Caucasian' | 'East Asian' | 'Black';
+
+export const ETHNICITY_LABELS: Record<Ethnicity, string> = {
+  'Caucasian': '欧美人',
+  'East Asian': '亚洲人',
+  'Black': '黑人',
+};
+
+export const SKU_LABELS: Record<SkuType, string> = {
+  outfit: '套装',
+  top: '上装',
+  bottom: '下装',
+};
+
 export interface ModelConfig {
   id: string;
   name: string;
   description: string;
   gender: 'female' | 'male';
-  ethnicity: string;              // 民族/肤色描述
+  ethnicity: Ethnicity;
   prompt: string;
 }
 
