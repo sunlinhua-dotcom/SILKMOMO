@@ -124,16 +124,19 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
               {IMAGE_LABELS[type]}
             </h3>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {typeImages.map((image) => (
+              {typeImages.map((image) => {
+                // 全身照/半身照默认 3:4 竖图，object-cover 会切掉头/脚；用 contain 保留完整内容
+                const isPortrait = image.imageType === 'full_body' || image.imageType === 'half_body';
+                return (
                 <div
                   key={image.id}
-                  className="group relative aspect-square rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift"
+                  className={`group relative ${isPortrait ? 'aspect-[3/4]' : 'aspect-square'} rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift`}
                   onClick={() => setSelectedImage(image)}
                 >
                   <img
                     src={`data:image/png;base64,${image.data}`}
                     alt={IMAGE_LABELS[image.imageType]}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                   />
 
                   {/* 悬浮操作栏 */}
@@ -174,7 +177,8 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                     </span>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         );

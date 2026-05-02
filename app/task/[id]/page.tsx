@@ -566,7 +566,7 @@ export default function TaskDetailPage() {
               {project.status === 'processing' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-accent)]/10 rounded-full text-[var(--color-accent)]">
                   <Loader className="w-3.5 h-3.5 animate-spin" />
-                  {progress.current}/{progress.total}
+                  {liveImages.length}/{progress.total}
                 </span>
               )}
               {project.status === 'completed' && (
