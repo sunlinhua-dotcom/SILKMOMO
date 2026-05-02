@@ -59,6 +59,9 @@ export default function TaskDetailPage() {
   const [newSkinTone, setNewSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
   const [newStyleImages, setNewStyleImages] = useState<CompressedImage[]>([]);
 
+  // --- 输入图片放大预览 ---
+  const [previewImage, setPreviewImage] = useState<{ src: string; label: string } | null>(null);
+
   const loadTaskData = useCallback(async () => {
     try {
       const task = await db.projects.get(taskId);
@@ -404,6 +407,36 @@ export default function TaskDetailPage() {
   const currentBodyTypeName = BODY_TYPES.find(b => b.id === project?.bodyType)?.name || DEFAULT_BODY_TYPE.name;
   const currentSkinToneName = SKIN_TONES.find(s => s.id === project?.skinTone)?.name || DEFAULT_SKIN_TONE.name;
 
+  // ───── 参数中文化（用于完整参数概览展示） ─────
+  const currentEthnicityLabel = (() => {
+    if (!project?.modelId) return null;
+    const eth = MODELS.find(m => m.id === project.modelId)?.ethnicity;
+    if (eth === 'Caucasian') return '欧美人';
+    if (eth === 'East Asian') return '亚洲人';
+    if (eth === 'Black') return '黑人';
+    return null;
+  })();
+
+  const currentShotCount = project?.selectedShots
+    ? (() => { try { return JSON.parse(project.selectedShots).length; } catch { return null; } })()
+    : null;
+
+  const currentSkuLabel = project?.skuType === 'outfit' ? '套装'
+    : project?.skuType === 'top' ? '上装'
+    : project?.skuType === 'bottom' ? '下装'
+    : null;
+
+  const currentOutputSizeLabel = (() => {
+    if (!project) return null;
+    const moduleT = project.moduleType || 'product';
+    const sizeId = moduleT === 'scene' ? project.sceneOutputSize : project.outputSize;
+    if (!sizeId) return null;
+    const sizes = moduleT === 'scene' ? SCENE_OUTPUT_SIZES : PRODUCT_OUTPUT_SIZES;
+    const size = sizes.find(s => s.id === sizeId);
+    if (!size) return null;
+    return size.id === 'custom' ? `自定义 (${size.aspectRatio})` : `${size.label} ${size.aspectRatio}`;
+  })();
+
   // 生成按钮文案
   const getGenerateLabel = () => {
     if (!project) return '生成';
@@ -607,12 +640,14 @@ export default function TaskDetailPage() {
                 }
               </div>
 
-              {/* 阶段标题 */}
+              {/* 阶段标题 — 用 liveImages.length 驱动，避免 status/result 事件错位 */}
               <h2 className="text-xl font-semibold mb-1">
                 {generationPhase === 'analyzing' ? '正在分析服装特征...' :
-                  moduleType === 'product'
-                    ? `正在生成第 ${progress.current} 张 / 共 ${progress.total} 张`
-                    : '正在生成场景图...'
+                  liveImages.length >= progress.total && progress.total > 0
+                    ? '图片处理中，即将完成...'
+                    : moduleType === 'product'
+                      ? `已生成 ${liveImages.length} / ${progress.total} 张`
+                      : '正在生成场景图...'
                 }
               </h2>
 
@@ -624,7 +659,7 @@ export default function TaskDetailPage() {
                 }
               </p>
 
-              {/* 进度条 */}
+              {/* 进度条 — 按真实已完成图片数计算 */}
               <div className="max-w-sm mx-auto">
                 <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
                   <div
@@ -632,16 +667,18 @@ export default function TaskDetailPage() {
                     style={{
                       width: generationPhase === 'analyzing'
                         ? '8%'
-                        : `${Math.max(8, (progress.current / Math.max(progress.total, 1)) * 100)}%`
+                        : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`
                     }}
                   />
                 </div>
                 <div className="flex justify-between items-center mt-2">
                   <p className="text-xs text-[var(--color-text-muted)]">
                     {generationPhase === 'analyzing' ? '服装分析中' :
-                      moduleType === 'product'
-                        ? `镜次 #${progress.shotIndex}`
-                        : '场景图'
+                      liveImages.length >= progress.total && progress.total > 0
+                        ? '收尾中'
+                        : moduleType === 'product'
+                          ? `正在生成镜次 #${progress.shotIndex}`
+                          : '场景图'
                     }
                   </p>
                   <p className="text-xs text-[var(--color-text-muted)]">
@@ -708,82 +745,117 @@ export default function TaskDetailPage() {
           <div className="flex gap-3 overflow-x-auto pb-2">
             {inputImages.products.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border-2 border-[var(--color-accent)] shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '产品' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border-2 border-[var(--color-accent)] shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="产品"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">产品</p>
               </div>
             ))}
             {inputImages.modelRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-purple-300 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '模特参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-purple-300 shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="模特参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">模特参考</p>
               </div>
             ))}
             {inputImages.bgRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-[var(--color-border)] opacity-80">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '背景参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-[var(--color-border)] opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="背景参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">背景</p>
               </div>
             ))}
             {inputImages.sceneRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-green-300 opacity-80">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '场景参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-green-300 opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="场景参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">场景</p>
               </div>
             ))}
             {inputImages.accessories.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-dashed border-[var(--color-border)] opacity-60">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '配件' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-dashed border-[var(--color-border)] opacity-60 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="配件"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">配件</p>
               </div>
             ))}
           </div>
 
-          {/* 参数概览 */}
+          {/* 参数概览 — 完整记录所有用户选择 */}
           <div className="mt-4 flex flex-wrap gap-2">
+            {project.modelId && (
+              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
+              </span>
+            )}
             <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
               体型: {currentBodyTypeName}
             </span>
             <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
               肤色: {currentSkinToneName}
             </span>
-            {project.modelId && (
+            {moduleType === 'product' && currentSkuLabel && (
               <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                模特: {currentModelName}
+                SKU: {currentSkuLabel}
               </span>
             )}
-            {moduleType === 'product' && project.skuType && (
+            {moduleType === 'product' && currentShotCount !== null && (
               <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                SKU: {project.skuType === 'outfit' ? '套装' : project.skuType === 'top' ? '上装' : '下装'}
+                镜次: {currentShotCount} 张
+              </span>
+            )}
+            {currentOutputSizeLabel && (
+              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                尺寸: {currentOutputSizeLabel}
               </span>
             )}
           </div>
@@ -873,10 +945,41 @@ export default function TaskDetailPage() {
         {/* 结果展示 */}
         {images.length > 0 && (
           <div>
-            <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-6 flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-3 flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
               生成结果 · {images.length} 张
             </h2>
+
+            {/* 参数记录 — 让用户回看是用什么参数生成的 */}
+            <div className="mb-6 flex flex-wrap gap-2">
+              {project.modelId && (
+                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                  模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
+                </span>
+              )}
+              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                体型: {currentBodyTypeName}
+              </span>
+              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                肤色: {currentSkinToneName}
+              </span>
+              {moduleType === 'product' && currentSkuLabel && (
+                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                  SKU: {currentSkuLabel}
+                </span>
+              )}
+              {moduleType === 'product' && currentShotCount !== null && (
+                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                  镜次: {currentShotCount} 张
+                </span>
+              )}
+              {currentOutputSizeLabel && (
+                <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+                  尺寸: {currentOutputSizeLabel}
+                </span>
+              )}
+            </div>
+
             <ResultGallery
               images={images.map(img => ({
                 id: img.id!,
@@ -888,6 +991,32 @@ export default function TaskDetailPage() {
               }))}
               onRegenerate={handleRegenerate}
             />
+          </div>
+        )}
+
+        {/* 输入图片放大预览 Lightbox */}
+        {previewImage && (
+          <div
+            className="fixed inset-0 bg-black/95 flex items-center justify-center z-[110] p-4 animate-fade-in"
+            onClick={() => setPreviewImage(null)}
+          >
+            <div className="relative max-w-5xl max-h-[90vh] w-full" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => setPreviewImage(null)}
+                className="absolute -top-14 right-0 w-11 h-11 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+                aria-label="关闭"
+              >
+                <X className="w-6 h-6" />
+              </button>
+              <img
+                src={previewImage.src}
+                alt={previewImage.label}
+                className="w-full h-auto max-h-[85vh] object-contain rounded-2xl shadow-2xl"
+              />
+              <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 px-4 py-1.5 bg-white/10 backdrop-blur-md text-white text-sm rounded-full">
+                {previewImage.label}
+              </div>
+            </div>
           </div>
         )}
 
