@@ -5,10 +5,9 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { hash, compare } from 'bcryptjs';
 import { cookies } from 'next/headers';
+import { getJwtSecret } from './jwt-secret';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'silkmomo-fallback-secret'
-);
+const JWT_SECRET = getJwtSecret();
 const TOKEN_NAME = 'silkmomo_token';
 const TOKEN_EXPIRES = '7d'; // 7 天
 
