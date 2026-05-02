@@ -13,16 +13,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '请输入用户名和密码' }, { status: 400 });
     }
 
-    // 查找用户
+    // 用户名+密码统一返回相同错误，防止枚举注册用户
     const user = await prisma.user.findUnique({ where: { username } });
-    if (!user) {
-      return NextResponse.json({ error: '用户未注册' }, { status: 401 });
-    }
-
-    // 验证密码
-    const valid = await verifyPassword(password, user.passwordHash);
-    if (!valid) {
-      return NextResponse.json({ error: '密码错误' }, { status: 401 });
+    const valid = user ? await verifyPassword(password, user.passwordHash) : false;
+    if (!user || !valid) {
+      return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
     }
 
     // 签发 JWT

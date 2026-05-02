@@ -26,6 +26,17 @@ export function UserNav() {
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
+    // 清空本地缓存（IndexedDB + localStorage），防止下个用户登录时看到上个用户数据
+    try {
+      const { db } = await import('@/lib/db');
+      await db.delete();
+    } catch (e) {
+      console.warn('清空 IndexedDB 失败:', e);
+    }
+    try {
+      window.localStorage.removeItem('silkmomo_image_library');
+      window.localStorage.removeItem('silkmomo_time_machine');
+    } catch {}
     router.push('/login');
     router.refresh();
   };

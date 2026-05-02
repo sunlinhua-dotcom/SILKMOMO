@@ -11,9 +11,11 @@
 
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { checkBalance, deductBalance } from '@/lib/billing';
+import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
 import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
+
+const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
@@ -263,6 +265,7 @@ export async function POST(req: NextRequest) {
   }
 
   const {
+    taskId,
     moduleType,
     productImages,
     modelRefImages,
@@ -279,6 +282,15 @@ export async function POST(req: NextRequest) {
 
   if (!productImages || productImages.length === 0) {
     return new Response(JSON.stringify({ error: '产品图不能为空' }), { status: 400 });
+  }
+
+  if (moduleType === 'product' && selectedShotIndexes) {
+    const valid = Array.isArray(selectedShotIndexes)
+      && selectedShotIndexes.length > 0
+      && selectedShotIndexes.every(i => Number.isInteger(i) && VALID_SHOT_INDEXES.has(i));
+    if (!valid) {
+      return new Response(JSON.stringify({ error: '镜次参数非法' }), { status: 400 });
+    }
   }
 
   // ═══ SSE 流式响应 ═══
@@ -350,7 +362,7 @@ export async function POST(req: NextRequest) {
               break;
             }
 
-            const deduction = await deductBalance(auth.userId, `生成镜次 #${shot.index}`);
+            const deduction = await deductBalance(auth.userId, `生成镜次 #${shot.index}`, taskId);
             if (!deduction.success) {
               push('error', {
                 shotIndex: shot.index,
@@ -399,11 +411,17 @@ export async function POST(req: NextRequest) {
               });
             } else {
               failedCount++;
+              await refundBalance(
+                auth.userId,
+                PRICING.pricePerCallFen,
+                `生成镜次 #${shot.index} 失败退款`,
+                taskId,
+              );
               push('error', {
                 shotIndex: shot.index,
                 current: i + 1,
                 total,
-                message: result.error ?? '生成失败（未知原因）',
+                message: `${result.error ?? '生成失败（未知原因）'}（已自动退款）`,
                 fatal: false,
               });
               // 首张就失败，终止整个批次
@@ -455,7 +473,19 @@ export async function POST(req: NextRequest) {
             return;
           }
 
-          await deductBalance(auth.userId, '场景图生成');
+          const sceneDeduction = await deductBalance(auth.userId, '场景图生成', taskId);
+          if (!sceneDeduction.success) {
+            push('error', {
+              shotIndex: 0,
+              current: 1,
+              total: 1,
+              message: `扣费失败: ${sceneDeduction.error || '未知错误'}`,
+              fatal: true,
+            });
+            push('done', { successCount: 0, failedCount: 1, totalSeconds: 0 });
+            controller.close();
+            return;
+          }
 
           // AI 服装分析
           let garmentDescription: string | undefined;
@@ -497,11 +527,17 @@ export async function POST(req: NextRequest) {
             push('result', { shotIndex: 0, imageData: result.data, current: 1, total: 1 });
           } else {
             failedCount = 1;
+            await refundBalance(
+              auth.userId,
+              PRICING.pricePerCallFen,
+              '场景图生成失败退款',
+              taskId,
+            );
             push('error', {
               shotIndex: 0,
               current: 1,
               total: 1,
-              message: result.error ?? '生成失败',
+              message: `${result.error ?? '生成失败'}（已自动退款）`,
               fatal: true,
             });
           }

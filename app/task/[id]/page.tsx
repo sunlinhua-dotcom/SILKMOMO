@@ -101,29 +101,42 @@ export default function TaskDetailPage() {
     return () => clearInterval(interval);
   }, [loadTaskData]);
 
-  // ═══════════════════════════════════════════════
-  // 试生成：只选第 1 个镜次（传对应的 selectedShotIndexes 只含第一个）
-  // ═══════════════════════════════════════════════
+  // 组件卸载时清理 SSE 连接和计时器，避免泄漏
+  useEffect(() => {
+    return () => {
+      if (elapsedTimerRef.current) {
+        clearInterval(elapsedTimerRef.current);
+        elapsedTimerRef.current = null;
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
+  const parseSelectedShots = (raw: string | undefined, fallback = [1, 2, 3, 4, 9]): number[] => {
+    if (!raw) return fallback;
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.every(n => Number.isInteger(n)) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
   const handleTrialGeneration = async () => {
-    if (!project || inputImages.products.length === 0) return;
+    if (!project || generating || inputImages.products.length === 0) return;
     const moduleType = project.moduleType || 'product';
     if (moduleType !== 'product') return handleStartGeneration();
-
-    const selectedShotIndexes: number[] = project.selectedShots
-      ? JSON.parse(project.selectedShots)
-      : [1, 2, 3, 4, 9];
+    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
     await handleStartGeneration([selectedShotIndexes[0]]);
   };
 
-  // ═══════════════════════════════════════════════
-  // 生成剩余（排除已有镜次）
-  // ═══════════════════════════════════════════════
   const handleGenerateRemaining = async () => {
-    if (!project || inputImages.products.length === 0) return;
+    if (!project || generating || inputImages.products.length === 0) return;
 
-    const selectedShotIndexes: number[] = project.selectedShots
-      ? JSON.parse(project.selectedShots)
-      : [1, 2, 3, 4, 9];
+    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
 
     const existingResults = await db.images
       .where('projectId').equals(taskId)
@@ -146,6 +159,8 @@ export default function TaskDetailPage() {
   // ═══════════════════════════════════════════════════════════════
   const handleStartGeneration = async (overrideShotIndexes?: number[]) => {
     if (!project || inputImages.products.length === 0) return;
+    // 防重复点击：已经在生成中就直接忽略
+    if (generating || abortControllerRef.current) return;
 
     // —— 重置状态 ——
     setGenerating(true);
@@ -168,8 +183,10 @@ export default function TaskDetailPage() {
     abortControllerRef.current = ac;
 
     const moduleType = project.moduleType || 'product';
-    const selectedShotIndexes: number[] = overrideShotIndexes
-      ?? (project.selectedShots ? JSON.parse(project.selectedShots) : [1, 2, 3, 4, 9]);
+    const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(project.selectedShots);
+
+    // catch/finally 也要能读到，所以放 try 外
+    let successCount = 0;
 
     try {
       await db.projects.update(taskId, { status: 'processing' });
@@ -206,7 +223,6 @@ export default function TaskDetailPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let successCount = 0;
       let currentEventType = ''; // 必须在 while 外，跨 chunk 保持事件类型
       console.log('[SSE] 开始读取流...');
 
@@ -314,19 +330,19 @@ export default function TaskDetailPage() {
 
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
+      // 已成功生成的图保留：项目状态由实际产出决定
+      const finalStatus = successCount > 0 ? 'completed' : 'failed';
       if ((err as Error).name === 'AbortError') {
         setGenerationPhase('cancelled');
-        setErrorMessage('已取消生成');
-        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
+        setErrorMessage(successCount > 0 ? `已取消生成（保留已生成的 ${successCount} 张）` : '已取消生成');
       } else {
         const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
         console.error('[生图前端] 错误详情:', msg);
         setErrorMessage(msg);
         setGenerationPhase('error');
-        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
       }
+      await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
+      setProject(prev => prev ? { ...prev, status: finalStatus } : null);
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setGenerating(false);
@@ -432,15 +448,14 @@ export default function TaskDetailPage() {
     if (!project) return '生成';
     const moduleType = project.moduleType || 'product';
     if (moduleType === 'product') {
-      const shotCount = project.selectedShots ? JSON.parse(project.selectedShots).length : 7;
-      return `全部生成 ${shotCount} 张产品图`;
+      return `全部生成 ${parseSelectedShots(project.selectedShots).length} 张产品图`;
     }
     return '开始生成场景图';
   };
 
   const getShotCount = () => {
     if (!project) return 7;
-    return project.selectedShots ? JSON.parse(project.selectedShots).length : 7;
+    return parseSelectedShots(project.selectedShots).length;
   };
 
   if (loading) {
