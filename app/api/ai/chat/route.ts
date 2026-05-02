@@ -4,7 +4,7 @@
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { deductCustom } from '@/lib/billing';
+import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
 
 const API_CONFIG = {
@@ -13,35 +13,41 @@ const API_CONFIG = {
   apiKey: process.env.GEMINI_API_KEY || '',
 };
 
-const SYSTEM_PROMPT = `你是 SILKMOMO 电商AI图片生成助手。用户会用中文描述想要的图片效果。
+const SYSTEM_PROMPT = `你是 SILKMOMO 电商图片生成的助手。用户会用中文描述想要的图片效果，你必须根据描述提取参数。
 
-你必须返回一个 JSON 对象，格式如下（不要输出其他内容，只输出 JSON）：
+只输出一个 JSON 对象，结构如下，每个字段都必须存在（不知道就用 null）：
 {
-  "reply": "你的简短回复（中文，1-2句话确认理解）",
+  "reply": "<必填> 中文，1-2 句话确认你理解的设置；不要含任何 JSON 关键字",
   "actions": {
-    "bodyType": "slim|standard|curvy 或 null（不确定时）",
-    "skinTone": "light|medium|deep 或 null",
-    "module": "product|scene 或 null",
-    "prompt": "提取的额外场景/风格要求，或 null",
-    "triggerGenerate": true或false（用户明确要求生成时为true）
+    "bodyType": "slim" | "standard" | "curvy" | null,
+    "skinTone": "light" | "medium" | "deep" | null,
+    "module":   "product" | "scene" | null,
+    "prompt":   "<额外场景/风格描述，没有就 null>",
+    "triggerGenerate": true | false
   }
 }
 
-参数说明：
-- bodyType: slim=纤细/瘦/修长, standard=标准/普通/正常, curvy=饱满/丰满/胖
-- skinTone: light=白/白皙/浅色, medium=中/自然/黄皮, deep=深/黑/小麦色
-- module: product=产品图/电商主图, scene=场景图/生活方式
-- prompt: 用户提到的场景、风格、背景等额外描述
-- triggerGenerate: 用户说了"生成""开始""出图""帮我做"等意图时设为 true
+参数枚举：
+- bodyType: slim=纤细/瘦/修长, standard=标准/普通, curvy=饱满/丰满/微胖
+- skinTone: light=白/白皙/浅, medium=中/自然/黄皮, deep=深/黑/小麦
+- module:   product=产品图/电商主图/详情图, scene=场景图/生活方式/lookbook
+- triggerGenerate: 用户说了"生成/开始/出图/帮我做/生N张"为 true
 
-示例：
-用户："帮我生成一个白色连衣裙的产品图，纤细模特，白皙皮肤"
-返回：{"reply":"好的，为您设置纤细体型、白皙肤色的产品图模式","actions":{"bodyType":"slim","skinTone":"light","module":"product","prompt":"白色连衣裙","triggerGenerate":true}}
+示例 1
+用户："帮我生成丝绸裙的产品图，纤细模特，白皙皮肤"
+{"reply":"好的，已切到产品图，纤细体型 + 白皙肤色","actions":{"bodyType":"slim","skinTone":"light","module":"product","prompt":"silk dress","triggerGenerate":true}}
 
+示例 2
+用户："改成生活方式场景图，丰满身材"
+{"reply":"已切到场景图模式，体型设为饱满","actions":{"bodyType":"curvy","skinTone":null,"module":"scene","prompt":null,"triggerGenerate":false}}
+
+示例 3
 用户："什么体型适合展示旗袍？"
-返回：{"reply":"旗袍建议使用纤细(slim)体型，能更好展示腰线和版型优势","actions":{"bodyType":"slim","skinTone":null,"module":"product","prompt":null,"triggerGenerate":false}}
+{"reply":"旗袍建议用纤细(slim)体型，能更好展示腰线","actions":{"bodyType":"slim","skinTone":null,"module":"product","prompt":null,"triggerGenerate":false}}
 
-IMPORTANT: 只输出 JSON，不要有任何其他文字。`;
+IMPORTANT:
+- reply 字段绝对不能省，绝对不能为空字符串
+- 只输出 JSON 本身，不要 markdown 代码块、不要解释文字`;
 
 export async function POST(req: Request) {
   const auth = await getCurrentUser();
@@ -96,8 +102,9 @@ export async function POST(req: Request) {
     );
 
     if (!res.ok) {
+      await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手调用失败退款');
       return NextResponse.json({
-        reply: '我理解了你的需求，请在下方手动设置参数后生成。',
+        reply: '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
         actions: {},
       });
     }
@@ -105,14 +112,58 @@ export async function POST(req: Request) {
     const data = await res.json();
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    // 尝试解析 JSON
+    // 本地关键词兜底（lite 模型经常不填 enum 字段）
+    const kw = (re: RegExp) => re.test(message);
+    const localBodyType: 'slim' | 'standard' | 'curvy' | null =
+      kw(/纤细|瘦|修长|苗条/) ? 'slim'
+      : kw(/标准|普通|正常/) ? 'standard'
+      : kw(/饱满|丰满|微胖|曲线/) ? 'curvy'
+      : null;
+    const localSkinTone: 'light' | 'medium' | 'deep' | null =
+      kw(/白皙|白色|浅[色肤]/) ? 'light'
+      : kw(/中性|自然|黄皮/) ? 'medium'
+      : kw(/深色|黑[色皮]|小麦/) ? 'deep'
+      : null;
+    const localModule: 'product' | 'scene' | null =
+      kw(/产品图|电商|主图|详情图|白底/) ? 'product'
+      : kw(/场景|生活方式|lookbook|实拍|环境/) ? 'scene'
+      : null;
+    const localTrigger = kw(/生成|开始|出图|帮我做|生\s*\d+\s*张/);
+
     try {
       const jsonMatch = rawText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
+
+        // 模型未填的字段用关键词兜底
+        const flatActions = {
+          bodyType: parsed.actions?.bodyType ?? parsed.bodyType ?? localBodyType,
+          skinTone: parsed.actions?.skinTone ?? parsed.skinTone ?? localSkinTone,
+          module: parsed.actions?.module ?? parsed.module ?? localModule,
+          prompt: parsed.actions?.prompt ?? parsed.prompt ?? null,
+          triggerGenerate: parsed.actions?.triggerGenerate ?? parsed.triggerGenerate ?? localTrigger,
+        };
+
+        // reply 缺失时合成一句兜底，让用户至少看到反馈
+        let reply: string = parsed.reply;
+        if (!reply || typeof reply !== 'string' || !reply.trim()) {
+          const parts: string[] = [];
+          if (flatActions.module === 'product') parts.push('产品图');
+          if (flatActions.module === 'scene') parts.push('场景图');
+          if (flatActions.bodyType === 'slim') parts.push('纤细体型');
+          if (flatActions.bodyType === 'standard') parts.push('标准体型');
+          if (flatActions.bodyType === 'curvy') parts.push('饱满体型');
+          if (flatActions.skinTone === 'light') parts.push('白皙肤色');
+          if (flatActions.skinTone === 'medium') parts.push('中等肤色');
+          if (flatActions.skinTone === 'deep') parts.push('深色肤色');
+          reply = parts.length > 0
+            ? `已识别：${parts.join('、')}${flatActions.triggerGenerate ? '，准备生成' : ''}`
+            : '收到，请上传产品图后开始生成。';
+        }
+
         return NextResponse.json({
-          reply: parsed.reply || '收到！',
-          actions: parsed.actions || {},
+          reply,
+          actions: flatActions,
           costFen: PRICING.aiAnalysisPricePerCallFen,
         });
       }
@@ -126,8 +177,9 @@ export async function POST(req: Request) {
       costFen: PRICING.aiAnalysisPricePerCallFen,
     });
   } catch {
+    await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手异常退款');
     return NextResponse.json({
-      reply: 'AI 助手暂时繁忙，请直接手动操作。',
+      reply: 'AI 助手暂时繁忙，请直接手动操作。（已自动退款）',
       actions: {},
     });
   }

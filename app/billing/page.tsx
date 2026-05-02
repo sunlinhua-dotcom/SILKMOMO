@@ -142,14 +142,15 @@ export default function BillingPage() {
             {RECHARGE_PACKAGES.map(pkg => (
               <div
                 key={pkg.id}
-                className="p-4 rounded-xl border border-[var(--color-border)] hover:border-[var(--color-accent)] transition-colors cursor-pointer group"
+                className="p-4 rounded-xl border border-[var(--color-border-light)] bg-[var(--color-background)]/40 cursor-default opacity-80"
+                title="在线充值暂未开放，请联系管理员"
               >
-                <p className="text-lg font-bold text-[var(--color-text)] group-hover:text-[var(--color-accent)] transition-colors">
+                <p className="text-lg font-bold text-[var(--color-text-secondary)]">
                   {pkg.label}
                 </p>
-                <p className="text-xs text-[var(--color-text-secondary)] mt-1">{pkg.name}</p>
+                <p className="text-xs text-[var(--color-text-muted)] mt-1">{pkg.name}</p>
                 {pkg.bonus > 0 && (
-                  <p className="text-xs text-[var(--color-accent)] mt-1 font-medium">
+                  <p className="text-xs text-[var(--color-accent)]/70 mt-1 font-medium">
                     +送 ¥{(pkg.bonus / 100).toFixed(0)}
                   </p>
                 )}
@@ -157,9 +158,11 @@ export default function BillingPage() {
               </div>
             ))}
           </div>
-          <p className="text-xs text-[var(--color-text-muted)] mt-4 text-center">
-            请联系管理员进行充值
-          </p>
+          <div className="mt-4 p-3 rounded-xl bg-[var(--color-background)]/60 border border-[var(--color-border-light)]">
+            <p className="text-xs text-[var(--color-text-secondary)] text-center">
+              ⓘ 在线充值暂未开放，请联系管理员手动充值
+            </p>
+          </div>
         </div>
 
         {/* 消费记录 */}

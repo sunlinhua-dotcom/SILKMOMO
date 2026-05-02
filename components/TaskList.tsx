@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { db, type Project } from '@/lib/db';
-import { Clock, CheckCircle, XCircle, Loader, ChevronRight } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, Loader, ChevronRight, Trash2 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 interface TaskWithImages extends Project {
@@ -48,6 +48,19 @@ export function TaskList({ limit = 5 }: TaskListProps) {
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
+
+  const handleDelete = async (e: React.MouseEvent, taskId: number, name: string) => {
+    e.stopPropagation();
+    if (!confirm(`删除任务"${name}"？此操作不可撤销，所有相关图片将一同删除。`)) return;
+    try {
+      await db.images.where('projectId').equals(taskId).delete();
+      await db.projects.delete(taskId);
+      await loadTasks();
+    } catch (err) {
+      console.error('删除任务失败:', err);
+      alert('删除失败，请重试');
+    }
+  };
 
 
 
@@ -106,10 +119,13 @@ export function TaskList({ limit = 5 }: TaskListProps) {
   return (
     <div className="space-y-2">
       {tasks.map((task) => (
-        <button
+        <div
           key={task.id}
           onClick={() => router.push(`/task/${task.id}`)}
-          className="w-full text-left p-4 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border-light)] hover:border-[var(--color-accent)] hover:shadow-md transition-all group"
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter') router.push(`/task/${task.id}`); }}
+          className="w-full text-left p-4 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border-light)] hover:border-[var(--color-accent)] hover:shadow-md transition-all group cursor-pointer"
         >
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -132,9 +148,19 @@ export function TaskList({ limit = 5 }: TaskListProps) {
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors flex-shrink-0 mt-1" />
+            <div className="flex items-center gap-1 flex-shrink-0">
+              <button
+                onClick={(e) => handleDelete(e, task.id!, task.name)}
+                className="opacity-0 group-hover:opacity-100 w-8 h-8 flex items-center justify-center rounded-lg text-[var(--color-text-muted)] hover:bg-red-50 hover:text-red-500 transition-all"
+                aria-label="删除任务"
+                title="删除任务"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+              <ChevronRight className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-accent)] transition-colors mt-1" />
+            </div>
           </div>
-        </button>
+        </div>
       ))}
     </div>
   );

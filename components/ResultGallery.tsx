@@ -125,12 +125,16 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
             </h3>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {typeImages.map((image) => {
-                // 全身照/半身照默认 3:4 竖图，object-cover 会切掉头/脚；用 contain 保留完整内容
-                const isPortrait = image.imageType === 'full_body' || image.imageType === 'half_body';
+                // 不同 imageType 实际生成尺寸不同，用对应的 aspect-ratio 避免 object-cover 切边
+                const aspectClass = image.imageType === 'full_body' || image.imageType === 'half_body'
+                  ? 'aspect-[3/4]'      // 竖图，模特从头到脚
+                  : image.imageType === 'hero'
+                    ? 'aspect-video'   // 16:9 横版场景图
+                    : 'aspect-square'; // close_up 特写默认方形
                 return (
                 <div
                   key={image.id}
-                  className={`group relative ${isPortrait ? 'aspect-[3/4]' : 'aspect-square'} rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift`}
+                  className={`group relative ${aspectClass} rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift`}
                   onClick={() => setSelectedImage(image)}
                 >
                   <img
