@@ -2,14 +2,14 @@
  * 管理后台 - 用户列表 + 充值
  */
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth';
+import { requireAdmin } from '@/lib/auth';
 import { rechargeBalance } from '@/lib/billing';
 import prisma from '@/lib/prisma';
 
 // GET: 用户列表
 export async function GET(req: Request) {
-  const auth = await getCurrentUser();
-  if (!auth || auth.role !== 'admin') {
+  const auth = await requireAdmin();
+  if (!auth) {
     return NextResponse.json({ error: '无权访问' }, { status: 403 });
   }
 
@@ -49,8 +49,8 @@ export async function GET(req: Request) {
 
 // POST: 给用户充值
 export async function POST(req: Request) {
-  const auth = await getCurrentUser();
-  if (!auth || auth.role !== 'admin') {
+  const auth = await requireAdmin();
+  if (!auth) {
     return NextResponse.json({ error: '无权访问' }, { status: 403 });
   }
 

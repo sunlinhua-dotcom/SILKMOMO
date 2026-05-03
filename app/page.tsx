@@ -208,7 +208,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) setSelectedBodyType(actions.bodyType);
           if (actions.skinTone) setSelectedSkinTone(actions.skinTone);
-          if (actions.module === 'scene') setActiveModule('scene');
+          if (actions.module === 'scene') { setActiveModule('scene'); setShowAdvanced(true); }
           if (actions.module === 'product') setActiveModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
@@ -222,7 +222,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) setSelectedBodyType(actions.bodyType);
           if (actions.skinTone) setSelectedSkinTone(actions.skinTone);
-          if (actions.module === 'scene') setActiveModule('scene');
+          if (actions.module === 'scene') { setActiveModule('scene'); setShowAdvanced(true); }
           if (actions.module === 'product') setActiveModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
@@ -400,7 +400,7 @@ export default function HomePage() {
                   </button>
 
                   <button
-                    onClick={() => setActiveModule('scene')}
+                    onClick={() => { setActiveModule('scene'); setShowAdvanced(true); }}
                     className={`
                       relative flex flex-col items-start gap-2 sm:gap-4 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] transition-all duration-500 overflow-hidden
                       ${activeModule === 'scene'
