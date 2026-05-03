@@ -332,7 +332,7 @@ _Sun Linhua slept through most of the dawn shift. Good morning._
 
 AI 模型读到"silk"就当一般"软料子"，没有具体视觉指令。
 
-### 修复（commit `9c8ed17`）
+### 修复（commit [`d8dddb9`](https://github.com/sunlinhua-dotcom/SILKMOMO/commit/d8dddb9)）
 
 抽 `SILK_FABRIC_PROMPT` 常量到 lib/api.ts 顶部，把丝绸的 5 个具体视觉特征写死：
 
