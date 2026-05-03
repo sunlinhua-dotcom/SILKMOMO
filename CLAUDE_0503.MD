@@ -364,3 +364,46 @@ AI 模型读到"silk"就当一般"软料子"，没有具体视觉指令。
 - [lib/api.ts](lib/api.ts) +25 -4
   - 新增 `SILK_FABRIC_PROMPT` 常量（15 行专业描述）
   - `fabricNote` 和 `sceneFabricNote` 都 reference 它，去掉 inline string
+
+---
+
+## 15. 双通道 backend：gpt-image-2-all 接入（2026-05-03 上午）
+
+用户提示已在 apiyi 后台开了 `gpt-image-2-all`（apiyi 自定义路由名，对应 OpenAI 内部某个高级图模型），让接入并 E2E 验证。
+
+### 设计
+
+新文件 [lib/image-backends.ts](lib/image-backends.ts)：
+- 统一接口 `generateImage(input: BackendInput): Promise<BackendResult>`
+- 通过 `IMAGE_BACKEND` env var 路由：
+  - `gemini`（默认）→ `gemini-3.1-flash-image-preview`，POST `/v1beta/.../generateContent`
+  - `openai` 或 `gpt-image` → `gpt-image-2-all`，POST `/v1/images/edits`（multipart, 多图参考）
+- 复用 apiyi 同一个 `GEMINI_API_KEY`
+- aspectRatio 映射：1:1 → `1024x1024`；3:4/9:16 → `1024x1536`；4:3/16:9 → `1536x1024`
+- 参考图分组打 tag 写进 prompt（OpenAI multipart 不支持 per-image label）：`"product/model/bg/scene/accessory/anchor"`
+
+[app/api/generate/stream/route.ts](app/api/generate/stream/route.ts) 删了 ~190 行（callGeminiApi + buildParts + API_CONFIG），改成 `generateImage(input)` 一行调用。启动时打印 `[生图] active backend = ...` 方便确认。
+
+### E2E 验证
+
+- 启动：`IMAGE_BACKEND=openai npm run dev`
+- 同一张 silk dress、同一个 SILK_FABRIC_PROMPT、同一个镜次 9（局部特写）
+- 实际耗时 37s（11:17:16 → 11:17:53），比 Gemini 略快
+- console 0 error / 0 warning，SSE 全程顺畅
+- 输出图片：极致丝绸缎面光泽，纯面料 macro shot，类似面料样板风格
+
+### 两个 backend 适用场景
+
+| | Gemini 3.1 Flash Image | gpt-image-2-all |
+|---|---|---|
+| 调性 | editorial lifestyle，会按 prompt 渲染暖色卧室/沙发等背景 | macro / stock-photo，纯面料展示，背景指令偏弱 |
+| 多图参考 | 5 类参考图（product/model/bg/scene/accessory）+ anchor 都稳定起作用 | 都接受但不分主次，最多 16 张 |
+| 耗时 | ~30s/张 | ~37s/张 |
+| 成本 | ¥0.65/张 | 略贵（OpenAI $0.04 + apiyi 加成） |
+| 适合 | 全身/半身/lookbook | 镜次 9（特写）面料样板 / 详情页面料展示 |
+
+### 切换方式
+
+Zeabur 上设 `IMAGE_BACKEND=openai` 即可全量切；不设或 `=gemini` 走默认。
+
+未做：根据 imageType 智能路由（特写自动 OpenAI、其他 Gemini）。如果用户量上来，可以下个 PR 加。
