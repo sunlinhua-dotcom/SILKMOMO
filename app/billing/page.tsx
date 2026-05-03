@@ -158,10 +158,16 @@ export default function BillingPage() {
               </div>
             ))}
           </div>
-          <div className="mt-4 p-3 rounded-xl bg-[var(--color-background)]/60 border border-[var(--color-border-light)]">
-            <p className="text-xs text-[var(--color-text-secondary)] text-center">
-              ⓘ 在线充值暂未开放，请联系管理员手动充值
+          <div className="mt-4 p-4 rounded-xl bg-[var(--color-background)]/60 border border-[var(--color-border-light)]">
+            <p className="text-xs text-[var(--color-text-secondary)] text-center mb-2">
+              ⓘ 在线支付暂未开放，可通过支付宝转账，转账后联系管理员到账
             </p>
+            <div className="flex items-center justify-center gap-2 text-xs">
+              <span className="text-[var(--color-text-muted)]">支付宝账号</span>
+              <code className="font-mono text-[var(--color-accent-dark)] bg-[var(--color-surface)] px-2 py-0.5 rounded border border-[var(--color-border-light)] select-all">
+                sunlinhua@gmail.com
+              </code>
+            </div>
           </div>
         </div>
 
