@@ -2,13 +2,13 @@
  * 管理后台 - 概览数据
  */
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth';
+import { requireAdmin } from '@/lib/auth';
 import { getAdminStats } from '@/lib/billing';
 import prisma from '@/lib/prisma';
 
 export async function GET() {
-  const auth = await getCurrentUser();
-  if (!auth || auth.role !== 'admin') {
+  const auth = await requireAdmin();
+  if (!auth) {
     return NextResponse.json({ error: '无权访问' }, { status: 403 });
   }
 

@@ -6,12 +6,22 @@
 import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword, signToken, setAuthCookie } from '@/lib/auth';
+import { rateLimit, getClientIp } from '@/lib/rate-limit';
 
 export async function POST(req: Request) {
   try {
+    // 防 setup key 暴力破解
+    const ip = getClientIp(req);
+    const ipLimit = rateLimit(`admin-setup:${ip}`, 5, 60 * 60 * 1000);
+    if (!ipLimit.allowed) {
+      return NextResponse.json(
+        { error: `请 ${ipLimit.retryAfterSec} 秒后再试` },
+        { status: 429 }
+      );
+    }
+
     const { username, password, name, setupKey } = await req.json();
 
-    // 验证 setup key（必须在环境变量中配置，不再有默认值）
     const expectedKey = process.env.ADMIN_SETUP_KEY;
     if (!expectedKey) {
       return NextResponse.json({ error: '服务器未配置安装密钥' }, { status: 500 });
@@ -20,23 +30,38 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '安装密钥错误' }, { status: 403 });
     }
 
-    // 检查是否已有管理员
-    const existingAdmin = await prisma.user.findFirst({ where: { role: 'admin' } });
-    if (existingAdmin) {
-      return NextResponse.json({ error: '管理员已存在，请直接登录' }, { status: 409 });
+    if (!username || !password || password.length < 8) {
+      return NextResponse.json(
+        { error: '用户名必填，密码至少 8 位' },
+        { status: 400 }
+      );
     }
 
-    // 创建管理员
-    const passwordHash = await hashPassword(password);
-    const admin = await prisma.user.create({
-      data: {
-        username,
-        passwordHash,
-        name: name || '管理员',
-        role: 'admin',
-        balanceFen: 999900, // 管理员默认 ¥9,999
-      },
-    });
+    // 把 admin 创建包在一个事务里，配合 SERIALIZABLE 隔离避免并发双 admin
+    let admin;
+    try {
+      admin = await prisma.$transaction(async (tx) => {
+        const existingAdmin = await tx.user.findFirst({ where: { role: 'admin' } });
+        if (existingAdmin) {
+          throw new Error('ADMIN_EXISTS');
+        }
+        const passwordHash = await hashPassword(password);
+        return await tx.user.create({
+          data: {
+            username,
+            passwordHash,
+            name: name || '管理员',
+            role: 'admin',
+            balanceFen: 999900,
+          },
+        });
+      }, { isolationLevel: 'Serializable' });
+    } catch (e) {
+      if (e instanceof Error && e.message === 'ADMIN_EXISTS') {
+        return NextResponse.json({ error: '管理员已存在，请直接登录' }, { status: 409 });
+      }
+      throw e;
+    }
 
     // 签发 JWT
     const token = await signToken({

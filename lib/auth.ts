@@ -5,10 +5,9 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { hash, compare } from 'bcryptjs';
 import { cookies } from 'next/headers';
+import { getJwtSecret } from './jwt-secret';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'silkmomo-fallback-secret'
-);
+const JWT_SECRET = getJwtSecret();
 const TOKEN_NAME = 'silkmomo_token';
 const TOKEN_EXPIRES = '7d'; // 7 天
 
@@ -73,4 +72,17 @@ export async function getCurrentUser(): Promise<AuthPayload | null> {
   const token = await getAuthCookie();
   if (!token) return null;
   return await verifyToken(token);
+}
+
+// ═══ admin 二次校验：JWT 中的 role 可能已被降级，重新查 DB 确认 ═══
+import prisma from './prisma';
+export async function requireAdmin(): Promise<AuthPayload | null> {
+  const auth = await getCurrentUser();
+  if (!auth) return null;
+  const user = await prisma.user.findUnique({
+    where: { id: auth.userId },
+    select: { role: true },
+  });
+  if (!user || user.role !== 'admin') return null;
+  return auth;
 }

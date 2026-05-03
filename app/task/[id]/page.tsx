@@ -12,10 +12,12 @@ import {
   MODELS, BODY_TYPES, SKIN_TONES,
   PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES,
   DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE,
+  ETHNICITY_LABELS, SKU_LABELS,
 } from '@/lib/models';
 import { getRandomWaitingMessage } from '@/lib/api';
 import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw, AlertTriangle, Ban } from 'lucide-react';
 import { Logo } from '@/components/Logo';
+import { ImageLightbox } from '@/components/ImageLightbox';
 import Link from 'next/link';
 import type { CompressedImage } from '@/lib/image-compressor';
 
@@ -59,6 +61,9 @@ export default function TaskDetailPage() {
   const [newSkinTone, setNewSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
   const [newStyleImages, setNewStyleImages] = useState<CompressedImage[]>([]);
 
+  // --- 输入图片放大预览 ---
+  const [previewImage, setPreviewImage] = useState<{ src: string; label: string } | null>(null);
+
   const loadTaskData = useCallback(async () => {
     try {
       const task = await db.projects.get(taskId);
@@ -96,29 +101,42 @@ export default function TaskDetailPage() {
     return () => clearInterval(interval);
   }, [loadTaskData]);
 
-  // ═══════════════════════════════════════════════
-  // 试生成：只选第 1 个镜次（传对应的 selectedShotIndexes 只含第一个）
-  // ═══════════════════════════════════════════════
+  // 组件卸载时清理 SSE 连接和计时器，避免泄漏
+  useEffect(() => {
+    return () => {
+      if (elapsedTimerRef.current) {
+        clearInterval(elapsedTimerRef.current);
+        elapsedTimerRef.current = null;
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
+
+  const parseSelectedShots = (raw: string | undefined, fallback = [1, 2, 3, 4, 9]): number[] => {
+    if (!raw) return fallback;
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.every(n => Number.isInteger(n)) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
   const handleTrialGeneration = async () => {
-    if (!project || inputImages.products.length === 0) return;
+    if (!project || generating || inputImages.products.length === 0) return;
     const moduleType = project.moduleType || 'product';
     if (moduleType !== 'product') return handleStartGeneration();
-
-    const selectedShotIndexes: number[] = project.selectedShots
-      ? JSON.parse(project.selectedShots)
-      : [1, 2, 3, 4, 9];
+    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
     await handleStartGeneration([selectedShotIndexes[0]]);
   };
 
-  // ═══════════════════════════════════════════════
-  // 生成剩余（排除已有镜次）
-  // ═══════════════════════════════════════════════
   const handleGenerateRemaining = async () => {
-    if (!project || inputImages.products.length === 0) return;
+    if (!project || generating || inputImages.products.length === 0) return;
 
-    const selectedShotIndexes: number[] = project.selectedShots
-      ? JSON.parse(project.selectedShots)
-      : [1, 2, 3, 4, 9];
+    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
 
     const existingResults = await db.images
       .where('projectId').equals(taskId)
@@ -141,6 +159,8 @@ export default function TaskDetailPage() {
   // ═══════════════════════════════════════════════════════════════
   const handleStartGeneration = async (overrideShotIndexes?: number[]) => {
     if (!project || inputImages.products.length === 0) return;
+    // 防重复点击：已经在生成中就直接忽略
+    if (generating || abortControllerRef.current) return;
 
     // —— 重置状态 ——
     setGenerating(true);
@@ -163,8 +183,10 @@ export default function TaskDetailPage() {
     abortControllerRef.current = ac;
 
     const moduleType = project.moduleType || 'product';
-    const selectedShotIndexes: number[] = overrideShotIndexes
-      ?? (project.selectedShots ? JSON.parse(project.selectedShots) : [1, 2, 3, 4, 9]);
+    const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(project.selectedShots);
+
+    // catch/finally 也要能读到，所以放 try 外
+    let successCount = 0;
 
     try {
       await db.projects.update(taskId, { status: 'processing' });
@@ -201,7 +223,6 @@ export default function TaskDetailPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let successCount = 0;
       let currentEventType = ''; // 必须在 while 外，跨 chunk 保持事件类型
       console.log('[SSE] 开始读取流...');
 
@@ -309,19 +330,19 @@ export default function TaskDetailPage() {
 
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
+      // 已成功生成的图保留：项目状态由实际产出决定
+      const finalStatus = successCount > 0 ? 'completed' : 'failed';
       if ((err as Error).name === 'AbortError') {
         setGenerationPhase('cancelled');
-        setErrorMessage('已取消生成');
-        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
+        setErrorMessage(successCount > 0 ? `已取消生成（保留已生成的 ${successCount} 张）` : '已取消生成');
       } else {
         const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
         console.error('[生图前端] 错误详情:', msg);
         setErrorMessage(msg);
         setGenerationPhase('error');
-        await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: 'failed' } : null);
       }
+      await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
+      setProject(prev => prev ? { ...prev, status: finalStatus } : null);
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setGenerating(false);
@@ -399,25 +420,42 @@ export default function TaskDetailPage() {
     console.log('重新生成图片:', imageId);
   };
 
-  // 获取当前模特名称
-  const currentModelName = project?.modelId ? MODELS.find(m => m.id === project.modelId)?.name : '未选择预设模特';
+  const currentModel = project?.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
+  const currentModelName = currentModel?.name ?? '未选择预设模特';
   const currentBodyTypeName = BODY_TYPES.find(b => b.id === project?.bodyType)?.name || DEFAULT_BODY_TYPE.name;
   const currentSkinToneName = SKIN_TONES.find(s => s.id === project?.skinTone)?.name || DEFAULT_SKIN_TONE.name;
+  const currentEthnicityLabel = currentModel ? ETHNICITY_LABELS[currentModel.ethnicity] : null;
+  const currentSkuLabel = project?.skuType ? SKU_LABELS[project.skuType] : null;
+
+  const currentShotCount = (() => {
+    if (!project?.selectedShots) return null;
+    try { return JSON.parse(project.selectedShots).length as number; } catch { return null; }
+  })();
+
+  const currentOutputSizeLabel = (() => {
+    if (!project) return null;
+    const moduleT = project.moduleType || 'product';
+    const sizeId = moduleT === 'scene' ? project.sceneOutputSize : project.outputSize;
+    if (!sizeId) return null;
+    const sizes = moduleT === 'scene' ? SCENE_OUTPUT_SIZES : PRODUCT_OUTPUT_SIZES;
+    const size = sizes.find(s => s.id === sizeId);
+    if (!size) return null;
+    return size.id === 'custom' ? `自定义 (${size.aspectRatio})` : `${size.label} ${size.aspectRatio}`;
+  })();
 
   // 生成按钮文案
   const getGenerateLabel = () => {
     if (!project) return '生成';
     const moduleType = project.moduleType || 'product';
     if (moduleType === 'product') {
-      const shotCount = project.selectedShots ? JSON.parse(project.selectedShots).length : 7;
-      return `全部生成 ${shotCount} 张产品图`;
+      return `全部生成 ${parseSelectedShots(project.selectedShots).length} 张产品图`;
     }
     return '开始生成场景图';
   };
 
   const getShotCount = () => {
     if (!project) return 7;
-    return project.selectedShots ? JSON.parse(project.selectedShots).length : 7;
+    return parseSelectedShots(project.selectedShots).length;
   };
 
   if (loading) {
@@ -442,6 +480,58 @@ export default function TaskDetailPage() {
   }
 
   const moduleType = project.moduleType || 'product';
+
+  // 已生成图片数追上目标数 = 等待 SSE done 事件收尾的窗口期
+  const isFinishingUp = liveImages.length >= progress.total && progress.total > 0;
+
+  const phaseTitle = (() => {
+    if (generationPhase === 'analyzing') return '正在分析服装特征...';
+    if (isFinishingUp) return '图片处理中，即将完成...';
+    if (moduleType === 'product') return `已生成 ${liveImages.length} / ${progress.total} 张`;
+    return '正在生成场景图...';
+  })();
+
+  const phaseSubLabel = (() => {
+    if (generationPhase === 'analyzing') return '服装分析中';
+    if (isFinishingUp) return '收尾中';
+    if (moduleType === 'product') return `正在生成镜次 #${progress.shotIndex}`;
+    return '场景图';
+  })();
+
+  const progressBarWidth = generationPhase === 'analyzing'
+    ? '8%'
+    : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`;
+
+  const paramChips = (
+    <div className="flex flex-wrap gap-2">
+      {project.modelId && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
+        </span>
+      )}
+      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+        体型: {currentBodyTypeName}
+      </span>
+      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+        肤色: {currentSkinToneName}
+      </span>
+      {moduleType === 'product' && currentSkuLabel && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          SKU: {currentSkuLabel}
+        </span>
+      )}
+      {moduleType === 'product' && currentShotCount !== null && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          镜次: {currentShotCount} 张
+        </span>
+      )}
+      {currentOutputSizeLabel && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          尺寸: {currentOutputSizeLabel}
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
@@ -476,7 +566,7 @@ export default function TaskDetailPage() {
               {project.status === 'processing' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-accent)]/10 rounded-full text-[var(--color-accent)]">
                   <Loader className="w-3.5 h-3.5 animate-spin" />
-                  {progress.current}/{progress.total}
+                  {liveImages.length}/{progress.total}
                 </span>
               )}
               {project.status === 'completed' && (
@@ -607,16 +697,8 @@ export default function TaskDetailPage() {
                 }
               </div>
 
-              {/* 阶段标题 */}
-              <h2 className="text-xl font-semibold mb-1">
-                {generationPhase === 'analyzing' ? '正在分析服装特征...' :
-                  moduleType === 'product'
-                    ? `正在生成第 ${progress.current} 张 / 共 ${progress.total} 张`
-                    : '正在生成场景图...'
-                }
-              </h2>
+              <h2 className="text-xl font-semibold mb-1">{phaseTitle}</h2>
 
-              {/* 副标题文案 */}
               <p className="text-sm text-[var(--color-text-secondary)] mb-6">
                 {generationPhase === 'analyzing'
                   ? '这将帮助 AI 更精准地还原面料细节'
@@ -624,26 +706,15 @@ export default function TaskDetailPage() {
                 }
               </p>
 
-              {/* 进度条 */}
               <div className="max-w-sm mx-auto">
                 <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-[var(--color-accent)] to-[var(--color-accent-light)] transition-all duration-700 rounded-full"
-                    style={{
-                      width: generationPhase === 'analyzing'
-                        ? '8%'
-                        : `${Math.max(8, (progress.current / Math.max(progress.total, 1)) * 100)}%`
-                    }}
+                    style={{ width: progressBarWidth }}
                   />
                 </div>
                 <div className="flex justify-between items-center mt-2">
-                  <p className="text-xs text-[var(--color-text-muted)]">
-                    {generationPhase === 'analyzing' ? '服装分析中' :
-                      moduleType === 'product'
-                        ? `镜次 #${progress.shotIndex}`
-                        : '场景图'
-                    }
-                  </p>
+                  <p className="text-xs text-[var(--color-text-muted)]">{phaseSubLabel}</p>
                   <p className="text-xs text-[var(--color-text-muted)]">
                     已耗时 {elapsedSeconds}s
                     {elapsedSeconds > 90 && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
@@ -708,85 +779,92 @@ export default function TaskDetailPage() {
           <div className="flex gap-3 overflow-x-auto pb-2">
             {inputImages.products.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border-2 border-[var(--color-accent)] shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '产品' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border-2 border-[var(--color-accent)] shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="产品"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">产品</p>
               </div>
             ))}
             {inputImages.modelRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-purple-300 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '模特参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-purple-300 shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="模特参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">模特参考</p>
               </div>
             ))}
             {inputImages.bgRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-[var(--color-border)] opacity-80">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '背景参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-[var(--color-border)] opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="背景参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">背景</p>
               </div>
             ))}
             {inputImages.sceneRefs.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-green-300 opacity-80">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '场景参考' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-green-300 opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="场景参考"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">场景</p>
               </div>
             ))}
             {inputImages.accessories.map(img => (
               <div key={img.id} className="flex-shrink-0">
-                <div className="w-20 h-20 rounded-xl overflow-hidden border border-dashed border-[var(--color-border)] opacity-60">
+                <button
+                  type="button"
+                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '配件' })}
+                  className="w-20 h-20 rounded-xl overflow-hidden border border-dashed border-[var(--color-border)] opacity-60 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
+                  title="点击放大"
+                >
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="配件"
                     className="w-full h-full object-cover"
                   />
-                </div>
+                </button>
                 <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">配件</p>
               </div>
             ))}
           </div>
 
-          {/* 参数概览 */}
-          <div className="mt-4 flex flex-wrap gap-2">
-            <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-              体型: {currentBodyTypeName}
-            </span>
-            <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-              肤色: {currentSkinToneName}
-            </span>
-            {project.modelId && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                模特: {currentModelName}
-              </span>
-            )}
-            {moduleType === 'product' && project.skuType && (
-              <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-                SKU: {project.skuType === 'outfit' ? '套装' : project.skuType === 'top' ? '上装' : '下装'}
-              </span>
-            )}
-          </div>
+          <div className="mt-4">{paramChips}</div>
         </div>
 
         {/* 开始生成按钮 */}
@@ -873,10 +951,13 @@ export default function TaskDetailPage() {
         {/* 结果展示 */}
         {images.length > 0 && (
           <div>
-            <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-6 flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-3 flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
               生成结果 · {images.length} 张
             </h2>
+
+            <div className="mb-6">{paramChips}</div>
+
             <ResultGallery
               images={images.map(img => ({
                 id: img.id!,
@@ -889,6 +970,20 @@ export default function TaskDetailPage() {
               onRegenerate={handleRegenerate}
             />
           </div>
+        )}
+
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.src}
+            alt={previewImage.label}
+            onClose={() => setPreviewImage(null)}
+            zIndex={110}
+            footer={
+              <div className="px-4 py-1.5 bg-white/10 backdrop-blur-md text-white text-sm rounded-full whitespace-nowrap">
+                {previewImage.label}
+              </div>
+            }
+          />
         )}
 
         {/* 失败状态 */}

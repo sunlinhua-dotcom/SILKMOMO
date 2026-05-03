@@ -102,6 +102,43 @@ export async function deductCustom(
   }
 }
 
+// ═══ 退款（生图失败时使用）═══
+export async function refundBalance(
+  userId: string,
+  amountFen: number,
+  description: string,
+  projectId?: number
+): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
+  if (amountFen <= 0) return { success: true, balanceAfter: 0 };
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: userId },
+        data: { balanceFen: { increment: amountFen } },
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId,
+          type: 'refund',
+          amountFen: amountFen,
+          balanceAfter: updated.balanceFen,
+          description,
+          projectId,
+        },
+      });
+
+      return { balanceAfter: updated.balanceFen };
+    });
+
+    return { success: true, balanceAfter: result.balanceAfter };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '退款失败';
+    return { success: false, balanceAfter: 0, error: msg };
+  }
+}
+
 // ═══ 充值（管理员操作）═══
 export async function rechargeBalance(
   userId: string,
