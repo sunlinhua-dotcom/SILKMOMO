@@ -87,6 +87,27 @@ export function getRandomWaitingMessage(): string {
   return WAITING_MESSAGES[Math.floor(Math.random() * WAITING_MESSAGES.length)];
 }
 
+// ===== 真丝面料质感 Prompt（关键品牌差异化）=====
+// 22 momme silk satin / charmeuse 的视觉语言：必须把 AI 从"软料子"
+// 拉回到"具体的镜面缎面"。前几张测试图是粗棉/亚麻质感，根因是 prompt
+// 把丝绸描述得太抽象（"premium silk, lustre, smooth drape"）。
+//
+// 关键视觉特征（参考 sino-silk.com 22 momme satin）:
+// - mirror-like specular highlights（镜面级高光，非漫反射）
+// - directional sheen shifts when fabric folds（折痕处颜色明度变化）
+// - frictionless flat surface（无毛、无纤维浮起）
+// - heavy fluid drape that pools like liquid（垂坠如液体）
+// - cool, slightly cold-tone surface（不像羊毛那种暖糙感）
+//
+// 同时显式排除最常见的误判材质（cotton/linen/wool/polyester），让生成
+// 模型知道哪些 NOT 要。
+export const SILK_FABRIC_PROMPT = `Fabric quality (CRITICAL — this is luxury 22 momme silk satin / charmeuse, NOT cotton, NOT linen, NOT wool, NOT polyester):
+- Surface: glass-smooth, frictionless, mirror-like specular highlights that follow the fold lines. Subtle directional luster shifts as the fabric curves — bright tones on the high points, deeper saturation in the recesses.
+- Drape: heavy, liquid-like fluidity that pools and cascades along the body. Folds are soft and rounded, never crisp or cardboard-like.
+- Texture: absolutely no visible weave grain, no fuzz, no surface fiber lift, no matte cotton roughness, no linen slubs, no polyester plasticky shine.
+- Light behavior: cool satin sheen with refined highlights and seamless gradient tonal transitions; the fabric should look noticeably more lustrous and reflective than skin.
+- Hand feel reading: photographs should convey weight (~94 g/m²) and slipperiness — viewer should instantly read "luxury silk".`;
+
 // ===== 通用底层调用 =====
 
 export async function generateImage(options: GenerateOptions): Promise<GenerateResult> {
@@ -125,10 +146,10 @@ export function buildProductShotPrompt(options: ShotGenerateOptions): string {
     ? `Garment (AI-analyzed): ${options.garmentDescription}. Extract and reproduce ALL details from the product reference images faithfully — fabric pattern, color hue, print motifs, neckline, sleeve style, and construction must be pixel-identical.`
     : `Garment: Extract all clothing details (style, cut, fabric drape, color, neckline, sleeves, hem) precisely from the product reference images. Reproduce the garment faithfully on the model.`;
   const fabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
-    ? `Fabric quality: Premium silk — show the characteristic lustre, smooth drape, and refined texture.`
+    ? SILK_FABRIC_PROMPT
     : options.garmentDescription
       ? `Fabric quality: Show the authentic material texture and drape as visible in the reference images.`
-      : `Fabric quality: Premium 22momme silk — show the characteristic lustre, smooth drape, and refined texture.`;
+      : SILK_FABRIC_PROMPT;
   const garmentFocus = `${garmentDesc}\n${fabricNote}`;
 
   // 6. 背景（产品图模块：杜绝纯白底，营造自然真实氛围）
@@ -218,10 +239,10 @@ export function buildSceneShotPrompt(options: SceneGenerateOptions): string {
     ? `Garment (AI-analyzed): ${options.garmentDescription}. Faithfully reproduce ALL details from the product reference images — fabric pattern, color, and construction must be identical.`
     : `Garment: Extract all clothing details from the product reference images and faithfully reproduce them on the model.`;
   const sceneFabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
-    ? `Show premium silk quality — its natural lustre and fluid drape.`
+    ? SILK_FABRIC_PROMPT
     : options.garmentDescription
       ? `Show the authentic material texture and drape.`
-      : `Show premium 22momme silk quality — its natural lustre and fluid drape.`;
+      : SILK_FABRIC_PROMPT;
   const garmentFocus = `${sceneGarmentDesc} ${sceneFabricNote}`;
 
   // 5. 场景（由场景参考图完全驱动）
