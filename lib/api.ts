@@ -41,6 +41,7 @@ export interface ShotGenerateOptions {
   accessoryImages?: Array<{ data: string; mimeType: string }>;
   outputSize?: OutputSizeConfig;
   garmentDescription?: string; // AI 分析出的服装精确描述
+  customPrompt?: string;       // 用户对该次生成的额外要求
 }
 
 export interface SceneGenerateOptions {
@@ -56,6 +57,7 @@ export interface SceneGenerateOptions {
   angle?: string;
   hasModel?: boolean;
   garmentDescription?: string; // AI 分析出的服装精确描述
+  customPrompt?: string;       // 用户对该次生成的额外要求
 }
 
 // ===== 趣味等待文案 =====
@@ -153,6 +155,11 @@ MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
 - Only the pose, camera angle, and framing should change between shots — the model's identity must remain absolutely identical.
   `.trim();
 
+  // 9. 用户额外要求（仅当提供时追加，且不能覆盖 safetyRules / 服装一致性）
+  const userAddon = options.customPrompt
+    ? `\n\nUser adjustment request (apply this on top of the above, but never violate the CRITICAL RULES or garment fidelity): ${options.customPrompt}`
+    : '';
+
   // 如果是局部特写（无模特）
   if (!shot.hasModel) {
     return `
@@ -166,7 +173,7 @@ ${photography}
 
 IMPORTANT: Do NOT include any human figure in this shot. Focus entirely on the fabric surface and textile details.
 
-${safetyRules}
+${safetyRules}${userAddon}
     `.trim();
   }
 
@@ -185,7 +192,7 @@ ${bgPrompt}
 
 ${photography}
 
-${safetyRules}
+${safetyRules}${userAddon}
   `.trim();
 }
 
@@ -247,6 +254,11 @@ MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
 - Only the pose, camera angle, and framing should change between shots — the model's identity must remain absolutely identical.
   `.trim();
 
+  // 用户额外要求
+  const userAddon = options.customPrompt
+    ? `\n\nUser adjustment request (apply this on top of the above, but never violate the CRITICAL RULES or garment fidelity): ${options.customPrompt}`
+    : '';
+
   if (!hasModel) {
     // 氛围静物图（无模特）
     return `
@@ -260,7 +272,7 @@ The garment or silk products should be artfully arranged or draped in the scene 
 
 ${photography}
 
-${safetyRules}
+${safetyRules}${userAddon}
     `.trim();
   }
 
@@ -279,7 +291,7 @@ ${modelMood}
 
 ${photography}
 
-${safetyRules}
+${safetyRules}${userAddon}
   `.trim();
 }
 

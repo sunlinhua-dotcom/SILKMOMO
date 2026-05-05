@@ -323,7 +323,7 @@ export default function HomePage() {
 
               <ImageUploader
                 title="产品参考图"
-                description="1-3 张，白底图/模特图/场景图均可（必填）"
+                description="1-3 张，白底图/模特图/场景图均可（必填）。建议避免对镜自拍/带水印的网图，否则可能被 AI 拒绝生成。"
                 required
                 maxFiles={3}
                 images={productImages}

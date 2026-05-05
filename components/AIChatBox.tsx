@@ -23,6 +23,10 @@ interface AIChatBoxProps {
   onTriggerGenerate?: () => void;
   /** 布局模式：sidebar = 桌面左侧边栏，bottom = 移动端底栏 */
   mode?: 'sidebar' | 'bottom';
+  /** 空状态提示文案（不传则显示默认） */
+  emptyStateHint?: string;
+  /** 输入框 placeholder */
+  placeholder?: string;
 }
 
 // ─── 公共：发送逻辑 Hook ─────────────────────────────────────────────────────
@@ -79,7 +83,7 @@ function useAIChat(context?: string, onActions?: (a: AIActions) => void, onTrigg
 
 // ─── 桌面端：左侧可折叠侧边栏 ────────────────────────────────────────────────
 
-export function AIChatSidebar({ context, onActions, onTriggerGenerate }: Omit<AIChatBoxProps, 'mode'>) {
+export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStateHint, placeholder }: Omit<AIChatBoxProps, 'mode'>) {
   const [collapsed, setCollapsed] = useState(false);
   const { messages, input, setInput, loading, scrollRef, inputRef, handleSend, handleKeyDown } = useAIChat(context, onActions, onTriggerGenerate);
 
@@ -148,12 +152,12 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate }: Omit<AI
             className="flex-1 overflow-y-auto px-3 py-3 space-y-3 scrollbar-thin"
           >
             {messages.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full text-center gap-3 py-8">
+              <div className="flex flex-col items-center justify-center h-full text-center gap-3 py-8 px-2">
                 <div className="w-10 h-10 rounded-2xl bg-[var(--color-background)] flex items-center justify-center">
                   <Sparkles className="w-4 h-4 text-[var(--color-accent)]" strokeWidth={1.5} />
                 </div>
-                <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed">
-                  描述你的创意构想<br />AI 自动设定参数
+                <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed whitespace-pre-line">
+                  {emptyStateHint ?? '描述你的创意构想\nAI 自动设定参数\n\n💡 想调整已生成的图？\n点击图片 → ✨ 描述要调整什么'}
                 </p>
               </div>
             ) : (
@@ -194,7 +198,7 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate }: Omit<AI
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="描述你的需求..."
+                placeholder={placeholder ?? '描述你的需求...'}
                 rows={2}
                 className="flex-1 text-[12px] bg-transparent border-0 focus:ring-0 focus:outline-none resize-none placeholder:text-[var(--color-text-muted)] text-[var(--color-text)]"
               />

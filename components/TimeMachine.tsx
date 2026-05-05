@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { History, Play, Trash2, ChevronRight } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { History, Play, Trash2, ChevronRight, Eye } from 'lucide-react';
 import { getSnapshots, removeSnapshot, type FlowSnapshot } from '@/lib/image-library';
 import Image from 'next/image';
 
@@ -10,6 +11,7 @@ interface TimeMachineProps {
 }
 
 export function TimeMachine({ onReplay }: TimeMachineProps) {
+  const router = useRouter();
   const [snapshots, setSnapshots] = useState<FlowSnapshot[]>([]);
   const [expanded, setExpanded] = useState(false);
   const initialized = useRef(false);
@@ -28,6 +30,20 @@ export function TimeMachine({ onReplay }: TimeMachineProps) {
     e.stopPropagation();
     const updated = removeSnapshot(id);
     setSnapshots(updated);
+  };
+
+  const handleCardClick = (snap: FlowSnapshot) => {
+    // 优先：跳到原任务详情页查看已生成结果；老快照无 taskId 时回退到回放参数
+    if (snap.taskId) {
+      router.push(`/task/${snap.taskId}`);
+    } else {
+      onReplay(snap);
+    }
+  };
+
+  const handleReplayClick = (snap: FlowSnapshot, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onReplay(snap);
   };
 
   const formatTime = (ts: number) => {
@@ -51,10 +67,14 @@ export function TimeMachine({ onReplay }: TimeMachineProps) {
 
       <div className="space-y-1.5">
         {displayed.map(snap => (
-          <button
+          <div
             key={snap.id}
-            onClick={() => onReplay(snap)}
-            className="w-full group flex items-center gap-3 p-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-border-light)] hover:border-[var(--color-accent)]/50 hover:shadow-sm transition-all text-left"
+            role="button"
+            tabIndex={0}
+            onClick={() => handleCardClick(snap)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCardClick(snap); } }}
+            className="w-full group flex items-center gap-3 p-2.5 rounded-xl bg-[var(--color-surface)] border border-[var(--color-border-light)] hover:border-[var(--color-accent)]/50 hover:shadow-sm transition-all text-left cursor-pointer"
+            title={snap.taskId ? '查看任务详情' : '回放参数'}
           >
             {/* 缩略图 */}
             <div className="flex -space-x-2 flex-shrink-0">
@@ -80,17 +100,34 @@ export function TimeMachine({ onReplay }: TimeMachineProps) {
               </p>
             </div>
 
-            {/* 右侧操作 */}
-            <div className="flex items-center gap-1 flex-shrink-0">
-              <span
+            {/* 右侧操作：查看(隐式=卡片点击) / 重做 / 删除 */}
+            <div className="flex items-center gap-0.5 flex-shrink-0">
+              {snap.taskId && (
+                <span
+                  className="w-7 h-7 rounded-full flex items-center justify-center text-[var(--color-text-muted)] opacity-0 group-hover:opacity-70"
+                  title="查看任务"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={(e) => handleReplayClick(snap, e)}
+                className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-[rgba(201,168,108,0.12)] transition-all"
+                title="用相同参数重新生成"
+              >
+                <Play className="w-3.5 h-3.5 text-[var(--color-accent)]" fill="currentColor" />
+              </button>
+              <button
+                type="button"
                 onClick={(e) => handleDelete(snap.id, e)}
-                className="w-8 h-8 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all cursor-pointer"
+                className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all"
+                title="删除快照"
               >
                 <Trash2 className="w-3 h-3 text-[var(--color-text-muted)] hover:text-red-500" />
-              </span>
-              <Play className="w-3.5 h-3.5 text-[var(--color-accent)] opacity-0 group-hover:opacity-100 transition-opacity" fill="currentColor" />
+              </button>
             </div>
-          </button>
+          </div>
         ))}
       </div>
 

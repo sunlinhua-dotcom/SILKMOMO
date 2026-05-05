@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Download, RefreshCw, Loader, Expand } from 'lucide-react';
+import { Download, RefreshCw, Loader, Expand, Wand2, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { ImageLightbox } from './ImageLightbox';
@@ -33,6 +33,9 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
   const [selectedImage, setSelectedImage] = useState<ResultImage | null>(null);
   const [regenerating, setRegenerating] = useState<Set<number>>(new Set());
   const [downloadingAll, setDownloadingAll] = useState(false);
+  // 哪张图正在弹"调整描述"输入框
+  const [adjustingId, setAdjustingId] = useState<number | null>(null);
+  const [adjustText, setAdjustText] = useState('');
 
   const handleDownload = (image: ResultImage) => {
     const link = document.createElement('a');
@@ -61,11 +64,13 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
     }
   };
 
-  const handleRegenerate = async (image: ResultImage) => {
+  const handleRegenerate = async (image: ResultImage, customPrompt?: string) => {
     if (!onRegenerate) return;
     setRegenerating(prev => new Set(prev).add(image.id));
+    setAdjustingId(null);
+    setAdjustText('');
     try {
-      await onRegenerate(image.id);
+      await onRegenerate(image.id, customPrompt);
     } finally {
       setRegenerating(prev => {
         const next = new Set(prev);
@@ -135,7 +140,7 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                 <div
                   key={image.id}
                   className={`group relative ${aspectClass} rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift`}
-                  onClick={() => setSelectedImage(image)}
+                  onClick={() => { if (adjustingId !== image.id) setSelectedImage(image); }}
                 >
                   <img
                     src={`data:image/png;base64,${image.data}`}
@@ -144,7 +149,7 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                   />
 
                   {/* 悬浮操作栏 */}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-4 gap-2">
+                  <div className={`absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent transition-opacity flex items-end justify-center pb-4 gap-2 ${adjustingId === image.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -156,21 +161,35 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                       <Download className="w-5 h-5" strokeWidth={1.5} />
                     </button>
                     {onRegenerate && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRegenerate(image);
-                        }}
-                        disabled={regenerating.has(image.id)}
-                        className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
-                        title="重新生成"
-                      >
-                        {regenerating.has(image.id) ? (
-                          <Loader className="w-5 h-5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
-                        )}
-                      </button>
+                      <>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRegenerate(image);
+                          }}
+                          disabled={regenerating.has(image.id)}
+                          className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
+                          title="重新生成（用相同参数）"
+                        >
+                          {regenerating.has(image.id) ? (
+                            <Loader className="w-5 h-5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
+                          )}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setAdjustingId(image.id);
+                            setAdjustText('');
+                          }}
+                          disabled={regenerating.has(image.id)}
+                          className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
+                          title="描述要调整什么"
+                        >
+                          <Wand2 className="w-5 h-5" strokeWidth={1.5} />
+                        </button>
+                      </>
                     )}
                   </div>
 
@@ -180,6 +199,48 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                       {IMAGE_LABELS[image.imageType]}
                     </span>
                   </div>
+
+                  {/* "描述调整"输入面板 */}
+                  {adjustingId === image.id && (
+                    <div
+                      className="absolute inset-x-3 bottom-3 bg-white rounded-2xl shadow-2xl p-3 z-10"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-[11px] font-medium text-[var(--color-text-secondary)]">描述要调整什么</p>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setAdjustingId(null); setAdjustText(''); }}
+                          className="w-5 h-5 rounded hover:bg-[var(--color-background)] flex items-center justify-center"
+                        >
+                          <X className="w-3 h-3 text-[var(--color-text-muted)]" />
+                        </button>
+                      </div>
+                      <textarea
+                        value={adjustText}
+                        onChange={(e) => setAdjustText(e.target.value)}
+                        autoFocus
+                        rows={3}
+                        placeholder="例：模特表情更柔和、整体提亮、背景改成米色窗帘"
+                        maxLength={500}
+                        className="w-full text-xs px-2.5 py-1.5 border border-[var(--color-border-light)] rounded-lg focus:outline-none focus:border-[var(--color-accent)] resize-none text-[var(--color-text)]"
+                      />
+                      <div className="flex items-center justify-between mt-2">
+                        <span className="text-[10px] text-[var(--color-text-muted)]">{adjustText.length}/500</span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const text = adjustText.trim();
+                            if (!text) return;
+                            handleRegenerate(image, text);
+                          }}
+                          disabled={!adjustText.trim() || regenerating.has(image.id)}
+                          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-dark)] disabled:bg-[var(--color-border-light)] disabled:text-[var(--color-text-muted)] transition-colors"
+                        >
+                          按描述重做
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 );
               })}

@@ -18,6 +18,7 @@ import { getRandomWaitingMessage } from '@/lib/api';
 import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw, AlertTriangle, Ban } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { ImageLightbox } from '@/components/ImageLightbox';
+import { AIChatSidebar } from '@/components/AIChatBox';
 import Link from 'next/link';
 import type { CompressedImage } from '@/lib/image-compressor';
 
@@ -63,6 +64,9 @@ export default function TaskDetailPage() {
 
   // --- 输入图片放大预览 ---
   const [previewImage, setPreviewImage] = useState<{ src: string; label: string } | null>(null);
+
+  // AI Chat 的"待应用 prompt"：actions.prompt 在 onActions 里捕获，onTriggerGenerate 时使用
+  const pendingChatPromptRef = useRef<string>('');
 
   const loadTaskData = useCallback(async () => {
     try {
@@ -154,10 +158,11 @@ export default function TaskDetailPage() {
   };
 
   // ═══════════════════════════════════════════════════════════════
-  // 核心：SSE 流式生成（全量 / 试生成 / 剩余，统一入口）
+  // 核心：SSE 流式生成（全量 / 试生成 / 剩余 / 单图重做，统一入口）
   // overrideShotIndexes: 不传 = 用 project 里的配置；传 = 只生成指定镜次
+  // customPrompt: 用户对该次生成的额外要求（追加到 prompt）
   // ═══════════════════════════════════════════════════════════════
-  const handleStartGeneration = async (overrideShotIndexes?: number[]) => {
+  const handleStartGeneration = async (overrideShotIndexes?: number[], customPrompt?: string) => {
     if (!project || inputImages.products.length === 0) return;
     // 防重复点击：已经在生成中就直接忽略
     if (generating || abortControllerRef.current) return;
@@ -212,6 +217,7 @@ export default function TaskDetailPage() {
           selectedShotIndexes,
           outputSize: project.outputSize,
           sceneOutputSize: project.sceneOutputSize,
+          customPrompt: customPrompt || undefined,
         }),
       });
 
@@ -416,8 +422,36 @@ export default function TaskDetailPage() {
     }
   };
 
-  const handleRegenerate = async (imageId: number) => {
-    console.log('重新生成图片:', imageId);
+  const handleRegenerate = async (imageId: number, customPrompt?: string) => {
+    if (!project || generating) return;
+
+    // 找到这张图，拿到它的 shotIndex（场景图无 shotIndex，按整任务重做）
+    const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
+    if (!img) {
+      console.warn('未找到要重做的图片:', imageId);
+      return;
+    }
+
+    const moduleType = project.moduleType || 'product';
+    const shotIndex = img.shotIndex;
+
+    try {
+      // 删除该张旧结果（避免重复）
+      await db.images.delete(imageId);
+      setImages(prev => prev.filter(i => i.id !== imageId));
+      setLiveImages(prev => prev.filter(i => i.id !== imageId));
+
+      if (moduleType === 'scene' || !shotIndex) {
+        // 场景图：整张重做
+        await handleStartGeneration(undefined, customPrompt);
+      } else {
+        // 产品图：只重做这一镜次
+        await handleStartGeneration([shotIndex], customPrompt);
+      }
+    } catch (e) {
+      console.error('重新生成失败:', e);
+      setErrorMessage(e instanceof Error ? e.message : '重新生成失败');
+    }
   };
 
   const currentModel = project?.modelId ? MODELS.find(m => m.id === project.modelId) : undefined;
@@ -533,8 +567,43 @@ export default function TaskDetailPage() {
     </div>
   );
 
+  // 任务页面的 AI Chat：当用户描述调整时，触发对当前任务的 customPrompt 重做
+  const taskChatContext = `当前任务: ${project.name}, 模块: ${moduleType === 'product' ? '产品图' : '场景图'}, 体型: ${currentBodyTypeName}, 肤色: ${currentSkinToneName}, 已生成: ${images.length}张`;
+
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
+      {/* 任务侧的 AI Chat 侧边栏：用户可以描述要调整什么，AI 提取参数后整任务重做 */}
+      <AIChatSidebar
+        context={taskChatContext}
+        emptyStateHint={`💬 描述要调整什么\n例如："模特表情更柔和"、"整体亮度提高"\n\nAI 会用你的描述重做这个任务的所有图片`}
+        placeholder="描述要调整什么..."
+        onActions={(actions) => {
+          // 单图细节调整建议在结果图上 hover → ✨ 按钮
+          // 这里的 chat 走整任务重做流程
+          if (actions.bodyType && actions.bodyType !== project.bodyType) {
+            setNewBodyType(actions.bodyType);
+          }
+          if (actions.skinTone && actions.skinTone !== project.skinTone) {
+            setNewSkinTone(actions.skinTone);
+          }
+          // 捕获 prompt，下一步 onTriggerGenerate 时附加到生成请求
+          if (actions.prompt) {
+            pendingChatPromptRef.current = actions.prompt;
+          }
+        }}
+        onTriggerGenerate={() => {
+          if (!generating && project.status !== 'pending') {
+            // 直接触发整任务重做：附带从 chat 提取的 customPrompt
+            const customPrompt = pendingChatPromptRef.current;
+            pendingChatPromptRef.current = '';
+            handleStartGeneration(undefined, customPrompt || undefined);
+          }
+        }}
+      />
+
+      {/* 桌面端：主内容向右偏移以避让 AI 侧边栏（72 * 4 = 288px） */}
+      <div className="lg:pl-72 transition-all duration-500">
+
       {/* 顶部导航 */}
       <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1042,6 +1111,7 @@ export default function TaskDetailPage() {
           </p>
         </div>
       </footer>
+      </div>
     </div>
   );
 }
