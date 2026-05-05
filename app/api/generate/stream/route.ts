@@ -45,6 +45,7 @@ interface GenerateStreamRequest {
   selectedShotIndexes?: number[];
   outputSize?: string;
   sceneOutputSize?: string;
+  customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
 }
 
 // ═══════════════════════════════════════
@@ -157,9 +158,12 @@ async function callGeminiApi(
   const finishMessage = (candidates[0]?.finishMessage as string) || '';
   console.log(`[生图API] finishReason=${finishReason}, finishMessage=${finishMessage.substring(0, 100)}`);
 
-  // IMAGE_RECITATION: Gemini 拒绝生成（常因参考图与训练数据冲突）
+  // IMAGE_RECITATION: Gemini 拒绝生成（参考图与训练数据相似度过高，常见诱因：对镜自拍/明显手机/网图水印/品牌 logo）
   if (finishReason === 'IMAGE_RECITATION') {
-    return { success: false, error: '图片生成被拒绝（IMAGE_RECITATION）— 请更换参考图或调整参数后重试' };
+    return {
+      success: false,
+      error: '图片生成被拒绝：参考图与 Gemini 训练数据过于相似。常见原因：①对镜自拍（手机/镜面反射）②带水印或品牌 logo 的网图 ③知名时尚博主的公开图。建议改用：自然拍摄、无明显反射、无 logo 的服装平铺图或专业拍摄图。',
+    };
   }
 
   const content = candidates[0]?.content as Record<string, unknown> | undefined;
@@ -178,7 +182,7 @@ async function callGeminiApi(
 
   // candidates 有内容但没有图片，可能被安全过滤
   if (finishReason === 'SAFETY') {
-    return { success: false, error: '图片被安全策略过滤，请调整 prompt 或更换参考图' };
+    return { success: false, error: '图片被 Gemini 安全策略拦截，请更换参考图（避免裸露/暴力/争议内容）' };
   }
 
   return { success: false, error: `生成结果中未找到图片数据（finishReason: ${finishReason}）` };
@@ -278,7 +282,13 @@ export async function POST(req: NextRequest) {
     selectedShotIndexes,
     outputSize,
     sceneOutputSize,
+    customPrompt,
   } = body;
+
+  // 截断防止滥用（DoS / token 浪费）
+  const safeCustomPrompt = typeof customPrompt === 'string' && customPrompt.trim()
+    ? customPrompt.trim().slice(0, 500)
+    : undefined;
 
   if (!productImages || productImages.length === 0) {
     return new Response(JSON.stringify({ error: '产品图不能为空' }), { status: 400 });
@@ -386,6 +396,7 @@ export async function POST(req: NextRequest) {
               bgRefImages,
               accessoryImages,
               garmentDescription,
+              customPrompt: safeCustomPrompt,
             });
 
             const parts = buildParts(prompt, productImages, {
@@ -512,6 +523,7 @@ export async function POST(req: NextRequest) {
             accessoryImages,
             hasModel: true,
             garmentDescription,
+            customPrompt: safeCustomPrompt,
           });
 
           const parts = buildParts(prompt, productImages, {
