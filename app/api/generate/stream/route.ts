@@ -15,6 +15,7 @@ import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billi
 import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
+import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
@@ -405,6 +406,7 @@ export async function POST(req: NextRequest) {
               customPrompt: safeCustomPrompt,
             });
 
+            const shotStart = Date.now();
             const result = await generateBackendImage({
               prompt,
               productImages,
@@ -414,6 +416,25 @@ export async function POST(req: NextRequest) {
               anchorImage,
               aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
             }, engine);
+            const shotLatency = Date.now() - shotStart;
+            const apiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+
+            // 持久化生成记录到 Postgres（无论成败）
+            recordGeneration({
+              userId: auth.userId,
+              taskId,
+              module: 'product',
+              shotIndex: shot.index,
+              promptText: prompt,
+              modelId,
+              bodyType,
+              skinTone,
+              aspectRatio,
+              apiModel,
+              success: result.success,
+              apiLatencyMs: shotLatency,
+              errorMessage: result.success ? undefined : result.error,
+            }).catch(err => console.error('[recordGeneration] 失败:', err));
 
             if (result.success && result.data) {
               successCount++;
@@ -533,6 +554,7 @@ export async function POST(req: NextRequest) {
             customPrompt: safeCustomPrompt,
           });
 
+          const sceneShotStart = Date.now();
           const result = await generateBackendImage({
             prompt,
             productImages,
@@ -541,6 +563,24 @@ export async function POST(req: NextRequest) {
             accessoryImages,
             aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
           }, engine);
+          const sceneShotLatency = Date.now() - sceneShotStart;
+          const sceneApiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+
+          // 持久化生成记录到 Postgres
+          recordGeneration({
+            userId: auth.userId,
+            taskId,
+            module: 'scene',
+            promptText: prompt,
+            modelId,
+            bodyType,
+            skinTone,
+            aspectRatio,
+            apiModel: sceneApiModel,
+            success: result.success,
+            apiLatencyMs: sceneShotLatency,
+            errorMessage: result.success ? undefined : result.error,
+          }).catch(err => console.error('[recordGeneration] 失败:', err));
 
           if (result.success && result.data) {
             successCount = 1;
