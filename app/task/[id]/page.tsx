@@ -6,6 +6,7 @@ import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
 import { ModelSelector } from '@/components/ModelSelector';
 import { EngineSelector, ENGINES, type ImageEngine } from '@/components/EngineSelector';
+import { FailureHistoryPanel } from '@/components/FailureHistoryPanel';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -1160,6 +1161,9 @@ export default function TaskDetailPage() {
                 </div>
               </div>
             )}
+
+            {/* 服务端历史尝试（来自 Postgres GenerationRecord）*/}
+            <FailureHistoryPanel taskId={taskId} />
 
             <button
               onClick={() => handleStartGeneration()}
