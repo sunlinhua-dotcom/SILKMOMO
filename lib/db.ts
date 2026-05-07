@@ -37,6 +37,9 @@ export interface Project {
   // 场景图模块专属
   sceneOutputSize?: string;      // 场景图输出尺寸
 
+  // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
+  lastError?: string;
+
   // 兼容旧版
   styleId?: string;
 }

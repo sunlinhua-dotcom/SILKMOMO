@@ -93,6 +93,10 @@ export default function TaskDetailPage() {
       setNewBodyType(task.bodyType || DEFAULT_BODY_TYPE.id);
       setNewSkinTone(task.skinTone || DEFAULT_SKIN_TONE.id);
       setNewEngine(task.engine === 'openai' ? 'openai' : 'gemini');
+      // 失败任务：恢复持久化的错误信息（刷新页面后仍可看到原因）
+      if (task.status === 'failed' && task.lastError) {
+        setErrorMessage(task.lastError);
+      }
     } catch (error) {
       console.error('加载任务失败:', error);
     } finally {
@@ -195,6 +199,7 @@ export default function TaskDetailPage() {
 
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
+    let lastFatalError: string | null = null;
 
     try {
       // —— 用户在 pending 状态用快选改了模特/引擎：持久化覆盖 ——
@@ -211,8 +216,8 @@ export default function TaskDetailPage() {
         setProject(prev => prev ? { ...prev, modelId: effectiveModelId || undefined, engine: effectiveEngine } : null);
       }
 
-      await db.projects.update(taskId, { status: 'processing' });
-      setProject(prev => prev ? { ...prev, status: 'processing' } : null);
+      await db.projects.update(taskId, { status: 'processing', lastError: undefined });
+      setProject(prev => prev ? { ...prev, status: 'processing', lastError: undefined } : null);
 
       const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
 
@@ -333,15 +338,28 @@ export default function TaskDetailPage() {
               console.error(`[SSE] 错误事件:`, errPayload);
               setGenerationErrors(prev => [...prev, errPayload]);
               if (payload.fatal) {
-                setErrorMessage(payload.message as string);
+                const msg = payload.message as string;
+                setErrorMessage(msg);
+                lastFatalError = msg;
+              } else {
+                // 非 fatal 也记录最后一条 SSE 错误（成功生成 0 张时作为兜底原因）
+                lastFatalError = payload.message as string;
               }
 
             } else if (eventType === 'done') {
               console.log(`[SSE] done 事件, successCount=${successCount}`);
               // 最终状态写入
               const finalStatus = successCount > 0 ? 'completed' : 'failed';
-              await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
-              setProject(prev => prev ? { ...prev, status: finalStatus } : null);
+              // 失败时把最后一条错误信息持久化到 DB，刷新页面也能看到
+              const persistedError = finalStatus === 'failed'
+                ? (lastFatalError || '生成失败（未捕获具体原因）')
+                : undefined;
+              await db.projects.update(taskId, {
+                status: finalStatus,
+                lastError: persistedError,
+                updatedAt: new Date(),
+              });
+              setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
               setGenerationPhase(successCount > 0 ? 'done' : 'error');
               // 如果是试生成（只生成 1 张），标记 trialDone
               if (overrideShotIndexes?.length === 1 && successCount === 1) {
@@ -363,10 +381,12 @@ export default function TaskDetailPage() {
         const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
         console.error('[生图前端] 错误详情:', msg);
         setErrorMessage(msg);
+        lastFatalError = msg;
         setGenerationPhase('error');
       }
-      await db.projects.update(taskId, { status: finalStatus, updatedAt: new Date() });
-      setProject(prev => prev ? { ...prev, status: finalStatus } : null);
+      const persistedError = finalStatus === 'failed' ? (lastFatalError || '生成失败（catch）') : undefined;
+      await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
+      setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setGenerating(false);
