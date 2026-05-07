@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
+import { ModelSelector } from '@/components/ModelSelector';
+import { ModelQuickPicker } from '@/components/ModelQuickPicker';
 import { ProductShotModule } from '@/components/ProductShotModule';
 import { SceneShotModule } from '@/components/SceneShotModule';
 import { StylePackManager } from '@/components/StylePackManager';
@@ -38,7 +40,7 @@ export default function HomePage() {
   // ── 共用输入层 ──
   const [productImages, setProductImages] = useState<CompressedImage[]>([]);
   const [modelRefImages, setModelRefImages] = useState<CompressedImage[]>([]);
-  const [selectedModelId] = useState<string>('');
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [selectedBodyType, setSelectedBodyType] = useState<'slim' | 'standard' | 'curvy'>(DEFAULT_BODY_TYPE.id);
   const [selectedSkinTone, setSelectedSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
 
@@ -73,8 +75,9 @@ export default function HomePage() {
       setSelectedBodyType(brandPrefs.defaultBodyType);
       setSelectedSkinTone(brandPrefs.defaultSkinTone);
       setActiveModule(brandPrefs.defaultModule);
+      if (brandPrefs.defaultModelId) setSelectedModelId(brandPrefs.defaultModelId);
     }
-  }, [brandPrefs.loaded, brandPrefs.hasProfile, brandPrefs.defaultBodyType, brandPrefs.defaultSkinTone, brandPrefs.defaultModule]);
+  }, [brandPrefs.loaded, brandPrefs.hasProfile, brandPrefs.defaultBodyType, brandPrefs.defaultSkinTone, brandPrefs.defaultModule, brandPrefs.defaultModelId]);
 
   // ── 上传产品图后自动触发 AI 分析 ──
   useEffect(() => {
@@ -151,6 +154,7 @@ export default function HomePage() {
           module: activeModule,
           bodyType: selectedBodyType,
           skinTone: selectedSkinTone,
+          modelId: selectedModelId || undefined,
           selectedShots: activeModule === 'product' ? selectedShots : undefined,
           customPrompt: customPrompt || undefined,
           productImageThumbs: thumbs.filter(Boolean),
@@ -186,6 +190,9 @@ export default function HomePage() {
     setActiveModule(snapshot.module);
     setSelectedBodyType(snapshot.bodyType as 'slim' | 'standard' | 'curvy');
     setSelectedSkinTone(snapshot.skinTone as 'light' | 'medium' | 'deep');
+    if (snapshot.modelId !== undefined) {
+      setSelectedModelId(snapshot.modelId);
+    }
     if (snapshot.selectedShots) {
       setSelectedShots(snapshot.selectedShots);
     }
@@ -422,6 +429,12 @@ export default function HomePage() {
                   </button>
                 </div>
 
+                {/* 模特快选（一键切换人种 / 性别） */}
+                <ModelQuickPicker
+                  selectedModel={selectedModelId}
+                  onSelect={setSelectedModelId}
+                />
+
                 {/* 体型 + 肤色（并排紧凑） */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <BodyTypeSelector
@@ -488,6 +501,12 @@ export default function HomePage() {
                     className="w-full text-xl font-serif text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/50 border-0 border-b border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:ring-0 px-2 py-4 bg-transparent transition-colors"
                   />
                 </div>
+
+                {/* 模特预设（5 张完整卡片，含肤色/发型细节） */}
+                <ModelSelector
+                  selectedModel={selectedModelId}
+                  onSelect={setSelectedModelId}
+                />
 
                 {/* 模特参考图 */}
                 <ImageUploader
