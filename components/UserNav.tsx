@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Wallet, Settings, LogOut, User as UserIcon } from 'lucide-react';
+import { Wallet, Settings, LogOut, User as UserIcon, Sparkles } from 'lucide-react';
 
 interface UserInfo {
   username: string;
@@ -98,6 +98,15 @@ export function UserNav() {
                 管理后台
               </Link>
             )}
+
+            <Link
+              href="/brand"
+              onClick={() => setShowMenu(false)}
+              className="flex items-center gap-2 px-4 py-2.5 text-sm hover:bg-[var(--color-background)] transition-colors"
+            >
+              <Sparkles className="w-4 h-4 text-[var(--color-text-muted)]" />
+              品牌设置
+            </Link>
 
             <Link
               href="/tasks"
