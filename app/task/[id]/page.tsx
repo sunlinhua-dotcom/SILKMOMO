@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
 import { ModelSelector } from '@/components/ModelSelector';
+import { ModelQuickPicker } from '@/components/ModelQuickPicker';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -194,6 +195,16 @@ export default function TaskDetailPage() {
     let successCount = 0;
 
     try {
+      // —— 用户在 pending 状态用快选改了模特：持久化覆盖 ——
+      const effectiveModelId = newModelId || project.modelId || '';
+      if (effectiveModelId !== (project.modelId || '')) {
+        await db.projects.update(taskId, {
+          modelId: effectiveModelId || undefined,
+          updatedAt: new Date(),
+        });
+        setProject(prev => prev ? { ...prev, modelId: effectiveModelId || undefined } : null);
+      }
+
       await db.projects.update(taskId, { status: 'processing' });
       setProject(prev => prev ? { ...prev, status: 'processing' } : null);
 
@@ -211,7 +222,7 @@ export default function TaskDetailPage() {
           bgRefImages: inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           sceneRefImages: inputImages.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           accessoryImages: inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
-          modelId: project.modelId,
+          modelId: effectiveModelId || undefined,
           bodyType: project.bodyType || DEFAULT_BODY_TYPE.id,
           skinTone: project.skinTone || DEFAULT_SKIN_TONE.id,
           selectedShotIndexes,
@@ -951,6 +962,14 @@ export default function TaskDetailPage() {
                 : 'AI 将根据场景参考图生成专业场景图'
               }
             </p>
+
+            {/* 生成前最后一次模特微调 */}
+            <div className="max-w-xl mx-auto mb-6 px-4 text-left">
+              <ModelQuickPicker
+                selectedModel={newModelId}
+                onSelect={setNewModelId}
+              />
+            </div>
 
             {moduleType === 'product' && getShotCount() > 1 ? (
               <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
