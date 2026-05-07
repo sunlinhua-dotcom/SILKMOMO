@@ -7,6 +7,7 @@ import { createHash } from 'crypto';
 
 export interface RecordGenerationParams {
   userId: string;
+  taskId?: number;
   module: 'product' | 'scene';
   shotIndex?: number;
   promptText: string;
@@ -31,6 +32,7 @@ export async function recordGeneration(params: RecordGenerationParams): Promise<
   const record = await prisma.generationRecord.create({
     data: {
       userId: params.userId,
+      taskId: params.taskId,
       module: params.module,
       shotIndex: params.shotIndex,
       promptHash,

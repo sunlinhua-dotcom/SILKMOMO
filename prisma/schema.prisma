@@ -82,6 +82,7 @@ model BrandProfile {
 model GenerationRecord {
   id           String   @id @default(cuid())
   userId       String
+  taskId       Int?                           // Dexie Project.id（前端任务关联，便于反查"任务 X 为啥失败"）
   module       String   @default("product")  // "product" | "scene"
   shotIndex    Int?                           // 镜次编号（产品图）
   promptHash   String                         // prompt 的 hash（去重统计）
@@ -110,6 +111,7 @@ model GenerationRecord {
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+  @@index([taskId])
   @@index([promptHash])
   @@index([rating])
   @@index([module, shotIndex])
