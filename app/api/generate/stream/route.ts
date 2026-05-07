@@ -13,6 +13,7 @@ import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
 import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
+import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
@@ -553,6 +554,16 @@ export async function POST(req: NextRequest) {
               fatal: true,
             });
           }
+        }
+
+        // 静默学习品牌偏好：至少 1 张成功就记住这次的 模特/体型/肤色/模块
+        if (successCount > 0) {
+          autoSaveBrandPreference(auth.userId, {
+            modelId: modelId || undefined,
+            bodyType: bodyType || undefined,
+            skinTone: skinTone || undefined,
+            module: moduleType,
+          }).catch(() => {});
         }
 
         push('done', {
