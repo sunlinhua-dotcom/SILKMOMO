@@ -136,7 +136,8 @@ export interface FlowSnapshot {
   module: 'product' | 'scene';
   bodyType: string;
   skinTone: string;
-  
+  modelId?: string;
+
   // 产品图相关
   selectedShots?: number[];     // 镜次索引
   customPrompt?: string;
