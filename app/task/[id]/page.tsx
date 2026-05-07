@@ -5,7 +5,6 @@ import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
 import { ModelSelector } from '@/components/ModelSelector';
-import { ModelQuickPicker } from '@/components/ModelQuickPicker';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -964,8 +963,8 @@ export default function TaskDetailPage() {
             </p>
 
             {/* 生成前最后一次模特微调 */}
-            <div className="max-w-xl mx-auto mb-6 px-4 text-left">
-              <ModelQuickPicker
+            <div className="mb-8 px-4 sm:px-8 text-left">
+              <ModelSelector
                 selectedModel={newModelId}
                 onSelect={setNewModelId}
               />

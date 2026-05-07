@@ -17,7 +17,7 @@ export function ModelQuickPicker({ selectedModel, onSelect }: ModelQuickPickerPr
                 <span className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">模特</span>
                 <span className="text-[10px] text-[var(--color-text-muted)] normal-case tracking-normal">未选则按品牌记忆</span>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1 scrollbar-thin">
+            <div className="flex flex-wrap gap-2">
                 {MODELS.map((model) => {
                     const isSelected = model.id === selectedModel;
                     const Icon = MODEL_ICONS[model.id];
@@ -28,10 +28,10 @@ export function ModelQuickPicker({ selectedModel, onSelect }: ModelQuickPickerPr
                             key={model.id}
                             onClick={() => onSelect(isSelected ? '' : model.id)}
                             className={`
-                                flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-200
+                                cursor-pointer flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-200
                                 ${isSelected
                                     ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.06)] text-[var(--color-accent)] ring-1 ring-[var(--color-accent)]'
-                                    : 'border-[var(--color-border-light)] bg-white hover:border-[var(--color-border)] text-[var(--color-text-secondary)]'
+                                    : 'border-[var(--color-border-light)] bg-white hover:border-[var(--color-border)] hover:shadow-sm text-[var(--color-text-secondary)]'
                                 }
                             `}
                         >
