@@ -8,6 +8,7 @@ import { Logo } from '@/components/Logo';
 import { ModelSelector } from '@/components/ModelSelector';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
+import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 
 interface BrandProfileForm {
   name: string;
@@ -15,6 +16,7 @@ interface BrandProfileForm {
   defaultBodyType: 'slim' | 'standard' | 'curvy';
   defaultSkinTone: 'light' | 'medium' | 'deep';
   defaultModule: 'product' | 'scene';
+  defaultEngine: ImageEngine;
 }
 
 const INITIAL_FORM: BrandProfileForm = {
@@ -23,6 +25,7 @@ const INITIAL_FORM: BrandProfileForm = {
   defaultBodyType: 'standard',
   defaultSkinTone: 'light',
   defaultModule: 'product',
+  defaultEngine: 'gemini',
 };
 
 export default function BrandSettingsPage() {
@@ -50,6 +53,7 @@ export default function BrandSettingsPage() {
             defaultBodyType: (data.profile.defaultBodyType as BrandProfileForm['defaultBodyType']) || 'standard',
             defaultSkinTone: (data.profile.defaultSkinTone as BrandProfileForm['defaultSkinTone']) || 'light',
             defaultModule: (data.profile.defaultModule as BrandProfileForm['defaultModule']) || 'product',
+            defaultEngine: data.profile.defaultEngine === 'openai' ? 'openai' : 'gemini',
           });
         }
       })
@@ -171,6 +175,16 @@ export default function BrandSettingsPage() {
               </div>
             </button>
           </div>
+        </div>
+
+        {/* 默认生图引擎 */}
+        <div className="space-y-3">
+          <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认生图引擎</label>
+          <EngineSelector
+            selected={form.defaultEngine}
+            onSelect={(engine) => setForm({ ...form, defaultEngine: engine })}
+            variant="full"
+          />
         </div>
 
         {/* 默认模特 */}

@@ -14,6 +14,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
 import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
+import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
@@ -47,6 +48,7 @@ interface GenerateStreamRequest {
   outputSize?: string;
   sceneOutputSize?: string;
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
+  engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
 }
 
 // ═══════════════════════════════════════
@@ -284,7 +286,10 @@ export async function POST(req: NextRequest) {
     outputSize,
     sceneOutputSize,
     customPrompt,
+    engine: rawEngine,
   } = body;
+
+  const engine = normalizeBackend(rawEngine);
 
   // 截断防止滥用（DoS / token 浪费）
   const safeCustomPrompt = typeof customPrompt === 'string' && customPrompt.trim()
@@ -400,14 +405,15 @@ export async function POST(req: NextRequest) {
               customPrompt: safeCustomPrompt,
             });
 
-            const parts = buildParts(prompt, productImages, {
+            const result = await generateBackendImage({
+              prompt,
+              productImages,
               modelRefImages,
               bgRefImages,
               accessoryImages,
               anchorImage,
-            });
-
-            const result = await callGeminiApi(parts, aspectRatio);
+              aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+            }, engine);
 
             if (result.success && result.data) {
               successCount++;
@@ -527,13 +533,14 @@ export async function POST(req: NextRequest) {
             customPrompt: safeCustomPrompt,
           });
 
-          const parts = buildParts(prompt, productImages, {
+          const result = await generateBackendImage({
+            prompt,
+            productImages,
             modelRefImages,
             sceneRefImages,
             accessoryImages,
-          });
-
-          const result = await callGeminiApi(parts, aspectRatio);
+            aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+          }, engine);
 
           if (result.success && result.data) {
             successCount = 1;
@@ -556,13 +563,14 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // 静默学习品牌偏好：至少 1 张成功就记住这次的 模特/体型/肤色/模块
+        // 静默学习品牌偏好：至少 1 张成功就记住这次的 模特/体型/肤色/模块/引擎
         if (successCount > 0) {
           autoSaveBrandPreference(auth.userId, {
             modelId: modelId || undefined,
             bodyType: bodyType || undefined,
             skinTone: skinTone || undefined,
             module: moduleType,
+            engine,
           }).catch(() => {});
         }
 

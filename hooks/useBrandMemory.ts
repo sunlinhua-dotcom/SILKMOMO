@@ -10,6 +10,7 @@ export interface BrandPreferences {
   defaultSkinTone: 'light' | 'medium' | 'deep';
   defaultModule: 'product' | 'scene';
   defaultAspectRatio: string;
+  defaultEngine: 'gemini' | 'openai';
   brandName: string;
 }
 
@@ -21,6 +22,7 @@ const DEFAULT_PREFS: BrandPreferences = {
   defaultSkinTone: 'light',
   defaultModule: 'product',
   defaultAspectRatio: '3:4',
+  defaultEngine: 'gemini',
   brandName: '',
 };
 
@@ -55,6 +57,7 @@ export function useBrandMemory() {
             defaultSkinTone: (p.defaultSkinTone as 'light' | 'medium' | 'deep') || 'light',
             defaultModule: (p.defaultModule as 'product' | 'scene') || 'product',
             defaultAspectRatio: p.defaultAspectRatio || '3:4',
+            defaultEngine: (p.defaultEngine === 'openai' ? 'openai' : 'gemini'),
             brandName: p.name || '',
           });
         }
