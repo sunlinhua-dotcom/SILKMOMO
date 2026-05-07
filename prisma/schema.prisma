@@ -68,6 +68,7 @@ model BrandProfile {
   // 输出偏好
   defaultModule   String   @default("product")        // "product" | "scene"
   defaultAspectRatio String @default("3:4")           // 默认比例
+  defaultEngine   String   @default("gemini")         // 默认生图引擎: "gemini" | "openai"
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

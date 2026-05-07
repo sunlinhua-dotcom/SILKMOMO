@@ -25,6 +25,7 @@ export interface Project {
   modelId?: string;              // 预设模特 ID（如果是预设模特）
   bodyType?: BodyType;           // 体型：slim / standard / curvy
   skinTone?: SkinTone;           // 肤色：light / medium / deep
+  engine?: 'gemini' | 'openai';  // 生图引擎：gemini / openai (gpt-image-2-all)
 
   // 产品图模块专属
   skuType?: SkuType;             // SKU 类型：套装 / 单件上装 / 单件下装

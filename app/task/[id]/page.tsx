@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
 import { ModelSelector } from '@/components/ModelSelector';
+import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -60,6 +61,7 @@ export default function TaskDetailPage() {
   const [newModelId, setNewModelId] = useState('');
   const [newBodyType, setNewBodyType] = useState<'slim' | 'standard' | 'curvy'>(DEFAULT_BODY_TYPE.id);
   const [newSkinTone, setNewSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
+  const [newEngine, setNewEngine] = useState<ImageEngine>('gemini');
   const [newStyleImages, setNewStyleImages] = useState<CompressedImage[]>([]);
 
   // --- 输入图片放大预览 ---
@@ -90,6 +92,7 @@ export default function TaskDetailPage() {
       setNewModelId(task.modelId || '');
       setNewBodyType(task.bodyType || DEFAULT_BODY_TYPE.id);
       setNewSkinTone(task.skinTone || DEFAULT_SKIN_TONE.id);
+      setNewEngine(task.engine === 'openai' ? 'openai' : 'gemini');
     } catch (error) {
       console.error('加载任务失败:', error);
     } finally {
@@ -194,14 +197,18 @@ export default function TaskDetailPage() {
     let successCount = 0;
 
     try {
-      // —— 用户在 pending 状态用快选改了模特：持久化覆盖 ——
+      // —— 用户在 pending 状态用快选改了模特/引擎：持久化覆盖 ——
       const effectiveModelId = newModelId || project.modelId || '';
-      if (effectiveModelId !== (project.modelId || '')) {
+      const effectiveEngine: 'gemini' | 'openai' = newEngine;
+      const modelChanged = effectiveModelId !== (project.modelId || '');
+      const engineChanged = effectiveEngine !== (project.engine || 'gemini');
+      if (modelChanged || engineChanged) {
         await db.projects.update(taskId, {
           modelId: effectiveModelId || undefined,
+          engine: effectiveEngine,
           updatedAt: new Date(),
         });
-        setProject(prev => prev ? { ...prev, modelId: effectiveModelId || undefined } : null);
+        setProject(prev => prev ? { ...prev, modelId: effectiveModelId || undefined, engine: effectiveEngine } : null);
       }
 
       await db.projects.update(taskId, { status: 'processing' });
@@ -224,6 +231,7 @@ export default function TaskDetailPage() {
           modelId: effectiveModelId || undefined,
           bodyType: project.bodyType || DEFAULT_BODY_TYPE.id,
           skinTone: project.skinTone || DEFAULT_SKIN_TONE.id,
+          engine: effectiveEngine,
           selectedShotIndexes,
           outputSize: project.outputSize,
           sceneOutputSize: project.sceneOutputSize,
@@ -402,6 +410,7 @@ export default function TaskDetailPage() {
         modelId: newModelId || undefined,
         bodyType: newBodyType,
         skinTone: newSkinTone,
+        engine: newEngine,
         status: 'pending',
         updatedAt: new Date(),
       });
@@ -700,6 +709,16 @@ export default function TaskDetailPage() {
                 <div>当前肤色: <span className="font-medium text-[var(--color-text)]">{currentSkinToneName}</span></div>
               </div>
 
+              {/* 生图引擎选择 */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">生图引擎</h3>
+                <EngineSelector
+                  selected={newEngine}
+                  onSelect={setNewEngine}
+                  variant="full"
+                />
+              </div>
+
               {/* 模特选择 */}
               <div>
                 <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择模特</h3>
@@ -962,8 +981,13 @@ export default function TaskDetailPage() {
               }
             </p>
 
-            {/* 生成前最后一次模特微调 */}
-            <div className="mb-8 px-4 sm:px-8 text-left">
+            {/* 生成前最后一次微调：引擎 + 模特 */}
+            <div className="mb-8 px-4 sm:px-8 text-left space-y-6">
+              <EngineSelector
+                selected={newEngine}
+                onSelect={setNewEngine}
+                variant="full"
+              />
               <ModelSelector
                 selectedModel={newModelId}
                 onSelect={setNewModelId}

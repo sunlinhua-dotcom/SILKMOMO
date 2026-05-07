@@ -6,6 +6,7 @@ import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
 import { ModelSelector } from '@/components/ModelSelector';
 import { ModelQuickPicker } from '@/components/ModelQuickPicker';
+import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 import { ProductShotModule } from '@/components/ProductShotModule';
 import { SceneShotModule } from '@/components/SceneShotModule';
 import { StylePackManager } from '@/components/StylePackManager';
@@ -43,6 +44,7 @@ export default function HomePage() {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [selectedBodyType, setSelectedBodyType] = useState<'slim' | 'standard' | 'curvy'>(DEFAULT_BODY_TYPE.id);
   const [selectedSkinTone, setSelectedSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
+  const [selectedEngine, setSelectedEngine] = useState<ImageEngine>('gemini');
 
   // 配件
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -76,8 +78,9 @@ export default function HomePage() {
       setSelectedSkinTone(brandPrefs.defaultSkinTone);
       setActiveModule(brandPrefs.defaultModule);
       if (brandPrefs.defaultModelId) setSelectedModelId(brandPrefs.defaultModelId);
+      setSelectedEngine(brandPrefs.defaultEngine);
     }
-  }, [brandPrefs.loaded, brandPrefs.hasProfile, brandPrefs.defaultBodyType, brandPrefs.defaultSkinTone, brandPrefs.defaultModule, brandPrefs.defaultModelId]);
+  }, [brandPrefs.loaded, brandPrefs.hasProfile, brandPrefs.defaultBodyType, brandPrefs.defaultSkinTone, brandPrefs.defaultModule, brandPrefs.defaultModelId, brandPrefs.defaultEngine]);
 
   // ── 上传产品图后自动触发 AI 分析 ──
   useEffect(() => {
@@ -116,6 +119,7 @@ export default function HomePage() {
         modelId: selectedModelId || undefined,
         bodyType: selectedBodyType,
         skinTone: selectedSkinTone,
+        engine: selectedEngine,
         skuType: activeModule === 'product' ? skuType : undefined,
         selectedShots: activeModule === 'product' ? JSON.stringify(selectedShots) : undefined,
         outputSize: activeModule === 'product' ? productOutputSize : undefined,
@@ -447,6 +451,13 @@ export default function HomePage() {
                   />
                 </div>
 
+                {/* 生图引擎快选 */}
+                <EngineSelector
+                  selected={selectedEngine}
+                  onSelect={setSelectedEngine}
+                  variant="compact"
+                />
+
                 {/* 快速生成按钮 — 产品图模式 */}
                 {activeModule === 'product' && (
                   <button
@@ -501,6 +512,13 @@ export default function HomePage() {
                     className="w-full text-xl font-serif text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/50 border-0 border-b border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:ring-0 px-2 py-4 bg-transparent transition-colors"
                   />
                 </div>
+
+                {/* 生图引擎（卡片模式，详细对比两个 backend） */}
+                <EngineSelector
+                  selected={selectedEngine}
+                  onSelect={setSelectedEngine}
+                  variant="full"
+                />
 
                 {/* 模特预设（5 张完整卡片，含肤色/发型细节） */}
                 <ModelSelector
@@ -633,6 +651,7 @@ export default function HomePage() {
                           modelId: combo.modelId || undefined,
                           bodyType: combo.bodyType as 'slim' | 'standard' | 'curvy',
                           skinTone: combo.skinTone as 'light' | 'medium' | 'deep',
+                          engine: selectedEngine,
                           skuType: activeModule === 'product' ? skuType : undefined,
                           selectedShots: activeModule === 'product' ? JSON.stringify(selectedShots) : undefined,
                           outputSize: activeModule === 'product' ? combo.outputSize : undefined,

@@ -15,6 +15,7 @@ export interface BrandProfileData {
   promptSuffix?: string;
   defaultModule?: string;
   defaultAspectRatio?: string;
+  defaultEngine?: string;
 }
 
 /**
@@ -48,6 +49,7 @@ export async function getDefaultBrandProfile(userId: string) {
     promptSuffix: profile.promptSuffix,
     defaultModule: profile.defaultModule,
     defaultAspectRatio: profile.defaultAspectRatio,
+    defaultEngine: profile.defaultEngine,
   };
 }
 
@@ -71,6 +73,7 @@ export async function updateBrandProfile(
   if (data.promptSuffix !== undefined) updateData.promptSuffix = data.promptSuffix;
   if (data.defaultModule !== undefined) updateData.defaultModule = data.defaultModule;
   if (data.defaultAspectRatio !== undefined) updateData.defaultAspectRatio = data.defaultAspectRatio;
+  if (data.defaultEngine !== undefined) updateData.defaultEngine = data.defaultEngine;
 
   return await prisma.brandProfile.update({
     where: { id: profileId, userId },
@@ -90,6 +93,7 @@ export async function autoSaveBrandPreference(
     skinTone?: string;
     module?: string;
     aspectRatio?: string;
+    engine?: string;
   }
 ) {
   const profile = await prisma.brandProfile.findFirst({
@@ -108,6 +112,7 @@ export async function autoSaveBrandPreference(
         defaultSkinTone: preferences.skinTone || 'light',
         defaultModule: preferences.module || 'product',
         defaultAspectRatio: preferences.aspectRatio || '3:4',
+        defaultEngine: preferences.engine || 'gemini',
       },
     });
     return;
@@ -120,6 +125,7 @@ export async function autoSaveBrandPreference(
   if (preferences.skinTone) updateData.defaultSkinTone = preferences.skinTone;
   if (preferences.module) updateData.defaultModule = preferences.module;
   if (preferences.aspectRatio) updateData.defaultAspectRatio = preferences.aspectRatio;
+  if (preferences.engine) updateData.defaultEngine = preferences.engine;
 
   if (Object.keys(updateData).length > 0) {
     await prisma.brandProfile.update({
