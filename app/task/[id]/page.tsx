@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { db, type Project, type ImageItem } from '@/lib/db';
 import { ResultGallery } from '@/components/ResultGallery';
 import { ModelSelector } from '@/components/ModelSelector';
-import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
+import { EngineSelector, ENGINES, type ImageEngine } from '@/components/EngineSelector';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -555,8 +555,14 @@ export default function TaskDetailPage() {
     ? '8%'
     : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`;
 
+  const currentEngineId: ImageEngine = project.engine === 'openai' ? 'openai' : 'gemini';
+  const currentEngineName = ENGINES.find(e => e.id === currentEngineId)?.name ?? 'Gemini Flash Image';
+
   const paramChips = (
     <div className="flex flex-wrap gap-2">
+      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+        引擎: {currentEngineName}
+      </span>
       {project.modelId && (
         <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
           模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
