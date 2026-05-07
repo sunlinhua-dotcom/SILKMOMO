@@ -116,9 +116,17 @@ export default function AdminPage() {
             <Logo width={32} height={32} />
             <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
           </Link>
-          <span className="px-3 py-1 text-xs font-semibold bg-[var(--color-accent)]/10 text-[var(--color-accent)] rounded-lg">
-            管理后台
-          </span>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/admin/failures"
+              className="px-3 py-1 text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+            >
+              失败监控
+            </Link>
+            <span className="px-3 py-1 text-xs font-semibold bg-[var(--color-accent)]/10 text-[var(--color-accent)] rounded-lg">
+              管理后台
+            </span>
+          </div>
         </div>
       </header>
 
