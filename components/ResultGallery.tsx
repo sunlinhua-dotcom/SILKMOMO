@@ -148,6 +148,15 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                     className="w-full h-full object-contain"
                   />
 
+                  {/* 重做中遮罩 + 旋转 spinner */}
+                  {regenerating.has(image.id) && (
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] flex flex-col items-center justify-center gap-3 z-20 animate-fade-in">
+                      <Loader className="w-10 h-10 text-white animate-spin" strokeWidth={1.5} />
+                      <span className="text-sm text-white font-medium tracking-wide">重做中…</span>
+                      <span className="text-[10px] text-white/70">完成后将自动替换</span>
+                    </div>
+                  )}
+
                   {/* 悬浮操作栏 */}
                   <div className={`absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent transition-opacity flex items-end justify-center pb-4 gap-2 ${adjustingId === image.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                     <div className="relative group/tip">
