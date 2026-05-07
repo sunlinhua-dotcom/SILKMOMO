@@ -150,45 +150,54 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
 
                   {/* 悬浮操作栏 */}
                   <div className={`absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent transition-opacity flex items-end justify-center pb-4 gap-2 ${adjustingId === image.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDownload(image);
-                      }}
-                      className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors"
-                      title="下载"
-                    >
-                      <Download className="w-5 h-5" strokeWidth={1.5} />
-                    </button>
+                    <div className="relative group/tip">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDownload(image);
+                        }}
+                        className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors"
+                        aria-label="下载图片"
+                      >
+                        <Download className="w-5 h-5" strokeWidth={1.5} />
+                      </button>
+                      <span className="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2.5 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-10">下载</span>
+                    </div>
                     {onRegenerate && (
                       <>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleRegenerate(image);
-                          }}
-                          disabled={regenerating.has(image.id)}
-                          className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
-                          title="重新生成（用相同参数）"
-                        >
-                          {regenerating.has(image.id) ? (
-                            <Loader className="w-5 h-5 animate-spin" />
-                          ) : (
-                            <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
-                          )}
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setAdjustingId(image.id);
-                            setAdjustText('');
-                          }}
-                          disabled={regenerating.has(image.id)}
-                          className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
-                          title="描述要调整什么"
-                        >
-                          <Wand2 className="w-5 h-5" strokeWidth={1.5} />
-                        </button>
+                        <div className="relative group/tip">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRegenerate(image);
+                            }}
+                            disabled={regenerating.has(image.id)}
+                            className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
+                            aria-label="重新生成（用相同参数）"
+                          >
+                            {regenerating.has(image.id) ? (
+                              <Loader className="w-5 h-5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
+                            )}
+                          </button>
+                          <span className="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2.5 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-10">重新生成</span>
+                        </div>
+                        <div className="relative group/tip">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAdjustingId(image.id);
+                              setAdjustText('');
+                            }}
+                            disabled={regenerating.has(image.id)}
+                            className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors disabled:opacity-50"
+                            aria-label="描述要调整什么"
+                          >
+                            <Wand2 className="w-5 h-5" strokeWidth={1.5} />
+                          </button>
+                          <span className="pointer-events-none absolute -top-9 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2.5 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-10">微调描述</span>
+                        </div>
                       </>
                     )}
                   </div>
