@@ -455,10 +455,10 @@ export default function TaskDetailPage() {
     const shotIndex = img.shotIndex;
 
     try {
-      // 删除该张旧结果（避免重复）
+      // 旧结果先从 DB 删除（避免最终重复），但保留在 React state 中
+      // 显示 overlay + spinner 作为占位 —— 等 SSE 出新图后 loadTaskData
+      // 重新拉取，自动用新图替换
       await db.images.delete(imageId);
-      setImages(prev => prev.filter(i => i.id !== imageId));
-      setLiveImages(prev => prev.filter(i => i.id !== imageId));
 
       if (moduleType === 'scene' || !shotIndex) {
         // 场景图：整张重做
