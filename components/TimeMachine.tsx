@@ -103,29 +103,35 @@ export function TimeMachine({ onReplay }: TimeMachineProps) {
             {/* 右侧操作：查看(隐式=卡片点击) / 重做 / 删除 */}
             <div className="flex items-center gap-0.5 flex-shrink-0">
               {snap.taskId && (
-                <span
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-[var(--color-text-muted)] opacity-0 group-hover:opacity-70"
-                  title="查看任务"
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                </span>
+                <div className="relative group/tip">
+                  <span className="w-7 h-7 rounded-full flex items-center justify-center text-[var(--color-text-muted)] opacity-0 group-hover:opacity-70">
+                    <Eye className="w-3.5 h-3.5" />
+                  </span>
+                  <span className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-30">查看任务</span>
+                </div>
               )}
-              <button
-                type="button"
-                onClick={(e) => handleReplayClick(snap, e)}
-                className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-[rgba(201,168,108,0.12)] transition-all"
-                title="用相同参数重新生成"
-              >
-                <Play className="w-3.5 h-3.5 text-[var(--color-accent)]" fill="currentColor" />
-              </button>
-              <button
-                type="button"
-                onClick={(e) => handleDelete(snap.id, e)}
-                className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all"
-                title="删除快照"
-              >
-                <Trash2 className="w-3 h-3 text-[var(--color-text-muted)] hover:text-red-500" />
-              </button>
+              <div className="relative group/tip">
+                <button
+                  type="button"
+                  onClick={(e) => handleReplayClick(snap, e)}
+                  className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-[rgba(201,168,108,0.12)] transition-all"
+                  aria-label="用相同参数重新生成"
+                >
+                  <Play className="w-3.5 h-3.5 text-[var(--color-accent)]" fill="currentColor" />
+                </button>
+                <span className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-30">重做</span>
+              </div>
+              <div className="relative group/tip">
+                <button
+                  type="button"
+                  onClick={(e) => handleDelete(snap.id, e)}
+                  className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all"
+                  aria-label="删除快照"
+                >
+                  <Trash2 className="w-3 h-3 text-[var(--color-text-muted)] hover:text-red-500" />
+                </button>
+                <span className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] px-2 py-1 rounded-md bg-black/85 text-white opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-30">删除</span>
+              </div>
             </div>
           </div>
         ))}
