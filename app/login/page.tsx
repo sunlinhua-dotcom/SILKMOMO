@@ -31,7 +31,15 @@ export default function LoginPage() {
         return;
       }
 
-      await syncLocalWorkspaceForUser(data.user?.username || username);
+      try {
+        await syncLocalWorkspaceForUser(data.user?.username || username);
+      } catch (workspaceError) {
+        console.warn('登录后同步本地工作区失败:', workspaceError);
+        await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+        setError('登录已验证，但本地缓存清理失败。请关闭其它 SILKMOMO 标签页后重试，或清除本站点数据。');
+        return;
+      }
+
       router.push('/');
       router.refresh();
     } catch {

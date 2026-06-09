@@ -4,12 +4,33 @@ const LOCAL_WORKSPACE_KEYS = [
   'silkmomo_time_machine',
   'luxury_pack_init',
 ];
+const LOCAL_WORKSPACE_SYNC_TIMEOUT_MS = 6000;
+
+function withWorkspaceTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label}超时`));
+    }, LOCAL_WORKSPACE_SYNC_TIMEOUT_MS);
+  });
+
+  return Promise.race([
+    operation.finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+    }),
+    timeout,
+  ]);
+}
 
 async function clearIndexedDb() {
   const { db } = await import('@/lib/db');
-  db.close();
-  await db.delete();
   await db.open();
+  await db.transaction('rw', db.projects, db.images, db.stylePacks, async () => {
+    await db.images.clear();
+    await db.projects.clear();
+    await db.stylePacks.clear();
+  });
 }
 
 function clearLocalStorageWorkspace() {
@@ -32,15 +53,22 @@ async function hasLocalWorkspaceData() {
   }
 }
 
-export async function resetLocalWorkspace() {
+export async function resetLocalWorkspace(options?: { strict?: boolean }) {
+  let indexedDbError: unknown;
+
   try {
     await clearIndexedDb();
   } catch (e) {
+    indexedDbError = e;
     console.warn('清空 IndexedDB 失败:', e);
   }
   try {
     clearLocalStorageWorkspace();
   } catch {}
+
+  if (indexedDbError && options?.strict) {
+    throw indexedDbError;
+  }
 }
 
 export async function syncLocalWorkspaceForUser(username: string, options?: { forceReset?: boolean }) {
@@ -50,10 +78,16 @@ export async function syncLocalWorkspaceForUser(username: string, options?: { fo
   const shouldReset =
     options?.forceReset ||
     (previousUsername !== null && previousUsername !== username) ||
-    (previousUsername === null && await hasLocalWorkspaceData());
+    (previousUsername === null && await withWorkspaceTimeout(
+      hasLocalWorkspaceData(),
+      '检查本地工作区'
+    ));
 
   if (shouldReset) {
-    await resetLocalWorkspace();
+    await withWorkspaceTimeout(
+      resetLocalWorkspace({ strict: true }),
+      '清理本地工作区'
+    );
   }
 
   window.localStorage.setItem(ACTIVE_USERNAME_KEY, username);
