@@ -32,7 +32,15 @@ export default function RegisterPage() {
         return;
       }
 
-      await syncLocalWorkspaceForUser(data.user?.username || username, { forceReset: true });
+      try {
+        await syncLocalWorkspaceForUser(data.user?.username || username, { forceReset: true });
+      } catch (workspaceError) {
+        console.warn('注册后同步本地工作区失败:', workspaceError);
+        await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+        setError('注册成功，但本地缓存清理失败。请关闭其它 SILKMOMO 标签页后重新登录，或清除本站点数据。');
+        return;
+      }
+
       router.push('/');
       router.refresh();
     } catch {
