@@ -25,6 +25,7 @@ export interface LibraryImage {
   originalSize: number;
   addedAt: number;       // 时间戳
   label?: string;        // 可选标签（如"白色T恤"）
+  category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory';
 }
 
 /** 获取图库所有图片 */
@@ -41,7 +42,10 @@ export function getLibraryImages(): LibraryImage[] {
 }
 
 /** 将压缩后的图片添加到图库 */
-export function addToLibrary(images: CompressedImage[]): LibraryImage[] {
+export function addToLibrary(
+  images: CompressedImage[],
+  category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory'
+): LibraryImage[] {
   const existing = getLibraryImages();
   
   const newEntries: LibraryImage[] = images.map(img => ({
@@ -54,6 +58,7 @@ export function addToLibrary(images: CompressedImage[]): LibraryImage[] {
     height: img.height,
     originalSize: img.originalSize ?? img.size,
     addedAt: Date.now(),
+    category,
   }));
 
   // 去重（按 base64 前 100 字符判断）

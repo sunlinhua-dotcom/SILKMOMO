@@ -103,10 +103,11 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
       <button
         onClick={() => setCollapsed(v => !v)}
         className="absolute -right-3 top-24 w-6 h-6 rounded-full bg-[var(--color-surface)] border border-[var(--color-border-light)] shadow flex items-center justify-center z-50 hover:bg-[var(--color-background)] transition-colors"
+        aria-label={collapsed ? "展开 AI 对话侧边栏" : "折叠 AI 对话侧边栏"}
       >
         {collapsed
-          ? <ChevronRight className="w-3 h-3 text-[var(--color-text-muted)]" />
-          : <ChevronLeft className="w-3 h-3 text-[var(--color-text-muted)]" />
+          ? <ChevronRight className="w-3 h-3 text-[var(--color-text-muted)]" aria-hidden="true" />
+          : <ChevronLeft className="w-3 h-3 text-[var(--color-text-muted)]" aria-hidden="true" />
         }
       </button>
 
@@ -154,7 +155,7 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center gap-3 py-8 px-2">
                 <div className="w-10 h-10 rounded-2xl bg-[var(--color-background)] flex items-center justify-center">
-                  <Sparkles className="w-4 h-4 text-[var(--color-accent)]" strokeWidth={1.5} />
+                  <Sparkles className="w-4 h-4 text-[var(--color-accent)]" strokeWidth={1.5} aria-hidden="true" />
                 </div>
                 <p className="text-[11px] text-[var(--color-text-muted)] leading-relaxed whitespace-pre-line">
                   {emptyStateHint ?? '描述你的创意构想\nAI 自动设定参数\n\n💡 想调整已生成的图？\n点击图片 → ✨ 描述要调整什么'}
@@ -172,7 +173,7 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
                   `}>
                     <p className="whitespace-pre-wrap">{msg.text}</p>
                     {msg.actions?.triggerGenerate && (
-                      <p className="mt-1 text-[10px] opacity-60">⚡ 正在生成...</p>
+                      <p className="mt-1 text-[10px] opacity-60">⚡ 正在生成…</p>
                     )}
                   </div>
                 </div>
@@ -182,8 +183,8 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
               <div className="flex justify-start">
                 <div className="px-3 py-2 rounded-xl bg-[var(--color-background)] border border-[var(--color-border-light)] rounded-bl-sm">
                   <div className="flex items-center gap-1.5">
-                    <Loader2 className="w-3 h-3 text-[var(--color-accent)] animate-spin" />
-                    <span className="text-[10px] text-[var(--color-text-muted)]">AI 思考中...</span>
+                    <Loader2 className="w-3 h-3 text-[var(--color-accent)] animate-spin" aria-hidden="true" />
+                    <span className="text-[10px] text-[var(--color-text-muted)]">AI 思考中…</span>
                   </div>
                 </div>
               </div>
@@ -195,21 +196,25 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
             <div className="flex items-end gap-2 bg-[var(--color-background)] rounded-xl border border-[var(--color-border-light)] px-3 py-2 focus-within:border-[var(--color-accent)]/40 transition-colors">
               <textarea
                 ref={inputRef as React.RefObject<HTMLTextAreaElement>}
+                id="chatInput"
+                name="chatInput"
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={placeholder ?? '描述你的需求...'}
+                placeholder={placeholder ?? '描述你的需求…'}
                 rows={2}
+                aria-label="输入创意构想"
                 className="flex-1 text-[12px] bg-transparent border-0 focus:ring-0 focus:outline-none resize-none placeholder:text-[var(--color-text-muted)] text-[var(--color-text)]"
               />
               <button
                 onClick={handleSend}
                 disabled={!input.trim() || loading}
                 className="w-7 h-7 rounded-lg bg-[#5C4A3A] text-white flex items-center justify-center hover:bg-[#3D2E20] disabled:opacity-20 transition-all duration-300 flex-shrink-0 mb-0.5"
+                aria-label="发送消息"
               >
                 {loading
-                  ? <Loader2 className="w-3 h-3 animate-spin" />
-                  : <Send className="w-3 h-3" />
+                  ? <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+                  : <Send className="w-3 h-3" aria-hidden="true" />
                 }
               </button>
             </div>
@@ -242,8 +247,8 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
         <div className="border-b border-[var(--color-border-light)]">
           <div className="flex items-center justify-between px-4 py-2">
             <span className="text-[10px] font-medium text-[var(--color-text-muted)] tracking-wide uppercase">AI 对话</span>
-            <button onClick={() => setExpanded(false)} className="p-1 rounded-lg hover:bg-[var(--color-background)] transition-colors">
-              <X className="w-3.5 h-3.5 text-[var(--color-text-muted)]" />
+            <button onClick={() => setExpanded(false)} className="p-1 rounded-lg hover:bg-[var(--color-background)] transition-colors" aria-label="关闭 AI 对话">
+              <X className="w-3.5 h-3.5 text-[var(--color-text-muted)]" aria-hidden="true" />
             </button>
           </div>
           <div
@@ -271,8 +276,8 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
               <div className="flex justify-start">
                 <div className="px-3 py-2 rounded-xl bg-[var(--color-background)] border border-[var(--color-border-light)]">
                   <div className="flex items-center gap-1.5">
-                    <Loader2 className="w-3 h-3 text-[var(--color-accent)] animate-spin" />
-                    <span className="text-[10px] text-[var(--color-text-muted)]">AI 思考中...</span>
+                    <Loader2 className="w-3 h-3 text-[var(--color-accent)] animate-spin" aria-hidden="true" />
+                    <span className="text-[10px] text-[var(--color-text-muted)]">AI 思考中…</span>
                   </div>
                 </div>
               </div>
@@ -287,10 +292,11 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
         <button
           onClick={() => setExpanded(v => !v)}
           className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#5C4A3A] to-[#8B6F47] flex items-center justify-center flex-shrink-0"
+          aria-label={expanded ? "收起 AI 对话历史" : "展开 AI 对话历史"}
         >
           {expanded
-            ? <ChevronDown className="w-4 h-4 text-[var(--color-accent)]" />
-            : <Sparkles className="w-4 h-4 text-[var(--color-accent)]" />
+            ? <ChevronDown className="w-4 h-4 text-[var(--color-accent)]" aria-hidden="true" />
+            : <Sparkles className="w-4 h-4 text-[var(--color-accent)]" aria-hidden="true" />
           }
         </button>
 
@@ -301,17 +307,20 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
               onClick={() => setExpanded(true)}
               className="flex-1 text-[11px] text-left text-[var(--color-text-muted)] truncate"
             >
-              {latestAIMsg.text.slice(0, 40)}...
+              {latestAIMsg.text.slice(0, 40)}…
             </button>
           ) : (
             <input
               ref={inputRef as React.RefObject<HTMLInputElement>}
+              id="chatInputMobile"
+              name="chatInputMobile"
               type="text"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onFocus={() => setExpanded(true)}
-              placeholder="告诉 AI 你的设想..."
+              placeholder="告诉 AI 你的设想…"
+              aria-label="告诉 AI 你的设想"
               className="flex-1 text-[12px] bg-transparent border-0 focus:ring-0 focus:outline-none placeholder:text-[var(--color-text-muted)] text-[var(--color-text)]"
             />
           )}
@@ -322,10 +331,11 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
           onClick={handleSend}
           disabled={!input.trim() || loading}
           className="w-9 h-9 rounded-xl bg-[#5C4A3A] text-white flex items-center justify-center hover:bg-[#3D2E20] disabled:opacity-20 transition-all duration-300 flex-shrink-0"
+          aria-label="发送消息"
         >
           {loading
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : <Send className="w-4 h-4" />
+            ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            : <Send className="w-4 h-4" aria-hidden="true" />
           }
         </button>
       </div>

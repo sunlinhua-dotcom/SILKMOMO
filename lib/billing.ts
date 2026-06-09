@@ -21,7 +21,8 @@ export async function checkBalance(userId: string): Promise<{ sufficient: boolea
 export async function deductBalance(
   userId: string,
   description: string,
-  projectId?: number
+  projectId?: number,
+  apiModel: string = 'gemini-3.1-flash-image-preview'
 ): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
   const cost = PRICING.pricePerCallFen;
 
@@ -46,7 +47,7 @@ export async function deductBalance(
           amountFen: -cost,
           balanceAfter: updated.balanceFen,
           description,
-          apiModel: 'gemini-3.1-flash-image-preview',
+          apiModel,
           projectId,
         },
       });

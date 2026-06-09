@@ -26,6 +26,18 @@ export function ImageUploader({
   onImagesChange,
   variant = 'gray',
 }: ImageUploaderProps) {
+  const getCategoryFromTitle = (t: string) => {
+    const titleLower = t.toLowerCase();
+    if (titleLower.includes('产品') || titleLower.includes('product')) return 'product' as const;
+    if (titleLower.includes('模特') || titleLower.includes('model')) return 'model_ref' as const;
+    // "风格" 走背景参考（风格包应用到的也是 bg_ref / scene_ref，背景是更通用的归属）
+    if (titleLower.includes('背景') || titleLower.includes('bg') || titleLower.includes('风格') || titleLower.includes('style')) return 'bg_ref' as const;
+    if (titleLower.includes('场景') || titleLower.includes('scene')) return 'scene_ref' as const;
+    if (titleLower.includes('配件') || titleLower.includes('accessory') || titleLower.includes('accessories')) return 'accessory' as const;
+    return undefined;
+  };
+  const category = getCategoryFromTitle(title);
+
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
@@ -58,7 +70,7 @@ export function ImageUploader({
       onImagesChange(newImages);
 
       // 自动保存到图库
-      addToLibrary(compressed);
+      addToLibrary(compressed, category);
     } catch (error) {
       console.error('图片压缩失败:', error);
     } finally {
@@ -128,7 +140,7 @@ export function ImageUploader({
                 onClick={() => setShowLibrary(true)}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all"
               >
-                <ImageIcon className="w-3 h-3" />
+                <ImageIcon className="w-3 h-3" aria-hidden="true" />
                 图库 {libraryCount}
               </button>
             )}
@@ -163,12 +175,12 @@ export function ImageUploader({
                 <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center mb-3">
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 </div>
-                <p className="text-sm text-[var(--color-text)] font-medium">处理中...</p>
+                <p className="text-sm text-[var(--color-text)] font-medium">处理中…</p>
               </>
             ) : (
               <>
                 <div className={`upload-zone-icon bg-gradient-to-br ${iconGradient}`}>
-                  <Upload className="w-5 h-5" strokeWidth={1.5} />
+                  <Upload className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
                 </div>
                 <p className="text-sm text-[var(--color-text)] mb-1 font-medium">
                   {isDragging ? '松开以上传' : '点击选择或拖拽图片'}
@@ -187,7 +199,7 @@ export function ImageUploader({
                     }}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] text-[11px] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-primary)] transition-all"
                   >
-                    <FolderOpen className="w-3.5 h-3.5" />
+                    <FolderOpen className="w-3.5 h-3.5" aria-hidden="true" />
                     文件夹
                   </button>
                   {/* 从图库选择 */}
@@ -201,7 +213,7 @@ export function ImageUploader({
                       }}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 transition-all"
                     >
-                      <ImageIcon className="w-3.5 h-3.5" />
+                      <ImageIcon className="w-3.5 h-3.5" aria-hidden="true" />
                       图库选择
                     </button>
                   )}
@@ -240,7 +252,7 @@ export function ImageUploader({
                   className="image-thumb-remove"
                   aria-label="删除"
                 >
-                  <X className="w-3.5 h-3.5 text-white" strokeWidth={2} />
+                  <X className="w-3.5 h-3.5 text-white" strokeWidth={2} aria-hidden="true" />
                 </button>
                 <div className="absolute bottom-0 left-0 right-0 px-2 py-1 bg-gradient-to-t from-black/60 to-transparent">
                   <p className="text-[10px] text-white/90 text-center font-medium">
@@ -260,7 +272,7 @@ export function ImageUploader({
                 />
                 <div className="text-center">
                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center mx-auto mb-1">
-                    <Sparkles className="w-4 h-4 text-white" strokeWidth={2} />
+                    <Sparkles className="w-4 h-4 text-white" strokeWidth={2} aria-hidden="true" />
                   </div>
                   <span className="text-[10px] text-[var(--color-text-secondary)]">
                     添加
@@ -279,6 +291,7 @@ export function ImageUploader({
         onSelect={handleLibrarySelect}
         maxSelect={maxFiles}
         currentCount={images.length}
+        category={category}
       />
     </>
   );

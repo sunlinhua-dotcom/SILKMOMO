@@ -1,5 +1,5 @@
 /**
- * SILKMOMO 路由保护中间件
+ * SILKMOMO 路由保护代理
  * - 公开页面：/login, /register
  * - 受保护页面：/, /tasks, /task/*, /billing
  * - 管理员页面：/admin/*
@@ -16,7 +16,7 @@ const TOKEN_NAME = 'silkmomo_token';
 const PUBLIC_PATHS = ['/login', '/register', '/logo-preview'];
 const API_PUBLIC_PATHS = ['/api/auth/login', '/api/auth/register', '/api/admin/setup'];
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // 静态资源和公共 API 直接放行
@@ -58,7 +58,7 @@ export async function middleware(req: NextRequest) {
     response.headers.set('x-user-username', payload.username as string);
     return response;
   } catch {
-    // token 无效 → 跳转登录
+    // token 无效 -> 跳转登录
     const response = NextResponse.redirect(new URL('/login', req.url));
     response.cookies.delete(TOKEN_NAME);
     return response;

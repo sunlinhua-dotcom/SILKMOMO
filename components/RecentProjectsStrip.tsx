@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { db, type Project } from '@/lib/db';
 import { Clock, CheckCircle, XCircle, Loader, ChevronRight } from 'lucide-react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
 interface TaskWithImages extends Project {
@@ -37,7 +36,7 @@ async function loadRecentTasks(limit: number): Promise<TaskWithImages[]> {
 export function RecentProjectsStrip() {
   const [tasks, setTasks] = useState<TaskWithImages[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const router = useRouter();
+  const [now] = useState(() => Date.now());
 
   useEffect(() => {
     loadRecentTasks(5)
@@ -57,7 +56,7 @@ export function RecentProjectsStrip() {
 
   const formatTime = (date: Date) => {
     const d = new Date(date);
-    const diff = Date.now() - d.getTime();
+    const diff = now - d.getTime();
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
 
@@ -80,9 +79,9 @@ export function RecentProjectsStrip() {
       {/* 胶囊条 — 水平滚动 */}
       <div className="flex gap-1.5 overflow-x-auto no-scrollbar flex-1 py-0.5">
         {tasks.map((task) => (
-          <button
+          <Link
             key={task.id}
-            onClick={() => router.push(`/task/${task.id}`)}
+            href={`/task/${task.id}`}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--color-surface)] border border-[var(--color-border-light)] hover:border-[var(--color-accent)] hover:shadow-sm transition-all flex-shrink-0 group max-w-[180px]"
           >
             {/* 状态点 */}
@@ -95,7 +94,7 @@ export function RecentProjectsStrip() {
             <span className="text-[9px] text-[var(--color-text-muted)] flex-shrink-0">
               {formatTime(task.createdAt)}
             </span>
-          </button>
+          </Link>
         ))}
       </div>
 
@@ -105,7 +104,7 @@ export function RecentProjectsStrip() {
         className="flex items-center gap-0.5 text-[10px] text-[var(--color-accent)] hover:text-[var(--color-accent-dark)] transition-colors flex-shrink-0 uppercase tracking-wider"
       >
         全部
-        <ChevronRight className="w-3 h-3" />
+        <ChevronRight className="w-3 h-3" aria-hidden="true" />
       </Link>
     </div>
   );
@@ -117,7 +116,7 @@ export function RecentProjectsStrip() {
 export function RecentProjectsCompact() {
   const [tasks, setTasks] = useState<TaskWithImages[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const router = useRouter();
+  const [now] = useState(() => Date.now());
 
   useEffect(() => {
     loadRecentTasks(5)
@@ -128,15 +127,15 @@ export function RecentProjectsCompact() {
 
   const getStatusIcon = (status: Project['status']) => {
     switch (status) {
-      case 'pending': return <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" />;
-      case 'processing': return <Loader className="w-3.5 h-3.5 text-[var(--color-accent)] animate-spin" />;
-      case 'completed': return <CheckCircle className="w-3.5 h-3.5 text-green-600" />;
-      case 'failed': return <XCircle className="w-3.5 h-3.5 text-red-400" />;
+      case 'pending': return <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" aria-hidden="true" />;
+      case 'processing': return <Loader className="w-3.5 h-3.5 text-[var(--color-accent)] animate-spin" aria-hidden="true" />;
+      case 'completed': return <CheckCircle className="w-3.5 h-3.5 text-green-600" aria-hidden="true" />;
+      case 'failed': return <XCircle className="w-3.5 h-3.5 text-red-400" aria-hidden="true" />;
     }
   };
 
   const formatTime = (date: Date) => {
-    const diff = Date.now() - new Date(date).getTime();
+    const diff = now - new Date(date).getTime();
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     if (minutes < 1) return '刚刚';
@@ -160,9 +159,9 @@ export function RecentProjectsCompact() {
   return (
     <div className="space-y-1">
       {tasks.map((task) => (
-        <button
+        <Link
           key={task.id}
-          onClick={() => router.push(`/task/${task.id}`)}
+          href={`/task/${task.id}`}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-[var(--color-background)] transition-all group text-left"
         >
           <span className="flex-shrink-0">{getStatusIcon(task.status)}</span>
@@ -172,7 +171,7 @@ export function RecentProjectsCompact() {
           <span className="text-[10px] text-[var(--color-text-muted)] flex-shrink-0">
             {formatTime(task.createdAt)}
           </span>
-        </button>
+        </Link>
       ))}
     </div>
   );

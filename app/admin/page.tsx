@@ -101,7 +101,7 @@ export default function AdminPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" aria-hidden="true" />
       </div>
     );
   }
@@ -112,7 +112,7 @@ export default function AdminPage() {
       <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3 group">
-            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" />
+            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" aria-hidden="true" />
             <Logo width={32} height={32} />
             <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
           </Link>
@@ -136,32 +136,32 @@ export default function AdminPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
               <div className="flex items-center gap-2 mb-2">
-                <Users className="w-4 h-4 text-[var(--color-accent)]" />
+                <Users className="w-4 h-4 text-[var(--color-accent)]" aria-hidden="true" />
                 <span className="text-xs text-[var(--color-text-muted)]">总用户</span>
               </div>
-              <p className="text-2xl font-bold">{stats.totalUsers}</p>
+              <p className="text-2xl font-bold tabular-nums">{stats.totalUsers}</p>
             </div>
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
               <div className="flex items-center gap-2 mb-2">
-                <CreditCard className="w-4 h-4 text-green-500" />
+                <CreditCard className="w-4 h-4 text-green-500" aria-hidden="true" />
                 <span className="text-xs text-[var(--color-text-muted)]">总充值</span>
               </div>
-              <p className="text-2xl font-bold text-green-600">{formatFen(stats.totalRechargeFen)}</p>
+              <p className="text-2xl font-bold text-green-600 tabular-nums">{formatFen(stats.totalRechargeFen)}</p>
             </div>
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
               <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-4 h-4 text-orange-500" />
+                <Activity className="w-4 h-4 text-orange-500" aria-hidden="true" />
                 <span className="text-xs text-[var(--color-text-muted)]">总消费</span>
               </div>
-              <p className="text-2xl font-bold text-orange-600">{formatFen(stats.totalConsumeFen)}</p>
+              <p className="text-2xl font-bold text-orange-600 tabular-nums">{formatFen(stats.totalConsumeFen)}</p>
             </div>
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
               <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-4 h-4 text-blue-500" />
+                <Activity className="w-4 h-4 text-blue-500" aria-hidden="true" />
                 <span className="text-xs text-[var(--color-text-muted)]">今日消费</span>
               </div>
-              <p className="text-2xl font-bold text-blue-600">{formatFen(stats.todayConsumeFen)}</p>
-              <p className="text-xs text-[var(--color-text-muted)]">{stats.todayConsumeCount} 次调用</p>
+              <p className="text-2xl font-bold text-blue-600 tabular-nums">{formatFen(stats.todayConsumeFen)}</p>
+              <p className="text-xs text-[var(--color-text-muted)]"><span className="tabular-nums">{stats.todayConsumeCount}</span> 次调用</p>
             </div>
           </div>
         )}
@@ -184,20 +184,25 @@ export default function AdminPage() {
             </h2>
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <div className="relative flex-1 sm:flex-none">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" aria-hidden="true" />
                 <input
                   type="text"
+                  id="userSearch"
+                  name="userSearch"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索用户名或昵称"
+                  placeholder="搜索用户名或昵称…"
+                  aria-label="搜索用户名或昵称"
+                  autoComplete="off"
                   className="w-full sm:w-64 pl-9 pr-3 py-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
                 />
               </div>
               <button
                 onClick={loadData}
                 className="p-2 rounded-xl border border-[var(--color-border)] hover:bg-[var(--color-background)] transition-colors"
+                aria-label="刷新用户列表"
               >
-                <RefreshCw className="w-4 h-4 text-[var(--color-text-muted)]" />
+                <RefreshCw className="w-4 h-4 text-[var(--color-text-muted)]" aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -230,14 +235,14 @@ export default function AdminPage() {
                 </div>
                 <div className="flex items-center gap-4">
                   <div className="text-right">
-                    <p className="text-sm font-semibold">{formatFen(u.balanceFen)}</p>
+                    <p className="text-sm font-semibold tabular-nums">{formatFen(u.balanceFen)}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">余额</p>
                   </div>
                   <button
                     onClick={() => setRechargeModal({ userId: u.id, username: u.username, name: u.name })}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white rounded-lg hover:bg-[var(--color-accent-dark)] transition-colors"
                   >
-                    <Plus className="w-3.5 h-3.5" />
+                    <Plus className="w-3.5 h-3.5" aria-hidden="true" />
                     充值
                   </button>
                 </div>
@@ -259,16 +264,19 @@ export default function AdminPage() {
             </div>
             <div className="p-5 space-y-4">
               <div>
-                <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
+                <label htmlFor="rechargeAmount" className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
                   充值金额（元）
                 </label>
                 <input
                   type="number"
+                  id="rechargeAmount"
+                  name="rechargeAmount"
                   value={rechargeAmount}
                   onChange={(e) => setRechargeAmount(e.target.value)}
                   placeholder="例如：50"
                   min="1"
                   step="1"
+                  autoComplete="off"
                   className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
                 />
               </div>
@@ -289,14 +297,17 @@ export default function AdminPage() {
                 ))}
               </div>
               <div>
-                <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
+                <label htmlFor="rechargeNote" className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
                   备注 <span className="text-[var(--color-text-muted)]">(可选)</span>
                 </label>
                 <input
                   type="text"
+                  id="rechargeNote"
+                  name="rechargeNote"
                   value={rechargeNote}
                   onChange={(e) => setRechargeNote(e.target.value)}
                   placeholder="充值备注"
+                  autoComplete="off"
                   className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
                 />
               </div>
@@ -313,7 +324,7 @@ export default function AdminPage() {
                 disabled={recharging || !rechargeAmount}
                 className="btn-primary flex-1 text-sm py-2.5"
               >
-                <span>{recharging ? '充值中...' : `确认充值 ¥${rechargeAmount || '0'}`}</span>
+                <span>{recharging ? '充值中…' : `确认充值 ¥${rechargeAmount || '0'}`}</span>
               </button>
             </div>
           </div>

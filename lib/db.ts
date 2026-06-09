@@ -9,7 +9,7 @@ export type SkinTone = 'light' | 'medium' | 'deep';
 export type BodyType = 'slim' | 'standard' | 'curvy';
 export type ShootingAngle = 'front' | 'side' | 'back';
 export type FrameType = 'full_body' | 'upper_body' | 'lower_body' | 'close_up';
-export type ImageType = 'product' | 'model_ref' | 'scene_ref' | 'bg_ref' | 'accessory' | 'result';
+export type ImageType = 'product' | 'model_ref' | 'scene_ref' | 'bg_ref' | 'accessory' | 'result' | 'result_backup';
 
 export interface Project {
   id?: number;
@@ -36,17 +36,20 @@ export interface Project {
 
   // 场景图模块专属
   sceneOutputSize?: string;      // 场景图输出尺寸
+  sceneHasModel?: boolean;       // 场景图：true=有模特，false=氛围静物
 
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
   lastError?: string;
 
   // 兼容旧版
   styleId?: string;
+  customPrompt?: string;
 }
 
 export interface ImageItem {
   id?: number;
   projectId: number;
+  stylePackId?: number;          // 风格包图片使用独立归属，避免和 Project 自增 ID 冲突
   type: ImageType;
   data: string;                  // Base64
   mimeType: string;
@@ -62,6 +65,10 @@ export interface ImageItem {
   // 兼容旧版
   imageType?: 'hero' | 'full_body' | 'half_body' | 'close_up';
   index?: number;
+  backup?: {
+    id: number;
+    data: string;
+  };
 }
 
 export interface StylePack {
@@ -94,7 +101,95 @@ export class SilkMomoDB extends Dexie {
       images: '++id, projectId, type, imageType, index, shotIndex',
       stylePacks: '++id, createdAt'
     });
+
+    // version 3: 风格包图片从 projectId 关联迁移到 stylePackId，避免风格包 ID 与任务 ID 碰撞
+    this.version(3).stores({
+      projects: '++id, createdAt, status, moduleType, skuType',
+      images: '++id, projectId, stylePackId, type, imageType, index, shotIndex',
+      stylePacks: '++id, createdAt'
+    });
   }
 }
 
 export const db = new SilkMomoDB();
+
+export const STYLE_PACK_IMAGE_PROJECT_ID = 0;
+
+export async function migrateLegacyStylePackImages() {
+  const packs = await db.stylePacks.toArray();
+
+  for (const pack of packs) {
+    if (!pack.id) continue;
+
+    const legacyImages = await db.images
+      .where('projectId')
+      .equals(pack.id)
+      .filter(img => img.type === 'scene_ref' && !img.stylePackId)
+      .toArray();
+
+    if (legacyImages.length === 0) continue;
+
+    // 如果同 ID 的任务已经存在，legacy 图片归属无法可靠判断，避免迁移误伤任务数据。
+    const collidingProject = await db.projects.get(pack.id);
+    if (collidingProject) continue;
+
+    const modernCount = await db.images.where('stylePackId').equals(pack.id).count();
+    if (modernCount === 0) {
+      await db.images.bulkAdd(
+        legacyImages.map(img => ({
+          projectId: STYLE_PACK_IMAGE_PROJECT_ID,
+          stylePackId: pack.id,
+          type: img.type,
+          data: img.data,
+          mimeType: img.mimeType,
+        }))
+      );
+    }
+
+    const legacyIds = legacyImages.map(img => img.id!).filter(Boolean);
+    if (legacyIds.length > 0) {
+      await db.images.bulkDelete(legacyIds);
+    }
+  }
+}
+
+export async function getStylePackImages(packId: number): Promise<ImageItem[]> {
+  await migrateLegacyStylePackImages();
+  const modernImages = await db.images.where('stylePackId').equals(packId).toArray();
+  if (modernImages.length > 0) return modernImages;
+
+  const collidingProject = await db.projects.get(packId);
+  if (collidingProject) return [];
+
+  return db.images
+    .where('projectId')
+    .equals(packId)
+    .filter(img => img.type === 'scene_ref' && !img.stylePackId)
+    .toArray();
+}
+
+export async function deleteStylePackImages(packId: number) {
+  await db.images.where('stylePackId').equals(packId).delete();
+
+  const collidingProject = await db.projects.get(packId);
+  if (!collidingProject) {
+    await db.images
+      .where('projectId')
+      .equals(packId)
+      .filter(img => img.type === 'scene_ref' && !img.stylePackId)
+      .delete();
+  }
+}
+
+export async function prepareProjectImageSlot(projectId: number) {
+  const staleImages = await db.images
+    .where('projectId')
+    .equals(projectId)
+    .filter(img => !img.stylePackId)
+    .toArray();
+
+  const staleIds = staleImages.map(img => img.id!).filter(Boolean);
+  if (staleIds.length > 0) {
+    await db.images.bulkDelete(staleIds);
+  }
+}

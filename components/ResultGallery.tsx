@@ -13,11 +13,17 @@ interface ResultImage {
   data: string;
   prompt?: string;
   index?: number;
+  backup?: {
+    id: number;
+    data: string;
+  };
 }
 
 interface ResultGalleryProps {
   images: ResultImage[];
   onRegenerate?: (imageId: number, customPrompt?: string) => void;
+  onAcceptNewVersion?: (imageId: number) => void;
+  onRejectNewVersion?: (imageId: number) => void;
 }
 
 const IMAGE_LABELS: Record<string, string> = {
@@ -29,13 +35,31 @@ const IMAGE_LABELS: Record<string, string> = {
 
 const IMAGE_TYPE_ORDER = ['hero', 'full_body', 'half_body', 'close_up'];
 
-export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
+export function ResultGallery({
+  images,
+  onRegenerate,
+  onAcceptNewVersion,
+  onRejectNewVersion
+}: ResultGalleryProps) {
   const [selectedImage, setSelectedImage] = useState<ResultImage | null>(null);
   const [regenerating, setRegenerating] = useState<Set<number>>(new Set());
   const [downloadingAll, setDownloadingAll] = useState(false);
   // 哪张图正在弹"调整描述"输入框
   const [adjustingId, setAdjustingId] = useState<number | null>(null);
   const [adjustText, setAdjustText] = useState('');
+
+  // 记录哪些图片当前正处于“对比备份”展示中
+  const [showingBackupIds, setShowingBackupIds] = useState<Set<number>>(new Set());
+
+  const toggleShowBackup = (e: React.MouseEvent, id: number) => {
+    e.stopPropagation();
+    setShowingBackupIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const handleDownload = (image: ResultImage) => {
     const link = document.createElement('a');
@@ -136,14 +160,18 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                   : image.imageType === 'hero'
                     ? 'aspect-video'   // 16:9 横版场景图
                     : 'aspect-square'; // close_up 特写默认方形
+                const hasBackup = !!image.backup;
+                const isShowingBackup = hasBackup && showingBackupIds.has(image.id);
+                const imageSrc = isShowingBackup ? `data:image/png;base64,${image.backup!.data}` : `data:image/png;base64,${image.data}`;
+
                 return (
                 <div
                   key={image.id}
                   className={`group relative ${aspectClass} rounded-2xl overflow-hidden bg-[var(--color-background)] cursor-pointer hover-lift`}
-                  onClick={() => { if (adjustingId !== image.id) setSelectedImage(image); }}
+                  onClick={() => { if (adjustingId !== image.id) setSelectedImage(isShowingBackup ? { ...image, data: image.backup!.data } : image); }}
                 >
                   <img
-                    src={`data:image/png;base64,${image.data}`}
+                    src={imageSrc}
                     alt={IMAGE_LABELS[image.imageType]}
                     className="w-full h-full object-contain"
                   />
@@ -157,13 +185,13 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                     </div>
                   )}
 
-                  {/* 悬浮操作栏 */}
-                  <div className={`absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent transition-opacity flex items-end justify-center pb-4 gap-2 ${adjustingId === image.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                  {/* 悬浮操作栏 —— 备份对比条存在时也保留，让用户能连续重试 */}
+                  <div className={`absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent transition-opacity flex items-end justify-center ${hasBackup ? 'pb-16' : 'pb-4'} gap-2 z-20 ${adjustingId === image.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                     <div className="relative group/tip">
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDownload(image);
+                          handleDownload(isShowingBackup ? { ...image, data: image.backup!.data } : image);
                         }}
                         className="w-11 h-11 flex items-center justify-center bg-white rounded-full shadow-lg hover:bg-[var(--color-accent)] hover:text-white transition-colors"
                         aria-label="下载图片"
@@ -210,6 +238,35 @@ export function ResultGallery({ images, onRegenerate }: ResultGalleryProps) {
                       </>
                     )}
                   </div>
+
+                  {/* A/B 比较与确认控制条 */}
+                  {hasBackup && !regenerating.has(image.id) && (
+                    <div
+                      className="absolute inset-x-3 bottom-3 bg-white/95 backdrop-blur-md rounded-xl p-2 shadow-lg flex items-center justify-between gap-1.5 z-10 border border-[var(--color-border-light)] animate-fade-in"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        onClick={(e) => toggleShowBackup(e, image.id)}
+                        className="text-[10px] font-semibold px-2 py-1 rounded bg-[var(--color-background)] hover:bg-[var(--color-accent)]/10 text-[var(--color-text-secondary)] transition-colors"
+                      >
+                        {isShowingBackup ? '查看新版' : '对比旧版'}
+                      </button>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => onRejectNewVersion?.(image.id)}
+                          className="text-[10px] font-semibold px-2 py-1 rounded border border-red-200 hover:bg-red-50 text-red-600 transition-colors"
+                        >
+                          还原旧版
+                        </button>
+                        <button
+                          onClick={() => onAcceptNewVersion?.(image.id)}
+                          className="text-[10px] font-semibold px-2 py-1 rounded bg-[var(--color-accent)] hover:bg-[var(--color-accent-dark)] text-white transition-colors"
+                        >
+                          保留新版
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* 图片标签 */}
                   <div className="absolute top-3 left-3">

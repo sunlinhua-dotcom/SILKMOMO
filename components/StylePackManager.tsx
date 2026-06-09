@@ -1,7 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { db, type ImageItem } from '@/lib/db';
+import {
+  db,
+  deleteStylePackImages,
+  getStylePackImages,
+  STYLE_PACK_IMAGE_PROJECT_ID,
+  type ImageItem
+} from '@/lib/db';
 import { ImageUploader } from './ImageUploader';
 import type { CompressedImage } from '@/lib/image-compressor';
 import { Plus, Package, Trash2, Check, X, ChevronDown, Eye, ImageOff } from 'lucide-react';
@@ -75,7 +81,8 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
 
         for (const img of base64Images) {
           await db.images.add({
-            projectId: packId,
+            projectId: STYLE_PACK_IMAGE_PROJECT_ID,
+            stylePackId: packId,
             type: 'scene_ref',
             data: img.base64,
             mimeType: img.mimeType,
@@ -96,7 +103,7 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
     const imgMap: Record<number, ImageItem[]> = {};
     for (const pack of freshPacks) {
       if (pack.id) {
-        const imgs = await db.images.where('projectId').equals(pack.id).toArray();
+        const imgs = await getStylePackImages(pack.id);
         // 自愈：清理之前可能写入的坏数据（空 data 或长度异常）
         const valid = imgs.filter(isValidImageData);
         const invalidIds = imgs.filter(i => !isValidImageData(i)).map(i => i.id!).filter(Boolean);
@@ -132,7 +139,8 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
       // 将图片保存到 images 表（使用 packId 作为 projectId 关联）
       for (const img of newPackImages) {
         await db.images.add({
-          projectId: packId as number,
+          projectId: STYLE_PACK_IMAGE_PROJECT_ID,
+          stylePackId: packId as number,
           type: 'scene_ref', // 风格包图片存为 scene_ref 类型
           data: img.base64,
           mimeType: img.mimeType,
@@ -156,7 +164,7 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
 
     try {
       await db.stylePacks.delete(packId);
-      await db.images.where('projectId').equals(packId).delete();
+      await deleteStylePackImages(packId);
       if (selectedPackId === packId) {
         setSelectedPackId(undefined);
       }
