@@ -72,7 +72,7 @@ export default function BillingPage() {
       <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-3 group">
-            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" />
+            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" aria-hidden="true" />
             <Logo width={32} height={32} />
             <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
           </Link>
@@ -86,14 +86,14 @@ export default function BillingPage() {
           <div className="absolute top-0 right-0 w-64 h-64 bg-[var(--color-accent)]/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
           <div className="relative">
             <div className="flex items-center gap-2 mb-2">
-              <Wallet className="w-5 h-5 text-[var(--color-accent)]" />
+              <Wallet className="w-5 h-5 text-[var(--color-accent)]" aria-hidden="true" />
               <span className="text-sm text-white/70">可用余额</span>
             </div>
-            <p className="text-4xl font-bold tracking-tight mb-1">
+            <p className="text-4xl font-bold tracking-tight mb-1 tabular-nums">
               {user ? formatFen(user.balanceFen) : '¥0.00'}
             </p>
             <p className="text-sm text-white/50">
-              约可生成 {user ? Math.floor(user.balanceFen / PRICING.pricePerCallFen) : 0} 张图片
+              约可生成 <span className="tabular-nums">{user ? Math.floor(user.balanceFen / PRICING.pricePerCallFen) : 0}</span> 张图片
             </p>
           </div>
         </div>
@@ -101,33 +101,33 @@ export default function BillingPage() {
         {/* 定价说明 */}
         <div className="bg-[var(--color-surface)] rounded-2xl p-6 border border-[var(--color-border-light)]">
           <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-4 flex items-center gap-2">
-            <Package className="w-4 h-4" />
+            <Package className="w-4 h-4" aria-hidden="true" />
             计费标准
           </h2>
           <div className="space-y-3">
             <div className="flex items-center justify-between py-2 border-b border-[var(--color-border-light)]">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-[rgba(201,168,108,0.1)] flex items-center justify-center">
-                  <Package className="w-3.5 h-3.5 text-[var(--color-accent)]" />
+                  <Package className="w-3.5 h-3.5 text-[var(--color-accent)]" aria-hidden="true" />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-[var(--color-text)]">图片生成</p>
                   <p className="text-[10px] text-[var(--color-text-muted)]">Gemini 3.1 Flash Image</p>
                 </div>
               </div>
-              <span className="text-lg font-bold text-[var(--color-accent)]">¥{PRICING.pricePerCallYuan}<span className="text-xs font-normal text-[var(--color-text-muted)] ml-1">/张</span></span>
+              <span className="text-lg font-bold text-[var(--color-accent)] tabular-nums">¥{PRICING.pricePerCallYuan}<span className="text-xs font-normal text-[var(--color-text-muted)] ml-1">/张</span></span>
             </div>
             <div className="flex items-center justify-between py-2">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-purple-50 flex items-center justify-center">
-                  <Sparkles className="w-3.5 h-3.5 text-purple-500" />
+                  <Sparkles className="w-3.5 h-3.5 text-purple-500" aria-hidden="true" />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-[var(--color-text)]">AI 智能分析</p>
                   <p className="text-[10px] text-[var(--color-text-muted)]">Gemini 3.1 Flash Lite · 产品识别</p>
                 </div>
               </div>
-              <span className="text-lg font-bold text-purple-600">¥{PRICING.aiAnalysisPriceYuan}<span className="text-xs font-normal text-[var(--color-text-muted)] ml-1">/次</span></span>
+              <span className="text-lg font-bold text-purple-600 tabular-nums">¥{PRICING.aiAnalysisPriceYuan}<span className="text-xs font-normal text-[var(--color-text-muted)] ml-1">/次</span></span>
             </div>
           </div>
         </div>
@@ -135,7 +135,7 @@ export default function BillingPage() {
         {/* 充值套餐 */}
         <div className="bg-[var(--color-surface)] rounded-2xl p-6 border border-[var(--color-border-light)]">
           <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-4 flex items-center gap-2">
-            <TrendingDown className="w-4 h-4" />
+            <TrendingDown className="w-4 h-4" aria-hidden="true" />
             充值套餐
           </h2>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -168,7 +168,7 @@ export default function BillingPage() {
         {/* 消费记录 */}
         <div className="bg-[var(--color-surface)] rounded-2xl p-6 border border-[var(--color-border-light)]">
           <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-4 flex items-center gap-2">
-            <Clock className="w-4 h-4" />
+            <Clock className="w-4 h-4" aria-hidden="true" />
             消费记录
           </h2>
 
@@ -194,10 +194,10 @@ export default function BillingPage() {
                     </div>
                   </div>
                   <div className="text-right">
-                    <p className={`text-sm font-semibold ${tx.amountFen > 0 ? 'text-green-600' : 'text-[var(--color-text)]'}`}>
+                    <p className={`text-sm font-semibold tabular-nums ${tx.amountFen > 0 ? 'text-green-600' : 'text-[var(--color-text)]'}`}>
                       {tx.amountFen > 0 ? '+' : ''}{formatFen(tx.amountFen)}
                     </p>
-                    <p className="text-xs text-[var(--color-text-muted)]">
+                    <p className="text-xs text-[var(--color-text-muted)] tabular-nums">
                       余额 {formatFen(tx.balanceAfter)}
                     </p>
                   </div>

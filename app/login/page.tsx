@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Logo } from '@/components/Logo';
+import { syncLocalWorkspaceForUser } from '@/lib/client-session';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -30,6 +31,7 @@ export default function LoginPage() {
         return;
       }
 
+      await syncLocalWorkspaceForUser(data.user?.username || username);
       router.push('/');
       router.refresh();
     } catch {
@@ -83,6 +85,7 @@ export default function LoginPage() {
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="请输入用户名"
                 required
+                autoComplete="username"
                 className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20 outline-none transition-all text-sm"
               />
             </div>
@@ -98,6 +101,7 @@ export default function LoginPage() {
                 placeholder="请输入密码"
                 required
                 minLength={6}
+                autoComplete="current-password"
                 className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20 outline-none transition-all text-sm"
               />
             </div>

@@ -3,7 +3,6 @@
  * 产品图模块 + 场景图模块分离的 Prompt 架构
  */
 
-import { generateImageAction } from '@/app/actions/generate';
 import type { ShotConfig, BodyTypeConfig, SkinToneConfig, ModelConfig, OutputSizeConfig } from './models';
 
 // ===== 接口类型 =====
@@ -89,13 +88,9 @@ export function getRandomWaitingMessage(): string {
   return WAITING_MESSAGES[Math.floor(Math.random() * WAITING_MESSAGES.length)];
 }
 
-// ===== 通用底层调用 =====
-
-export async function generateImage(options: GenerateOptions): Promise<GenerateResult> {
-  return await generateImageAction(options);
-}
-
 // ===== 产品图模块：构建单张 Prompt =====
+// 注：原来的 generateImage / generateProductShots / generateSceneShots / generateSevenImages
+// 已废弃，全部生图走 POST /api/generate/stream（SSE 流式接口）
 
 /**
  * 为产品图模块的单个镜次构建完整的 Prompt
@@ -295,176 +290,6 @@ ${safetyRules}${userAddon}
   `.trim();
 }
 
-// ===== 产品图模块：批量生成选中镜次 =====
-
-export async function generateProductShots(
-  selectedShots: ShotConfig[],
-  productImages: Array<{ data: string; mimeType: string }>,
-  options: {
-    modelConfig?: ModelConfig;
-    bodyTypeConfig?: BodyTypeConfig;
-    skinToneConfig?: SkinToneConfig;
-    modelRefImages?: Array<{ data: string; mimeType: string }>;
-    bgRefImages?: Array<{ data: string; mimeType: string }>;
-    accessoryImages?: Array<{ data: string; mimeType: string }>;
-    outputSize?: OutputSizeConfig;
-  },
-  onProgress?: (current: number, total: number, shotIndex: number) => void
-): Promise<Array<{ shotIndex: number; data: string; error?: string }>> {
-  const results: Array<{ shotIndex: number; data: string; error?: string }> = [];
-  const total = selectedShots.length;
-
-  // 确定输出比例
-  const aspectRatio = options.outputSize?.aspectRatio || '3:4';
-
-  // ═══ 预分析：用 AI 识别服装特征（面料、颜色、款式），注入后续 prompt ═══
-  let garmentDescription: string | undefined;
-  try {
-    const { analyzeProductImage } = await import('./ai-assistant');
-    const firstProduct = productImages[0];
-    if (firstProduct?.data) {
-      const analysis = await analyzeProductImage(firstProduct.data);
-      if (analysis.description) {
-        garmentDescription = analysis.description;
-        console.log('[ProductShots] AI 服装分析完成:', garmentDescription);
-      }
-    }
-  } catch (e) {
-    console.warn('[ProductShots] 服装分析跳过（不影响生成）:', e);
-  }
-
-  // ═══ 首图锚定：保存第一张成功的图片，作为后续图的模特参考 ═══
-  let anchorImage: { data: string; mimeType: string } | undefined;
-
-  for (let i = 0; i < selectedShots.length; i++) {
-    const shot = selectedShots[i];
-    onProgress?.(i + 1, total, shot.index);
-
-    const prompt = buildProductShotPrompt({
-      shot,
-      productImages,
-      ...options,
-      garmentDescription,
-    });
-
-    // 构建图片输入：模特参考图优先（如果有），否则用预设模特
-    const generateOptions: GenerateOptions = {
-      productImages,
-      prompt,
-      aspectRatio,
-      imageSize: '2K',
-      modelId: options.modelConfig?.id,
-      modelRefImages: options.modelRefImages,
-      bgRefImages: options.bgRefImages,
-      accessoryImages: options.accessoryImages,
-      // 首图锚定：第二张及以后的图使用第一张成功生成的图作为模特锚点
-      anchorImage: anchorImage,
-    };
-
-    const result = await generateImage(generateOptions);
-
-    results.push({
-      shotIndex: shot.index,
-      data: result.data || '',
-      error: result.success ? undefined : (result.error || '生成失败')
-    });
-
-    // 如果首张失败（可能 API 问题），提前返回
-    if (!result.success && i === 0) {
-      return results;
-    }
-
-    // ═══ 锚定：首张成功 → 存为锚定图 ═══
-    if (result.success && result.data && !anchorImage) {
-      anchorImage = { data: result.data, mimeType: 'image/png' };
-      console.log('[ProductShots] 已锚定首图模特，后续图将保持同一模特身份');
-    }
-  }
-
-  return results;
-}
-
-// ===== 场景图模块：批量生成 =====
-
-export async function generateSceneShots(
-  count: number,
-  productImages: Array<{ data: string; mimeType: string }>,
-  sceneRefImages: Array<{ data: string; mimeType: string }>,
-  options: {
-    modelConfig?: ModelConfig;
-    bodyTypeConfig?: BodyTypeConfig;
-    skinToneConfig?: SkinToneConfig;
-    modelRefImages?: Array<{ data: string; mimeType: string }>;
-    accessoryImages?: Array<{ data: string; mimeType: string }>;
-    outputSize?: OutputSizeConfig;
-    hasModel?: boolean;
-  },
-  onProgress?: (current: number, total: number) => void
-): Promise<Array<{ index: number; data: string; error?: string }>> {
-  const results: Array<{ index: number; data: string; error?: string }> = [];
-
-  const prompt = buildSceneShotPrompt({
-    productImages,
-    sceneRefImages,
-    hasModel: options.hasModel !== false,
-    ...options,
-  });
-
-  const aspectRatio = options.outputSize?.aspectRatio || '3:4';
-
-  onProgress?.(1, count);
-
-  const result = await generateImage({
-    productImages,
-    styleImages: sceneRefImages,
-    modelRefImages: options.modelRefImages,
-    accessoryImages: options.accessoryImages,
-    modelId: options.modelConfig?.id,
-    prompt,
-    aspectRatio,
-    imageSize: '2K',
-  });
-
-  results.push({
-    index: 1,
-    data: result.data || '',
-    error: result.success ? undefined : (result.error || '生成失败')
-  });
-
-  return results;
-}
-
-// ===== 兼容旧版（废弃，保留以防报错）=====
-
-/** @deprecated 使用 generateProductShots 或 generateSceneShots 代替 */
-export async function generateSevenImages(
-  productImages: Array<{ data: string; mimeType: string }>,
-  styleImages?: Array<{ data: string; mimeType: string }>,
-  accessoryImages?: Array<{ data: string; mimeType: string }>,
-  _customPrompts?: Record<string, string>,
-  onProgress?: (current: number, total: number) => void,
-  _styleId?: string,
-  modelId?: string,
-  bodyType?: 'slim' | 'curvy'
-): Promise<Array<{ type: string; data: string; error?: string }>> {
-  const { MODELS, BODY_TYPES, PRODUCT_SHOTS } = await import('./models');
-  const modelConfig = modelId ? MODELS.find(m => m.id === modelId) : undefined;
-
-  // 兼容旧 bodyType（curvy → curvy，其余 → standard）
-  const bodyTypeId = bodyType === 'curvy' ? 'curvy' : 'standard';
-  const bodyTypeConfig = BODY_TYPES.find(b => b.id === bodyTypeId);
-
-  // 默认 7 张（套装默认）
-  const { getDefaultShots } = await import('./models');
-  const defaultIndexes = getDefaultShots('outfit');
-  const selectedShots = PRODUCT_SHOTS.filter(s => defaultIndexes.includes(s.index));
-
-  const results = await generateProductShots(
-    selectedShots,
-    productImages,
-    { modelConfig, bodyTypeConfig, accessoryImages },
-    (curr, total) => onProgress?.(curr, total)
-  );
-
-  return results.map(r => ({ type: `shot_${r.shotIndex}`, data: r.data, error: r.error }));
-}
+// 旧版 generateProductShots / generateSceneShots / generateSevenImages 已删除。
+// 所有生图调用都已迁移到 POST /api/generate/stream（SSE 流式接口，避免 Server Action
+// 路径上"扣费成功但不退款"的资金安全 bug）。

@@ -48,6 +48,7 @@ interface GenerateStreamRequest {
   selectedShotIndexes?: number[];
   outputSize?: string;
   sceneOutputSize?: string;
+  sceneHasModel?: boolean;
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
 }
@@ -60,199 +61,8 @@ function sseEvent(type: string, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-// ═══════════════════════════════════════
-// API 配置
-// ═══════════════════════════════════════
-
-const API_CONFIG = {
-  baseUrl: 'https://api.apiyi.com/v1beta',
-  model: 'gemini-3.1-flash-image-preview',
-  apiKey: process.env.GEMINI_API_KEY || '',
-};
-
-// ═══════════════════════════════════════
-// 调用 Gemini API 生成单张图片
-// ═══════════════════════════════════════
-
-async function callGeminiApi(
-  parts: Array<Record<string, unknown>>,
-  aspectRatio: string,
-  retryCount = 0
-): Promise<{ success: boolean; data?: string; error?: string }> {
-  if (!API_CONFIG.apiKey) {
-    return { success: false, error: 'API Key 未配置' };
-  }
-
-  const url = `${API_CONFIG.baseUrl}/models/${API_CONFIG.model}:generateContent?key=${API_CONFIG.apiKey}`;
-  const MAX_RETRIES = 1; // 失败后自动重试 1 次
-
-  let response: Response;
-  try {
-    // 使用原生 fetch 并禁用 Next.js cache 避免大响应体干扰
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(120_000), // 单张图 120 秒超时
-      cache: 'no-store',
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseModalities: ['IMAGE', 'TEXT'],
-          imageConfig: {
-            aspectRatio,
-            image_size: '2K',
-          },
-        },
-      }),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : '网络连接失败';
-    const isTimeout = msg.includes('abort') || msg.includes('timeout') || msg.includes('TimeoutError');
-    if (isTimeout && retryCount < MAX_RETRIES) {
-      console.log(`[生图API] 超时，自动重试 (${retryCount + 1}/${MAX_RETRIES})...`);
-      return callGeminiApi(parts, aspectRatio, retryCount + 1);
-    }
-    return { success: false, error: `网络连接失败${isTimeout ? '（超时 120s）' : ''}: ${msg}` };
-  }
-
-  if (!response.ok) {
-    let errorText = '';
-    try { errorText = await response.text(); } catch { /* ignore */ }
-    // 503/429 自动重试
-    if ((response.status === 503 || response.status === 429) && retryCount < MAX_RETRIES) {
-      console.log(`[生图API] HTTP ${response.status}，自动重试 (${retryCount + 1}/${MAX_RETRIES})...`);
-      await new Promise(r => setTimeout(r, 3000)); // 等 3 秒再重试
-      return callGeminiApi(parts, aspectRatio, retryCount + 1);
-    }
-    return {
-      success: false,
-      error: `API 请求失败 (${response.status}): ${errorText.substring(0, 300)}`,
-    };
-  }
-
-  // 先读 text 再解析 JSON（避免大响应流式读取失败时丢失调试信息）
-  let responseText: string;
-  try {
-    responseText = await response.text();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : '未知错误';
-    console.error('[生图API] 读取响应体失败:', msg);
-    if (retryCount < MAX_RETRIES) {
-      console.log(`[生图API] 响应体读取失败，自动重试...`);
-      return callGeminiApi(parts, aspectRatio, retryCount + 1);
-    }
-    return { success: false, error: `响应体读取失败: ${msg}` };
-  }
-
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(responseText);
-  } catch {
-    console.error('[生图API] JSON 解析失败，响应前 500 字符:', responseText.substring(0, 500));
-    return { success: false, error: `响应 JSON 解析失败（响应长度: ${responseText.length}，前100字: ${responseText.substring(0, 100)}）` };
-  }
-
-  const candidates = data?.candidates as Array<Record<string, unknown>> | undefined;
-  if (!candidates || candidates.length === 0) {
-    console.error('[生图API] candidates 为空，完整响应:', JSON.stringify(data).substring(0, 500));
-    return { success: false, error: 'API 未返回生成结果（candidates 为空）' };
-  }
-
-  const finishReason = (candidates[0]?.finishReason as string) || '';
-  const finishMessage = (candidates[0]?.finishMessage as string) || '';
-  console.log(`[生图API] finishReason=${finishReason}, finishMessage=${finishMessage.substring(0, 100)}`);
-
-  // IMAGE_RECITATION: Gemini 拒绝生成（参考图与训练数据相似度过高，常见诱因：对镜自拍/明显手机/网图水印/品牌 logo）
-  if (finishReason === 'IMAGE_RECITATION') {
-    return {
-      success: false,
-      error: '图片生成被拒绝：参考图与 Gemini 训练数据过于相似。常见原因：①对镜自拍（手机/镜面反射）②带水印或品牌 logo 的网图 ③知名时尚博主的公开图。建议改用：自然拍摄、无明显反射、无 logo 的服装平铺图或专业拍摄图。',
-    };
-  }
-
-  const content = candidates[0]?.content as Record<string, unknown> | undefined;
-  const resultParts = content?.parts as Array<Record<string, unknown>> | undefined;
-  if (!resultParts || resultParts.length === 0) {
-    console.error('[生图API] parts 为空，candidate:', JSON.stringify(candidates[0]).substring(0, 300));
-    return { success: false, error: `返回内容为空（finishReason: ${finishReason}${finishMessage ? ', ' + finishMessage.substring(0, 100) : ''}）` };
-  }
-
-  for (const part of resultParts) {
-    const inlineData = (part.inlineData || part.inline_data) as Record<string, string> | undefined;
-    if (inlineData?.data) {
-      return { success: true, data: inlineData.data };
-    }
-  }
-
-  // candidates 有内容但没有图片，可能被安全过滤
-  if (finishReason === 'SAFETY') {
-    return { success: false, error: '图片被 Gemini 安全策略拦截，请更换参考图（避免裸露/暴力/争议内容）' };
-  }
-
-  return { success: false, error: `生成结果中未找到图片数据（finishReason: ${finishReason}）` };
-}
-
-// ═══════════════════════════════════════
-// 构建 Gemini API Parts（图片 + 文字）
-// ═══════════════════════════════════════
-
-function buildParts(
-  prompt: string,
-  productImages: ImageInput[],
-  options: {
-    modelRefImages?: ImageInput[];
-    bgRefImages?: ImageInput[];
-    sceneRefImages?: ImageInput[];
-    accessoryImages?: ImageInput[];
-    anchorImage?: ImageInput;
-  }
-): Array<Record<string, unknown>> {
-  const parts: Array<Record<string, unknown>> = [];
-
-  parts.push({ text: prompt });
-
-  if (options.modelRefImages && options.modelRefImages.length > 0) {
-    parts.push({ text: '\n\nModel Reference Images (match hairstyle, makeup style, facial mood, and age feel):' });
-    options.modelRefImages.forEach(img => {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
-    });
-  }
-
-  parts.push({ text: '\n\nProduct Reference Images (extract garment design, fabric, color, and construction details):' });
-  productImages.forEach(img => {
-    parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
-  });
-
-  if (options.sceneRefImages && options.sceneRefImages.length > 0) {
-    parts.push({ text: '\n\nScene Reference Images (use these to define the background environment, lighting, and atmosphere):' });
-    options.sceneRefImages.forEach(img => {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
-    });
-  }
-
-  if (options.bgRefImages && options.bgRefImages.length > 0) {
-    parts.push({ text: '\n\nBackground Reference Images (product photo module: use these to define the background color tone):' });
-    options.bgRefImages.forEach(img => {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
-    });
-  }
-
-  if (options.accessoryImages && options.accessoryImages.length > 0) {
-    parts.push({ text: '\n\nAccessory Reference Images (naturally incorporate these accessories into the scene):' });
-    options.accessoryImages.forEach(img => {
-      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } });
-    });
-  }
-
-  if (options.anchorImage) {
-    parts.push({
-      text: '\n\nAnchor Reference Image (CRITICAL — MODEL IDENTITY LOCK):\nThis is a previously generated image from the SAME photo series. You MUST reproduce the EXACT SAME model: same face, same hairstyle, same skin complexion, same makeup. Only the pose and framing should differ.',
-    });
-    parts.push({ inline_data: { mime_type: options.anchorImage.mimeType, data: options.anchorImage.data } });
-  }
-
-  return parts;
-}
+// 旧版内联实现 callGeminiApi / buildParts 已删除。
+// 实际生图调用全部走 lib/image-backends.ts 的 generateBackendImage（双 backend：gemini / openai）。
 
 // ═══════════════════════════════════════
 // POST 处理
@@ -286,11 +96,13 @@ export async function POST(req: NextRequest) {
     selectedShotIndexes,
     outputSize,
     sceneOutputSize,
+    sceneHasModel,
     customPrompt,
     engine: rawEngine,
   } = body;
 
   const engine = normalizeBackend(rawEngine);
+  const requestedApiModel = engine === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
 
   // 截断防止滥用（DoS / token 浪费）
   const safeCustomPrompt = typeof customPrompt === 'string' && customPrompt.trim()
@@ -311,15 +123,35 @@ export async function POST(req: NextRequest) {
   }
 
   // ═══ SSE 流式响应 ═══
+  // 客户端断开检测：req.signal 在请求被中断时触发 aborted
+  // 配合 enqueue 抛错检测构成双重保险
   const stream = new ReadableStream({
     async start(controller) {
+      // 用 closure 状态记录客户端是否已断开；循环每轮检查
+      let clientClosed = false;
+      const onAbort = () => { clientClosed = true; };
+      req.signal.addEventListener('abort', onAbort);
+
       const push = (type: string, data: unknown) => {
+        if (clientClosed) return;
         try {
           controller.enqueue(new TextEncoder().encode(sseEvent(type, data)));
         } catch {
-          // 客户端已断开
+          // controller 已关闭 / 客户端已断开
+          clientClosed = true;
         }
       };
+
+      // 心跳：每 25 秒发一次空注释，防止 nginx/CDN/中间代理超时关闭长连接
+      // 同时是 enqueue 抛错的探测器
+      const heartbeat = setInterval(() => {
+        if (clientClosed) return;
+        try {
+          controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'));
+        } catch {
+          clientClosed = true;
+        }
+      }, 25_000);
 
       const startTime = Date.now();
       let successCount = 0;
@@ -356,6 +188,13 @@ export async function POST(req: NextRequest) {
           let anchorImage: ImageInput | undefined;
 
           for (let i = 0; i < shotConfigs.length; i++) {
+            // 客户端断开检测：用户关闭页面 / 切走，立刻停止后续 API 调用
+            // 否则服务端会继续把所有镜次跑完，浪费 API 配额 + 上游 token
+            if (clientClosed) {
+              console.log(`[stream] 客户端已断开，提前终止生成（已完成 ${i}/${shotConfigs.length}）`);
+              break;
+            }
+
             const shot = shotConfigs[i];
             push('status', {
               phase: 'generating',
@@ -368,56 +207,99 @@ export async function POST(req: NextRequest) {
             // 余额检查 + 扣费
             const balance = await checkBalance(auth.userId);
             if (!balance.sufficient) {
+              const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
               push('error', {
                 shotIndex: shot.index,
                 current: i + 1,
                 total,
-                message: `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`,
+                message: errMsg,
                 fatal: true,
               });
+              // 失败也要记录（admin 失败监控页才能完整反映用户侧失败）
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
+                promptText: '(skipped: balance insufficient)',
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: requestedApiModel,
+                success: false, apiLatencyMs: 0, errorMessage: errMsg,
+              }).catch(err => console.error('[recordGeneration]', err));
               failedCount += total - i;
               break;
             }
 
-            const deduction = await deductBalance(auth.userId, `生成镜次 #${shot.index}`, taskId);
+            const deduction = await deductBalance(auth.userId, `生成镜次 #${shot.index}`, taskId, requestedApiModel);
             if (!deduction.success) {
+              const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
               push('error', {
                 shotIndex: shot.index,
                 current: i + 1,
                 total,
-                message: `扣费失败: ${deduction.error || '未知错误'}`,
+                message: errMsg,
                 fatal: true,
               });
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
+                promptText: '(skipped: deduction failed)',
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: requestedApiModel,
+                success: false, apiLatencyMs: 0, errorMessage: errMsg,
+              }).catch(err => console.error('[recordGeneration]', err));
               failedCount += total - i;
               break;
             }
 
-            // 构建 prompt
-            const prompt = buildProductShotPrompt({
-              shot,
-              productImages,
-              modelConfig,
-              bodyTypeConfig,
-              skinToneConfig,
-              modelRefImages,
-              bgRefImages,
-              accessoryImages,
-              garmentDescription,
-              customPrompt: safeCustomPrompt,
-            });
-
-            const shotStart = Date.now();
-            const result = await generateBackendImage({
-              prompt,
-              productImages,
-              modelRefImages,
-              bgRefImages,
-              accessoryImages,
-              anchorImage,
-              aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-            }, engine);
-            const shotLatency = Date.now() - shotStart;
-            const apiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+            // —— 从这里起，钱已扣；任何失败 / 异常 / 客户端断开都必须退款 ——
+            // 用本地 try/catch 兜住 buildProductShotPrompt + generateBackendImage 的未捕获异常。
+            let result: Awaited<ReturnType<typeof generateBackendImage>> | null = null;
+            let shotLatency = 0;
+            let prompt = '';
+            try {
+              prompt = buildProductShotPrompt({
+                shot,
+                productImages,
+                modelConfig,
+                bodyTypeConfig,
+                skinToneConfig,
+                modelRefImages,
+                bgRefImages,
+                accessoryImages,
+                garmentDescription,
+                customPrompt: safeCustomPrompt,
+              });
+              const shotStart = Date.now();
+              result = await generateBackendImage({
+                prompt,
+                productImages,
+                modelRefImages,
+                bgRefImages,
+                accessoryImages,
+                anchorImage,
+                aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+              }, engine);
+              shotLatency = Date.now() - shotStart;
+            } catch (innerErr) {
+              const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
+              await refundBalance(auth.userId, PRICING.pricePerCallFen, `生成镜次 #${shot.index} 异常退款`, taskId);
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
+                promptText: prompt || '(throw before prompt built)',
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: requestedApiModel,
+                success: false, apiLatencyMs: 0, errorMessage: msg,
+              }).catch(err => console.error('[recordGeneration]', err));
+              push('error', {
+                shotIndex: shot.index, current: i + 1, total,
+                message: `${msg}（已自动退款）`, fatal: false,
+              });
+              failedCount++;
+              if (i === 0) {
+                push('done', { successCount: 0, failedCount: total, totalSeconds: Math.round((Date.now() - startTime) / 1000), abortedEarly: true });
+                controller.close();
+                return;
+              }
+              continue;
+            }
+            const resultApiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
 
             // 持久化生成记录到 Postgres（无论成败）
             recordGeneration({
@@ -430,13 +312,26 @@ export async function POST(req: NextRequest) {
               bodyType,
               skinTone,
               aspectRatio,
-              apiModel,
+              apiModel: resultApiModel,
               success: result.success,
               apiLatencyMs: shotLatency,
               errorMessage: result.success ? undefined : result.error,
             }).catch(err => console.error('[recordGeneration] 失败:', err));
 
             if (result.success && result.data) {
+              // 关键：生成成功但客户端已断开 → push 会被吞，IndexedDB 也写不进去 → 用户付了钱拿不到图。
+              // 这里主动退款 + 记一笔 disconnect 失败，避免静默丢钱。
+              if (clientClosed) {
+                await refundBalance(auth.userId, PRICING.pricePerCallFen, `生成镜次 #${shot.index} 客户端断开退款`, taskId);
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
+                  promptText: prompt, modelId, bodyType, skinTone, aspectRatio, apiModel: resultApiModel,
+                  success: false, apiLatencyMs: shotLatency,
+                  errorMessage: 'client disconnected before delivery',
+                }).catch(err => console.error('[recordGeneration]', err));
+                failedCount++;
+                break;
+              }
               successCount++;
               // 锚定首图
               if (!anchorImage) {
@@ -500,27 +395,43 @@ export async function POST(req: NextRequest) {
           // 余额 + 扣费
           const balance = await checkBalance(auth.userId);
           if (!balance.sufficient) {
+            const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}）`;
             push('error', {
               shotIndex: 0,
               current: 1,
               total: 1,
-              message: `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}）`,
+              message: errMsg,
               fatal: true,
             });
+            recordGeneration({
+              userId: auth.userId, taskId, module: 'scene',
+              promptText: '(skipped: balance insufficient)',
+              modelId, bodyType, skinTone, aspectRatio,
+              apiModel: requestedApiModel,
+              success: false, apiLatencyMs: 0, errorMessage: errMsg,
+            }).catch(err => console.error('[recordGeneration]', err));
             push('done', { successCount: 0, failedCount: 1, totalSeconds: 0 });
             controller.close();
             return;
           }
 
-          const sceneDeduction = await deductBalance(auth.userId, '场景图生成', taskId);
+          const sceneDeduction = await deductBalance(auth.userId, '场景图生成', taskId, requestedApiModel);
           if (!sceneDeduction.success) {
+            const errMsg = `扣费失败: ${sceneDeduction.error || '未知错误'}`;
             push('error', {
               shotIndex: 0,
               current: 1,
               total: 1,
-              message: `扣费失败: ${sceneDeduction.error || '未知错误'}`,
+              message: errMsg,
               fatal: true,
             });
+            recordGeneration({
+              userId: auth.userId, taskId, module: 'scene',
+              promptText: '(skipped: deduction failed)',
+              modelId, bodyType, skinTone, aspectRatio,
+              apiModel: requestedApiModel,
+              success: false, apiLatencyMs: 0, errorMessage: errMsg,
+            }).catch(err => console.error('[recordGeneration]', err));
             push('done', { successCount: 0, failedCount: 1, totalSeconds: 0 });
             controller.close();
             return;
@@ -541,29 +452,48 @@ export async function POST(req: NextRequest) {
           const bodyTypeConfig = BODY_TYPES.find(b => b.id === (bodyType || 'standard'));
           const skinToneConfig = SKIN_TONES.find(s => s.id === (skinTone || 'light'));
 
-          const prompt = buildSceneShotPrompt({
-            productImages,
-            sceneRefImages,
-            modelConfig,
-            bodyTypeConfig,
-            skinToneConfig,
-            modelRefImages,
-            accessoryImages,
-            hasModel: true,
-            garmentDescription,
-            customPrompt: safeCustomPrompt,
-          });
-
-          const sceneShotStart = Date.now();
-          const result = await generateBackendImage({
-            prompt,
-            productImages,
-            modelRefImages,
-            sceneRefImages,
-            accessoryImages,
-            aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-          }, engine);
-          const sceneShotLatency = Date.now() - sceneShotStart;
+          // 钱已扣 — 任何 prompt 构建或后端调用异常都必须退款
+          let prompt = '';
+          let result: Awaited<ReturnType<typeof generateBackendImage>>;
+          let sceneShotLatency = 0;
+          try {
+            prompt = buildSceneShotPrompt({
+              productImages,
+              sceneRefImages,
+              modelConfig,
+              bodyTypeConfig,
+              skinToneConfig,
+              modelRefImages,
+              accessoryImages,
+              hasModel: sceneHasModel !== false,
+              garmentDescription,
+              customPrompt: safeCustomPrompt,
+            });
+            const sceneShotStart = Date.now();
+            result = await generateBackendImage({
+              prompt,
+              productImages,
+              modelRefImages,
+              sceneRefImages,
+              accessoryImages,
+              aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+            }, engine);
+            sceneShotLatency = Date.now() - sceneShotStart;
+          } catch (innerErr) {
+            const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
+            await refundBalance(auth.userId, PRICING.pricePerCallFen, '场景图异常退款', taskId);
+            recordGeneration({
+              userId: auth.userId, taskId, module: 'scene',
+              promptText: prompt || '(throw before prompt built)',
+              modelId, bodyType, skinTone, aspectRatio,
+              apiModel: requestedApiModel,
+              success: false, apiLatencyMs: 0, errorMessage: msg,
+            }).catch(err => console.error('[recordGeneration]', err));
+            push('error', { shotIndex: 0, current: 1, total: 1, message: `${msg}（已自动退款）`, fatal: true });
+            push('done', { successCount: 0, failedCount: 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
+            controller.close();
+            return;
+          }
           const sceneApiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
 
           // 持久化生成记录到 Postgres
@@ -583,8 +513,20 @@ export async function POST(req: NextRequest) {
           }).catch(err => console.error('[recordGeneration] 失败:', err));
 
           if (result.success && result.data) {
-            successCount = 1;
-            push('result', { shotIndex: 0, imageData: result.data, current: 1, total: 1 });
+            // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款。
+            if (clientClosed) {
+              await refundBalance(auth.userId, PRICING.pricePerCallFen, '场景图客户端断开退款', taskId);
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'scene',
+                promptText: prompt, modelId, bodyType, skinTone, aspectRatio, apiModel: sceneApiModel,
+                success: false, apiLatencyMs: sceneShotLatency,
+                errorMessage: 'client disconnected before delivery',
+              }).catch(err => console.error('[recordGeneration]', err));
+              failedCount = 1;
+            } else {
+              successCount = 1;
+              push('result', { shotIndex: 0, imageData: result.data, current: 1, total: 1 });
+            }
           } else {
             failedCount = 1;
             await refundBalance(
@@ -622,10 +564,22 @@ export async function POST(req: NextRequest) {
 
       } catch (err) {
         const msg = err instanceof Error ? err.message : '服务器内部错误';
+        // 走到这里说明所有 inner try/catch 都没接住的"框架级"异常（如 push 抛错、modelConfig 查找失败、
+        // analyzeProductImage 之外的 setup 错误等）。钱在每个扣费点的 inner try/catch 都已经处理过，
+        // 这里只补一行 recordGeneration 让 admin 失败监控可以看到。
+        recordGeneration({
+          userId: auth.userId, taskId, module: moduleType,
+          promptText: '(uncaught fatal error in stream)',
+          modelId, bodyType, skinTone, aspectRatio: 'unknown',
+          apiModel: requestedApiModel,
+          success: false, apiLatencyMs: 0, errorMessage: msg,
+        }).catch(e => console.error('[recordGeneration]', e));
         push('error', { shotIndex: -1, current: 0, total: 0, message: msg, fatal: true });
         push('done', { successCount, failedCount: failedCount + 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
       } finally {
-        controller.close();
+        clearInterval(heartbeat);
+        req.signal.removeEventListener('abort', onAbort);
+        try { controller.close(); } catch { /* 已 close */ }
       }
     },
   });

@@ -65,6 +65,13 @@ SKMM_LOGO.jpeg
 # 本地日志
 LOG.md
 
+# Codex / browser automation local artifacts
+.claude/
+.playwright-mcp/
+
+# Local browser verification screenshots
+silkmomo-*.png
+
 # macOS
 .DS_Store
 **/.DS_Store

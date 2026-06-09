@@ -25,7 +25,7 @@ export default function LogoPreview() {
             </div>
 
             <p className="text-gray-500 max-w-xl text-center">
-                This SVG logo uses a vector path to simulate a silk ribbon 'S' shape with a golden gradient.
+                This SVG logo uses a vector path to simulate a silk ribbon S shape with a golden gradient.
                 It is scalable to any size without losing quality.
             </p>
         </div>

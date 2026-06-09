@@ -1,7 +1,7 @@
 /**
  * AI 产品图分析 API
  * 用 Flash Lite 分析产品图，返回服装描述
- * 每次调用扣费 ¥0.03（3 分）
+ * 每次调用按 PRICING.aiAnalysisPricePerCallFen 扣费
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';

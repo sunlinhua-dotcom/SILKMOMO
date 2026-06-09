@@ -28,6 +28,14 @@ import type { CompressedImage } from '@/lib/image-compressor';
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
 interface GenerationError { shotIndex: number; message: string; fatal: boolean; }
 
+// 备份-图片严格配对：两侧都 defined 且 shotIndex 相等，或两侧都 undefined（场景图）；
+// 任一侧 undefined 而另一侧 defined → 不匹配（避免通配匹配到错误备份）。
+function backupMatchesImage(b: ImageItem, imgShotIndex: number | undefined): boolean {
+  if (b.shotIndex === undefined && imgShotIndex === undefined) return true;
+  if (b.shotIndex === undefined || imgShotIndex === undefined) return false;
+  return b.shotIndex === imgShotIndex;
+}
+
 export default function TaskDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -53,9 +61,13 @@ export default function TaskDetailPage() {
   const [generationPhase, setGenerationPhase] = useState<GenerationPhase>('idle');
   const [generationErrors, setGenerationErrors] = useState<GenerationError[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [secondsLeft, setSecondsLeft] = useState(0);
   const [liveImages, setLiveImages] = useState<ImageItem[]>([]); // 生成中实时追加的图片
   const abortControllerRef = useRef<AbortController | null>(null);
   const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 防止双击 重做 同一张图：第一次点击在 setGenerating(true) 之前还有窗口期，
+  // 用 ref 立刻置位，第二次点击直接 return（避免备份图被自己刚生成的"备份"匹配并物理删除）
+  const regenLockRef = useRef(false);
 
   // --- 调整参数面板 State ---
   const [showAdjustPanel, setShowAdjustPanel] = useState(false);
@@ -79,9 +91,20 @@ export default function TaskDetailPage() {
         return;
       }
       const allImages = await db.images.where('projectId').equals(taskId).toArray();
+      const results = allImages.filter(img => img.type === 'result');
+      const backups = allImages.filter(img => img.type === 'result_backup');
+
+      // 关联备份：严格按 shotIndex 匹配（产品图）；shotIndex 都是 undefined 时按场景图唯一匹配
+      const imagesWithBackups = results.map(img => {
+        const backup = backups.find(b => backupMatchesImage(b, img.shotIndex));
+        return {
+          ...img,
+          backup: backup ? { id: backup.id!, data: backup.data } : undefined
+        };
+      });
 
       setProject(task);
-      setImages(allImages.filter(img => img.type === 'result'));
+      setImages(imagesWithBackups);
       setInputImages({
         products: allImages.filter(img => img.type === 'product'),
         modelRefs: allImages.filter(img => img.type === 'model_ref'),
@@ -175,12 +198,45 @@ export default function TaskDetailPage() {
     // 防重复点击：已经在生成中就直接忽略
     if (generating || abortControllerRef.current) return;
 
+    // —— 关键：从 DB 重新取 project + inputImages ——
+    // handleRegenerateWithNewParams 会先写 DB 再调本函数，但 React state（project / inputImages）
+    // 在同一同步任务里还没刷新 → 闭包仍是旧值。直接从 DB 读取保证拿到的是最新参数和最新输入图。
+    const freshProject = await db.projects.get(taskId);
+    if (!freshProject) return;
+    const allImgs = await db.images.where('projectId').equals(taskId).toArray();
+    const freshInputs = {
+      products: allImgs.filter(i => i.type === 'product'),
+      modelRefs: allImgs.filter(i => i.type === 'model_ref'),
+      bgRefs: allImgs.filter(i => i.type === 'bg_ref'),
+      sceneRefs: allImgs.filter(i => i.type === 'scene_ref'),
+      accessories: allImgs.filter(i => i.type === 'accessory'),
+    };
+    if (freshInputs.products.length === 0) return;
+
+    const moduleType = freshProject.moduleType || 'product';
+    const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(freshProject.selectedShots);
+
+    // —— 持久化微调的 customPrompt ——
+    if (customPrompt !== undefined) {
+      await db.projects.update(taskId, { customPrompt });
+      // 延迟更新 project
+      setProject(prev => prev ? { ...prev, customPrompt } : null);
+    }
+    const effectiveCustomPrompt = customPrompt !== undefined ? customPrompt : (freshProject.customPrompt || undefined);
+
     // —— 重置状态 ——
     setGenerating(true);
     setErrorMessage(null);
     setGenerationErrors([]);
     setGenerationPhase('analyzing');
     setElapsedSeconds(0);
+
+    // —— 初始化预估剩余时间 ──
+    const initialSeconds = moduleType === 'scene'
+      ? 25
+      : (selectedShotIndexes.length === 1 ? 25 : 25 + (selectedShotIndexes.length - 1) * 15);
+    setSecondsLeft(initialSeconds);
+
     setLiveImages([]);
     setTrialDone(false);
 
@@ -189,14 +245,12 @@ export default function TaskDetailPage() {
     if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
     elapsedTimerRef.current = setInterval(() => {
       setElapsedSeconds(Math.round((Date.now() - timerStart) / 1000));
+      setSecondsLeft(prev => Math.max(0, prev - 1));
     }, 1000);
 
     // —— AbortController（取消用）——
     const ac = new AbortController();
     abortControllerRef.current = ac;
-
-    const moduleType = project.moduleType || 'product';
-    const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(project.selectedShots);
 
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
@@ -204,10 +258,10 @@ export default function TaskDetailPage() {
 
     try {
       // —— 用户在 pending 状态用快选改了模特/引擎：持久化覆盖 ——
-      const effectiveModelId = newModelId || project.modelId || '';
+      const effectiveModelId = newModelId || freshProject.modelId || '';
       const effectiveEngine: 'gemini' | 'openai' = newEngine;
-      const modelChanged = effectiveModelId !== (project.modelId || '');
-      const engineChanged = effectiveEngine !== (project.engine || 'gemini');
+      const modelChanged = effectiveModelId !== (freshProject.modelId || '');
+      const engineChanged = effectiveEngine !== (freshProject.engine || 'gemini');
       if (modelChanged || engineChanged) {
         await db.projects.update(taskId, {
           modelId: effectiveModelId || undefined,
@@ -220,7 +274,7 @@ export default function TaskDetailPage() {
       await db.projects.update(taskId, { status: 'processing', lastError: undefined });
       setProject(prev => prev ? { ...prev, status: 'processing', lastError: undefined } : null);
 
-      const productImgs = inputImages.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
+      const productImgs = freshInputs.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
 
       const response = await fetch('/api/generate/stream', {
         method: 'POST',
@@ -230,18 +284,19 @@ export default function TaskDetailPage() {
           taskId,
           moduleType,
           productImages: productImgs,
-          modelRefImages: inputImages.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
-          bgRefImages: inputImages.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
-          sceneRefImages: inputImages.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
-          accessoryImages: inputImages.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          modelRefImages: freshInputs.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          bgRefImages: freshInputs.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          sceneRefImages: freshInputs.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
+          accessoryImages: freshInputs.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
           modelId: effectiveModelId || undefined,
-          bodyType: project.bodyType || DEFAULT_BODY_TYPE.id,
-          skinTone: project.skinTone || DEFAULT_SKIN_TONE.id,
+          bodyType: freshProject.bodyType || DEFAULT_BODY_TYPE.id,
+          skinTone: freshProject.skinTone || DEFAULT_SKIN_TONE.id,
           engine: effectiveEngine,
           selectedShotIndexes,
-          outputSize: project.outputSize,
-          sceneOutputSize: project.sceneOutputSize,
-          customPrompt: customPrompt || undefined,
+          outputSize: freshProject.outputSize,
+          sceneOutputSize: freshProject.sceneOutputSize,
+          sceneHasModel: freshProject.sceneHasModel !== false,
+          customPrompt: effectiveCustomPrompt || undefined,
         }),
       });
 
@@ -298,35 +353,51 @@ export default function TaskDetailPage() {
               console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
               setProgress({ current: currentN, total, shotIndex });
 
+              // 动态修正预估剩余时间：剩余数量 * 15 秒
+              const remaining = Math.max(0, total - currentN);
+              setSecondsLeft(remaining * 15);
+
               // 实时写入 IndexedDB + 追加到 liveImages
               const shotConfig = PRODUCT_SHOTS.find(s => s.index === shotIndex);
+              const persistedShotIndex = shotIndex > 0 ? shotIndex : undefined;
+              const resultHasModel = moduleType === 'scene'
+                ? freshProject.sceneHasModel !== false
+                : shotConfig?.hasModel;
               const newImgId = await db.images.add({
                 projectId: taskId,
                 type: 'result',
                 data: imageData,
                 mimeType: 'image/png',
-                shotIndex: shotIndex > 0 ? shotIndex : undefined,
+                shotIndex: persistedShotIndex,
                 frameType: shotConfig?.frameType,
                 shootingAngle: shotConfig?.angle,
-                hasModel: shotConfig?.hasModel,
+                hasModel: resultHasModel,
                 imageType: shotConfig
                   ? (shotConfig.frameType === 'full_body' ? 'full_body'
                     : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
                   : 'hero',
                 index: shotIndex,
               });
+              // 如果这是单张重做产生的新图，对应位置可能已有 result_backup（旧版图） —
+              // 关联起来，让实时画廊也能立刻显示 "对比旧版 / 还原旧版" 工具条
+              const existingBackup = await db.images
+                .where('projectId').equals(taskId)
+                .filter(i => i.type === 'result_backup' && backupMatchesImage(i, persistedShotIndex))
+                .first();
               const newImg: ImageItem = {
                 id: newImgId as number,
                 projectId: taskId,
                 type: 'result',
                 data: imageData,
                 mimeType: 'image/png',
-                shotIndex: shotIndex > 0 ? shotIndex : undefined,
+                shotIndex: persistedShotIndex,
+                hasModel: resultHasModel,
                 imageType: shotConfig
                   ? (shotConfig.frameType === 'full_body' ? 'full_body'
                     : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
                   : 'hero',
                 index: shotIndex,
+                backup: existingBackup ? { id: existingBackup.id!, data: existingBackup.data } : undefined,
               };
               setLiveImages(prev => [...prev, newImg]);
 
@@ -362,6 +433,7 @@ export default function TaskDetailPage() {
               });
               setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
               setGenerationPhase(successCount > 0 ? 'done' : 'error');
+              setSecondsLeft(0);
               // 如果是试生成（只生成 1 张），标记 trialDone
               if (overrideShotIndexes?.length === 1 && successCount === 1) {
                 setTrialDone(true);
@@ -390,8 +462,32 @@ export default function TaskDetailPage() {
       setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
+      setSecondsLeft(0);
       setGenerating(false);
       abortControllerRef.current = null;
+
+      // 数据安全：扫描所有 backup，按 shotIndex 对应是否有新 result 决定
+      //   - 有新图 → backup 是过时副本，但保留供用户对比 / 还原（用户主动操作才删）
+      //     已经在 imagesWithBackups 里关联过，这里不动
+      //   - 无新图（生成失败/取消）→ 把 backup 还原为 result，避免用户看不到旧图
+      try {
+        const backups = await db.images
+          .where('projectId').equals(taskId)
+          .filter(i => i.type === 'result_backup')
+          .toArray();
+        for (const b of backups) {
+          const hasNewResult = await db.images
+            .where('projectId').equals(taskId)
+            .filter(i => i.type === 'result' && i.shotIndex === b.shotIndex)
+            .count();
+          if (hasNewResult === 0) {
+            await db.images.update(b.id!, { type: 'result' });
+          }
+        }
+      } catch (e) {
+        console.error('[backup 还原] 失败:', e);
+      }
+
       // 刷新最终图片列表
       await loadTaskData();
     }
@@ -407,19 +503,35 @@ export default function TaskDetailPage() {
     if (!project) return;
 
     setShowAdjustPanel(false);
-    setGenerating(true);
     setErrorMessage(null);
+    // 不在此处 setGenerating(true) — handleStartGeneration 内部会管理
 
     try {
-      // 1. 清除旧结果
-      await db.images.where('projectId').equals(taskId).filter(img => img.type === 'result').delete();
+      // 1. 旧结果转为 result_backup（不再物理删除）
+      //    若失败/取消，finally 会自动把 backup 还原为 result
+      //    若成功，用户可手动选择 "保留新版" / "还原旧版"
+      const oldResults = await db.images
+        .where('projectId').equals(taskId)
+        .filter(img => img.type === 'result')
+        .toArray();
+      // 先清掉已有的 backup（避免堆积），再标记新 backup
+      const oldBackups = await db.images
+        .where('projectId').equals(taskId)
+        .filter(img => img.type === 'result_backup')
+        .toArray();
+      for (const b of oldBackups) {
+        await db.images.delete(b.id!);
+      }
+      for (const r of oldResults) {
+        await db.images.update(r.id!, { type: 'result_backup' });
+      }
       setImages([]);
 
-      // 2. 如果上了新的风格/场景图
+      // 2. 如果上了新的风格/场景图，按 moduleType 只更新对应类型，不误删另一种
       if (newStyleImages.length > 0) {
         const imgType = project.moduleType === 'scene' ? 'scene_ref' : 'bg_ref';
         await db.images.where('projectId').equals(taskId)
-          .filter(img => img.type === 'scene_ref' || img.type === 'bg_ref')
+          .filter(img => img.type === imgType)
           .delete();
         for (const img of newStyleImages) {
           await db.images.add({ projectId: taskId, type: imgType, data: img.base64, mimeType: img.mimeType });
@@ -436,61 +548,111 @@ export default function TaskDetailPage() {
         updatedAt: new Date(),
       });
 
-      // 4. 重新加载数据
-      await loadTaskData();
-
-      // 5. 触发生成（loadTaskData 完成后 project 已更新）
-      // 因为 setState 异步，直接在这里重新读取并生成
+      // 4. 重新加载 + 同步取得最新 project，直接传给 handleStartGeneration 避免 stale state
       const task = await db.projects.get(taskId);
       if (task) {
         setProject(task);
-        // 延迟一帧让 state 同步
-        setTimeout(() => {
-          handleStartGeneration();
-        }, 100);
+        await loadTaskData();
+        // 用 await 而非 setTimeout（之前 100ms 是脆弱 race）
+        await handleStartGeneration();
       }
 
     } catch (error) {
       console.error('重新生成失败:', error);
       const errorMsg = error instanceof Error ? error.message : '未知错误';
       setErrorMessage(errorMsg);
+      // 准备阶段就出错：把 backup 还原为 result，避免数据丢失
+      try {
+        const stuckBackups = await db.images
+          .where('projectId').equals(taskId)
+          .filter(i => i.type === 'result_backup')
+          .toArray();
+        for (const b of stuckBackups) {
+          await db.images.update(b.id!, { type: 'result' });
+        }
+        await loadTaskData();
+      } catch (e) {
+        console.error('[backup 紧急还原] 失败:', e);
+      }
       await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
       setProject(prev => prev ? { ...prev, status: 'failed' } : null);
-      setGenerating(false);
     } finally {
       setNewStyleImages([]);
     }
   };
 
   const handleRegenerate = async (imageId: number, customPrompt?: string) => {
-    if (!project || generating) return;
-
-    // 找到这张图，拿到它的 shotIndex（场景图无 shotIndex，按整任务重做）
-    const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
-    if (!img) {
-      console.warn('未找到要重做的图片:', imageId);
-      return;
-    }
-
-    const moduleType = project.moduleType || 'product';
-    const shotIndex = img.shotIndex;
+    if (!project || generating || regenLockRef.current) return;
+    regenLockRef.current = true;
 
     try {
-      // 旧结果先从 DB 删除（避免最终重复），但保留在 React state 中
-      // 显示 overlay + spinner 作为占位 —— 等 SSE 出新图后 loadTaskData
-      // 重新拉取，自动用新图替换
-      await db.images.delete(imageId);
+      // 找到这张图，拿到它的 shotIndex（场景图无 shotIndex，按整任务重做）
+      const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
+      if (!img) {
+        console.warn('未找到要重做的图片:', imageId);
+        return;
+      }
 
-      if (moduleType === 'scene' || !shotIndex) {
-        // 场景图：整张重做
+      const moduleType = project.moduleType || 'product';
+      const shotIndex = img.shotIndex;
+
+      // 查找并删除已存在的备份图片（避免堆积）。
+      // 注意：用 backupMatchesImage 严格匹配；同时跳过 imageId 自身，避免双击/竞态下把刚标记的 backup 误删。
+      const backups = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'result_backup').toArray();
+      const existingBackup = backups.find(b => b.id !== imageId && backupMatchesImage(b, shotIndex));
+      if (existingBackup) {
+        await db.images.delete(existingBackup.id!);
+      }
+
+      // 将旧结果在数据库中标记为备份，暂不物理删除
+      await db.images.update(imageId, { type: 'result_backup' });
+
+      // 场景图（moduleType=scene 且 shotIndex 通常为 undefined）整张重做；产品图按镜次重做。
+      // 注意：用 shotIndex === undefined 而非 !shotIndex，避免 shotIndex=0 被误判
+      if (moduleType === 'scene' || shotIndex === undefined) {
         await handleStartGeneration(undefined, customPrompt);
       } else {
-        // 产品图：只重做这一镜次
         await handleStartGeneration([shotIndex], customPrompt);
       }
     } catch (e) {
       console.error('重新生成失败:', e);
       setErrorMessage(e instanceof Error ? e.message : '重新生成失败');
+    } finally {
+      regenLockRef.current = false;
+    }
+  };
+
+  const handleAcceptNewVersion = async (imageId: number) => {
+    try {
+      const img = images.find(i => i.id === imageId);
+      if (!img) return;
+      const backups = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'result_backup').toArray();
+      const backup = backups.find(b => backupMatchesImage(b, img.shotIndex));
+      if (backup) {
+        await db.images.delete(backup.id!);
+      }
+      await loadTaskData();
+    } catch (e) {
+      console.error('保留新版失败:', e);
+    }
+  };
+
+  const handleRejectNewVersion = async (imageId: number) => {
+    try {
+      const img = images.find(i => i.id === imageId);
+      if (!img) return;
+      // 先定位备份；找到才删除新图 + 恢复备份，避免"删完新图找不到备份 → 两版都丢"
+      const backups = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'result_backup').toArray();
+      const backup = backups.find(b => backupMatchesImage(b, img.shotIndex));
+      if (!backup) {
+        console.warn('还原旧版：未找到匹配的备份，取消还原以避免数据丢失', { imageId, shotIndex: img.shotIndex });
+        return;
+      }
+      await db.images.delete(imageId);
+      await db.images.update(backup.id!, { type: 'result' });
+      await loadTaskData();
+    } catch (e) {
+      console.error('还原旧版失败:', e);
     }
   };
 
@@ -537,9 +699,9 @@ export default function TaskDetailPage() {
       <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 rounded-full bg-[var(--color-surface)] border border-[var(--color-border-light)] flex items-center justify-center mx-auto mb-4">
-            <Loader className="w-6 h-6 text-[var(--color-accent)] animate-spin" />
+            <Loader className="w-6 h-6 text-[var(--color-accent)] animate-spin" aria-hidden="true" />
           </div>
-          <p className="text-sm text-[var(--color-text-secondary)]">加载中...</p>
+          <p className="text-sm text-[var(--color-text-secondary)]">加载中…</p>
         </div>
       </div>
     );
@@ -559,10 +721,10 @@ export default function TaskDetailPage() {
   const isFinishingUp = liveImages.length >= progress.total && progress.total > 0;
 
   const phaseTitle = (() => {
-    if (generationPhase === 'analyzing') return '正在分析服装特征...';
-    if (isFinishingUp) return '图片处理中，即将完成...';
+    if (generationPhase === 'analyzing') return '正在分析服装特征…';
+    if (isFinishingUp) return '图片处理中，即将完成…';
     if (moduleType === 'product') return `已生成 ${liveImages.length} / ${progress.total} 张`;
-    return '正在生成场景图...';
+    return '正在生成场景图…';
   })();
 
   const phaseSubLabel = (() => {
@@ -603,6 +765,11 @@ export default function TaskDetailPage() {
       {moduleType === 'product' && currentShotCount !== null && (
         <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
           镜次: {currentShotCount} 张
+        </span>
+      )}
+      {moduleType === 'scene' && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          场景: {project.sceneHasModel === false ? '氛围静物' : '有模特'}
         </span>
       )}
       {currentOutputSizeLabel && (
@@ -674,25 +841,25 @@ export default function TaskDetailPage() {
 
               {project.status === 'pending' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-background)] rounded-full">
-                  <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" />
+                  <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" aria-hidden="true" />
                   等待生成
                 </span>
               )}
               {project.status === 'processing' && (
-                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-accent)]/10 rounded-full text-[var(--color-accent)]">
-                  <Loader className="w-3.5 h-3.5 animate-spin" />
+                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-accent)]/10 rounded-full text-[var(--color-accent)] tabular-nums">
+                  <Loader className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
                   {liveImages.length}/{progress.total}
                 </span>
               )}
               {project.status === 'completed' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-green-50 rounded-full text-green-600">
-                  <CheckCircle className="w-3.5 h-3.5" />
+                  <CheckCircle className="w-3.5 h-3.5" aria-hidden="true" />
                   已完成
                 </span>
               )}
               {project.status === 'failed' && (
                 <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-red-50 rounded-full text-red-500">
-                  <XCircle className="w-3.5 h-3.5" />
+                  <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
                   失败
                 </span>
               )}
@@ -703,7 +870,7 @@ export default function TaskDetailPage() {
                   onClick={() => setShowAdjustPanel(true)}
                   className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-[var(--color-accent)] text-white rounded-xl hover:bg-[var(--color-accent-dark)] transition-colors"
                 >
-                  <Settings2 className="w-4 h-4" />
+                  <Settings2 className="w-4 h-4" aria-hidden="true" />
                   <span className="hidden sm:inline">调整参数</span>
                 </button>
               )}
@@ -722,8 +889,9 @@ export default function TaskDetailPage() {
               <button
                 onClick={() => setShowAdjustPanel(false)}
                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[var(--color-background)] transition-colors"
+                aria-label="关闭参数调整面板"
               >
-                <X className="w-5 h-5 text-[var(--color-text-muted)]" />
+                <X className="w-5 h-5 text-[var(--color-text-muted)]" aria-hidden="true" />
               </button>
             </div>
 
@@ -840,12 +1008,19 @@ export default function TaskDetailPage() {
                 </div>
                 <div className="flex justify-between items-center mt-2">
                   <p className="text-xs text-[var(--color-text-muted)]">{phaseSubLabel}</p>
-                  <p className="text-xs text-[var(--color-text-muted)]">
-                    已耗时 {elapsedSeconds}s
+                  <p className="text-xs text-[var(--color-text-muted)] flex items-center gap-2">
+                    <span>已耗时 {elapsedSeconds}s</span>
+                    {secondsLeft > 0 && <span className="text-[var(--color-accent)] font-medium">预计剩余时间：{secondsLeft} 秒</span>}
                     {elapsedSeconds > 90 && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
                   </p>
                 </div>
               </div>
+
+              {moduleType === 'product' && liveImages.length >= 1 && progress.total > 1 && (
+                <div className="mt-6 max-w-sm mx-auto p-3.5 rounded-2xl bg-gradient-to-r from-[var(--color-accent)]/10 to-[var(--color-accent-light)]/5 border border-[var(--color-accent)]/20 text-[var(--color-accent)] text-xs text-center animate-fade-in shadow-sm flex items-center justify-center gap-2">
+                  <span>✨ 模特身份已成功锚定！正在以此模特渲染剩余的镜次…</span>
+                </div>
+              )}
 
               {/* 取消按钮 */}
               <button
@@ -871,9 +1046,12 @@ export default function TaskDetailPage() {
                     imageType: img.imageType || 'close_up',
                     data: img.data,
                     prompt: img.prompt,
-                    index: img.index
+                    index: img.index,
+                    backup: img.backup,
                   }))}
-                  onRegenerate={() => {}}
+                  onRegenerate={handleRegenerate}
+                  onAcceptNewVersion={handleAcceptNewVersion}
+                  onRejectNewVersion={handleRejectNewVersion}
                 />
               </div>
             )}
@@ -913,6 +1091,8 @@ export default function TaskDetailPage() {
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="产品"
+                    width={80}
+                    height={80}
                     className="w-full h-full object-cover"
                   />
                 </button>
@@ -930,6 +1110,8 @@ export default function TaskDetailPage() {
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="模特参考"
+                    width={80}
+                    height={80}
                     className="w-full h-full object-cover"
                   />
                 </button>
@@ -947,6 +1129,8 @@ export default function TaskDetailPage() {
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="背景参考"
+                    width={80}
+                    height={80}
                     className="w-full h-full object-cover"
                   />
                 </button>
@@ -964,6 +1148,8 @@ export default function TaskDetailPage() {
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="场景参考"
+                    width={80}
+                    height={80}
                     className="w-full h-full object-cover"
                   />
                 </button>
@@ -981,6 +1167,8 @@ export default function TaskDetailPage() {
                   <img
                     src={`data:${img.mimeType};base64,${img.data}`}
                     alt="配件"
+                    width={80}
+                    height={80}
                     className="w-full h-full object-cover"
                   />
                 </button>
@@ -996,7 +1184,7 @@ export default function TaskDetailPage() {
         {project.status === 'pending' && !generating && (
           <div className="mb-12 text-center py-12 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
             <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[#1a1a1a] flex items-center justify-center">
-              <Wand2 className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={1.5} />
+              <Wand2 className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={1.5} aria-hidden="true" />
             </div>
             <h2 className="text-xl font-semibold mb-3">
               {moduleType === 'product' ? '准备生成产品图组' : '准备生成场景图'}
@@ -1103,9 +1291,12 @@ export default function TaskDetailPage() {
                 imageType: img.imageType || 'close_up',
                 data: img.data,
                 prompt: img.prompt,
-                index: img.index
+                index: img.index,
+                backup: img.backup,
               }))}
               onRegenerate={handleRegenerate}
+              onAcceptNewVersion={handleAcceptNewVersion}
+              onRejectNewVersion={handleRejectNewVersion}
             />
           </div>
         )}

@@ -5,13 +5,26 @@ import { X, Check, ImageIcon, Trash2 } from 'lucide-react';
 import { getLibraryImages, removeFromLibrary, libraryToCompressed, type LibraryImage } from '@/lib/image-library';
 import type { CompressedImage } from '@/lib/image-compressor';
 
+type LibraryCategory = NonNullable<LibraryImage['category']>;
+type LibraryTab = 'all' | LibraryCategory;
+
 interface ImageLibraryPickerProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (images: CompressedImage[]) => void;
   maxSelect: number;       // 最多可选几张
   currentCount: number;    // 当前已有几张
+  category?: LibraryCategory;
 }
+
+const CATEGORY_TABS: Array<{ id: LibraryTab; label: string }> = [
+  { id: 'all', label: '全部' },
+  { id: 'product', label: '产品服装' },
+  { id: 'model_ref', label: '模特妆发' },
+  { id: 'bg_ref', label: '背景参考' },
+  { id: 'scene_ref', label: '场景参考' },
+  { id: 'accessory', label: '配件' },
+];
 
 export function ImageLibraryPicker({
   isOpen,
@@ -19,20 +32,30 @@ export function ImageLibraryPicker({
   onSelect,
   maxSelect,
   currentCount,
+  category,
 }: ImageLibraryPickerProps) {
   const [libraryImages, setLibraryImages] = useState<LibraryImage[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<LibraryTab>('all');
 
   const remaining = maxSelect - currentCount;
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+
+    queueMicrotask(() => {
       setLibraryImages(getLibraryImages());
       setSelected(new Set());
-    }
-  }, [isOpen]);
+      setActiveTab(category || 'all');
+    });
+  }, [isOpen, category]);
 
   if (!isOpen) return null;
+
+  const filteredImages = libraryImages.filter(img => {
+    if (activeTab === 'all') return true;
+    return img.category === activeTab;
+  });
 
   const toggleSelect = (id: string) => {
     setSelected(prev => {
@@ -85,6 +108,27 @@ export function ImageLibraryPicker({
           </button>
         </div>
 
+        {/* Tab 页签分类选择 */}
+        <div className="flex border-b border-[var(--color-border-light)] px-4 py-1.5 overflow-x-auto no-scrollbar gap-1 bg-[var(--color-background)]/50">
+          {CATEGORY_TABS.map(tab => {
+            const isTabActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`text-xs px-3.5 py-1.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                  isTabActive
+                    ? 'bg-[var(--color-accent)] text-white font-medium shadow-sm'
+                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background)] hover:text-[var(--color-primary)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
         {/* 图片网格 */}
         <div className="flex-1 overflow-y-auto p-4">
           {libraryImages.length === 0 ? (
@@ -93,9 +137,15 @@ export function ImageLibraryPicker({
               <p className="text-sm text-[var(--color-text-secondary)]">图库为空</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-1">上传的图片会自动保存到图库</p>
             </div>
+          ) : filteredImages.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <ImageIcon className="w-10 h-10 text-[var(--color-text-muted)] mb-3 opacity-60" strokeWidth={1} />
+              <p className="text-sm text-[var(--color-text-secondary)]">该分类下暂无图片</p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">可切换至其他分类页签查看</p>
+            </div>
           ) : (
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
-              {libraryImages.map(img => {
+              {filteredImages.map(img => {
                 const isSelected = selected.has(img.id);
                 const isDisabled = !isSelected && selected.size >= remaining;
                 return (
@@ -104,7 +154,7 @@ export function ImageLibraryPicker({
                     onClick={() => !isDisabled && toggleSelect(img.id)}
                     className={`
                       relative aspect-square rounded-xl overflow-hidden cursor-pointer
-                      ring-2 transition-all duration-200
+                      ring-2 transition-all duration-200 group
                       ${isSelected
                         ? 'ring-[var(--color-accent)] scale-[0.96]'
                         : isDisabled
@@ -126,13 +176,11 @@ export function ImageLibraryPicker({
                         </div>
                       </div>
                     )}
-                    {/* 删除按钮 */}
+                    {/* 删除按钮 — 触屏设备无 hover 状态，常驻显示；桌面端 hover 才浮现 */}
                     <button
                       onClick={(e) => handleDelete(img.id, e)}
-                      className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-500 transition-all hover:opacity-100"
-                      style={{ opacity: undefined }}
-                      onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-                      onMouseLeave={e => (e.currentTarget.style.opacity = '0')}
+                      className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-black/50 flex items-center justify-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-red-500 transition-all"
+                      aria-label="删除"
                     >
                       <Trash2 className="w-3 h-3 text-white" />
                     </button>
