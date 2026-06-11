@@ -30,15 +30,29 @@ function migrateLegacyLibrary(): Promise<void> {
       try {
         const raw = window.localStorage.getItem(LEGACY_IMAGE_LIBRARY_KEY);
         if (raw) {
+          let rows: LibraryImage[] | null = null;
+          let corrupt = false;
           try {
-            const legacy = JSON.parse(raw) as LibraryImage[];
-            if (Array.isArray(legacy) && legacy.length > 0) {
-              await db.libraryImages.bulkPut(legacy.filter(i => i && i.id && i.base64));
-            }
+            const legacy = JSON.parse(raw);
+            rows = Array.isArray(legacy) ? legacy.filter(i => i && i.id && i.base64) : [];
           } catch {
-            // 旧数据损坏，直接丢弃
+            corrupt = true; // JSON 解析失败 = 数据已损坏，保留也无意义
           }
-          window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
+
+          if (corrupt) {
+            window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
+          } else if (rows) {
+            // 关键顺序：必须先写成功 IndexedDB，再删 localStorage 源。
+            // 否则写失败时源被删 → 图库永久丢失。
+            try {
+              if (rows.length > 0) await db.libraryImages.bulkPut(rows);
+              window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
+            } catch (e) {
+              // 写入失败：保留 localStorage 源，不置 done，下次调用重试（bulkPut 幂等）
+              console.warn('图库迁移写入失败，保留本地数据下次重试:', e);
+              return;
+            }
+          }
         }
         libraryMigrationDone = true;
       } finally {
