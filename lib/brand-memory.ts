@@ -23,8 +23,11 @@ export interface BrandProfileData {
  * 如果不存在，自动创建一个
  */
 export async function getDefaultBrandProfile(userId: string) {
+  // schema 没有 (userId, isDefault) 唯一约束，并发首次访问可能建出多条默认档案；
+  // 固定按 createdAt 升序取最旧一条，保证读写始终命中同一档案
   let profile = await prisma.brandProfile.findFirst({
     where: { userId, isDefault: true },
+    orderBy: { createdAt: 'asc' },
   });
 
   if (!profile) {
@@ -98,6 +101,7 @@ export async function autoSaveBrandPreference(
 ) {
   const profile = await prisma.brandProfile.findFirst({
     where: { userId, isDefault: true },
+    orderBy: { createdAt: 'asc' },
   });
 
   if (!profile) {

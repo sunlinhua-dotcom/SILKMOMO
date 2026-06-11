@@ -11,20 +11,35 @@ const LITE_CONFIG = {
   apiKey: process.env.GEMINI_API_KEY || '',
 };
 
+// 上游单次调用超时：没有超时的话 undici 默认要挂 ~300s，
+// 扣费后挂死期间用户干等、资金被悬置
+const LITE_TIMEOUT_MS = 30_000;
+
+/** AI 分析服务是否已配置（调用方可据此在扣费前短路） */
+export function isAiAssistantConfigured(): boolean {
+  return !!LITE_CONFIG.apiKey;
+}
+
 /**
  * Phase 4C：分析产品图，提取服装描述
  * 用便宜的 Flash Lite "看懂" 产品图，生成精确描述词
  * 注入到主生成 prompt 中提升一次成功率
- * 
+ *
  * 成本：~$0.002/次（约 ¥0.015）
+ *
+ * ok=false 表示上游失败（而非"分析结果为空"），付费调用方应据此退款
  */
-export async function analyzeProductImage(imageBase64: string): Promise<{
+export async function analyzeProductImage(
+  imageBase64: string,
+  mimeType: string = 'image/jpeg'
+): Promise<{
+  ok: boolean;
   description: string;
   keywords: string[];
   category: string;
 }> {
   if (!LITE_CONFIG.apiKey) {
-    return { description: '', keywords: [], category: 'garment' };
+    return { ok: false, description: '', keywords: [], category: 'garment' };
   }
 
   try {
@@ -33,6 +48,7 @@ export async function analyzeProductImage(imageBase64: string): Promise<{
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{
           parts: [
@@ -59,7 +75,9 @@ JSON only, no explanation.`
             },
             {
               inlineData: {
-                mimeType: 'image/jpeg',
+                // 前端压缩产物默认是 WebP，必须按真实 MIME 声明，
+                // 否则上游按 jpeg 解码失败 → 静默返回空描述
+                mimeType: mimeType || 'image/jpeg',
                 data: imageBase64,
               }
             }
@@ -75,25 +93,32 @@ JSON only, no explanation.`
 
     if (!response.ok) {
       console.warn('[AI Lite] 产品分析失败:', response.status);
-      return { description: '', keywords: [], category: 'garment' };
+      return { ok: false, description: '', keywords: [], category: 'garment' };
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-      return { description: '', keywords: [], category: 'garment' };
+      return { ok: false, description: '', keywords: [], category: 'garment' };
     }
 
     const parsed = JSON.parse(text);
     return {
+      ok: true,
       description: parsed.description || '',
       keywords: parsed.keywords || [],
       category: parsed.category || 'garment',
     };
   } catch (error) {
-    console.warn('[AI Lite] 产品分析异常:', error);
-    return { description: '', keywords: [], category: 'garment' };
+    console.warn('[AI Lite] 产品分析异常:', sanitizeUpstreamError(error));
+    return { ok: false, description: '', keywords: [], category: 'garment' };
   }
+}
+
+/** 防止 API key 随错误信息（如 URL 解析失败的 TypeError）外泄到日志/客户端 */
+function sanitizeUpstreamError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  return LITE_CONFIG.apiKey ? msg.split(LITE_CONFIG.apiKey).join('***') : msg;
 }
 
 /**
@@ -169,6 +194,7 @@ JSON only, no explanation.`
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{ parts }],
         generationConfig: {
@@ -197,7 +223,7 @@ JSON only, no explanation.`
       suggestion: parsed.suggestion || '',
     };
   } catch (error) {
-    console.warn('[AI Lite] 质量评分异常:', error);
+    console.warn('[AI Lite] 质量评分异常:', sanitizeUpstreamError(error));
     return { score: 8, issues: [], suggestion: '' };
   }
 }

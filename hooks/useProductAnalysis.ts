@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 export interface ProductAnalysis {
   loading: boolean;
@@ -26,9 +26,13 @@ const INITIAL: ProductAnalysis = {
  */
 export function useProductAnalysis() {
   const [analysis, setAnalysis] = useState<ProductAnalysis>(INITIAL);
+  // 请求序号：快速"删图→换图"时旧请求的响应后到，会把新图的分析结果覆盖成旧图的。
+  // 每次 analyze/reset 自增序号，响应落地前校验是否仍是最新请求。
+  const requestSeqRef = useRef(0);
 
-  const analyze = useCallback(async (imageBase64: string) => {
-    if (!imageBase64 || analysis.loading) return;
+  const analyze = useCallback(async (imageBase64: string, mimeType?: string) => {
+    if (!imageBase64) return;
+    const seq = ++requestSeqRef.current;
 
     setAnalysis(prev => ({ ...prev, loading: true, error: undefined }));
 
@@ -36,8 +40,10 @@ export function useProductAnalysis() {
       const res = await fetch('/api/ai/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 }),
+        body: JSON.stringify({ imageBase64, mimeType }),
       });
+
+      if (seq !== requestSeqRef.current) return; // 已被更新的请求 / reset 取代
 
       if (!res.ok) {
         setAnalysis(prev => ({
@@ -50,6 +56,7 @@ export function useProductAnalysis() {
       }
 
       const data = await res.json();
+      if (seq !== requestSeqRef.current) return;
       setAnalysis({
         loading: false,
         done: true,
@@ -58,6 +65,7 @@ export function useProductAnalysis() {
         category: data.category || 'garment',
       });
     } catch {
+      if (seq !== requestSeqRef.current) return;
       setAnalysis(prev => ({
         ...prev,
         loading: false,
@@ -65,9 +73,10 @@ export function useProductAnalysis() {
         error: '分析失败，不影响生成',
       }));
     }
-  }, [analysis.loading]);
+  }, []);
 
   const reset = useCallback(() => {
+    requestSeqRef.current++; // 使在途请求的响应失效
     setAnalysis(INITIAL);
   }, []);
 

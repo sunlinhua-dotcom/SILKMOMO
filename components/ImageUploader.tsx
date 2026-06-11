@@ -46,13 +46,22 @@ export function ImageUploader({
   // 图库中有图片数量（用于显示按钮提示）— 客户端加载避免 hydration mismatch
   const [libraryCount, setLibraryCount] = useState(0);
   useEffect(() => {
-    setLibraryCount(getLibraryImages().length);
+    let cancelled = false;
+    getLibraryImages()
+      .then(imgs => { if (!cancelled) setLibraryCount(imgs.length); })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, [images]);
 
-  const handleFileSelect = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
+  const handleFileSelect = async (files: FileList | null, inputEl?: HTMLInputElement | null) => {
+    // 先把 FileList 复制成数组，再重置 input 的 value：
+    // - 不重置 value：删除图片后再选同一个文件，浏览器不触发 change，上传无反应
+    // - 先重置后读取：部分浏览器的 FileList 是活引用，重置会把它同步清空
+    const fileArray = files ? Array.from(files) : [];
+    if (inputEl) inputEl.value = '';
+    if (fileArray.length === 0) return;
 
-    const imageFiles = Array.from(files).filter(f =>
+    const imageFiles = fileArray.filter(f =>
       f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(f.name)
     );
 
@@ -69,8 +78,8 @@ export function ImageUploader({
       const newImages = [...images, ...compressed];
       onImagesChange(newImages);
 
-      // 自动保存到图库
-      addToLibrary(compressed, category);
+      // 自动保存到图库（异步，不阻塞上传流程）
+      addToLibrary(compressed, category).catch(() => {});
     } catch (error) {
       console.error('图片压缩失败:', error);
     } finally {
@@ -168,7 +177,7 @@ export function ImageUploader({
               className="hidden"
               accept="image/*"
               multiple
-              onChange={(e) => handleFileSelect(e.target.files)}
+              onChange={(e) => handleFileSelect(e.target.files, e.target)}
             />
             {isProcessing ? (
               <>
@@ -231,7 +240,7 @@ export function ImageUploader({
           accept="image/*"
           multiple
           {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
-          onChange={(e) => handleFileSelect(e.target.files)}
+          onChange={(e) => handleFileSelect(e.target.files, e.target)}
         />
 
         {/* 图片预览 */}
@@ -268,7 +277,7 @@ export function ImageUploader({
                   className="hidden"
                   accept="image/*"
                   multiple
-                  onChange={(e) => handleFileSelect(e.target.files)}
+                  onChange={(e) => handleFileSelect(e.target.files, e.target)}
                 />
                 <div className="text-center">
                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center mx-auto mb-1">

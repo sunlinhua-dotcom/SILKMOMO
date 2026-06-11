@@ -31,9 +31,14 @@ export const PRICING = {
 } as const;
 
 // ═══ 充值套餐 ═══
+// 一次"完整生成"按 5 张计；次数从当前单价推导，避免调价后文案虚标
+const FULL_GENERATION_FEN = PRICING.pricePerCallFen * 5;
+const packDescription = (amountFen: number) =>
+  `约 ${Math.floor(amountFen / FULL_GENERATION_FEN)} 次完整生成`;
+
 export const RECHARGE_PACKAGES = [
-  { id: 'pack_150', name: '起步包', amountFen: 15000, label: '¥150', bonus: 0, description: '约 50 次完整生成' },
-  { id: 'pack_300', name: '标准包', amountFen: 30000, label: '¥300', bonus: 0, description: '约 101 次完整生成' },
-  { id: 'pack_750', name: '专业包', amountFen: 75000, label: '¥750', bonus: 0, description: '约 254 次完整生成' },
-  { id: 'pack_1500', name: '企业包', amountFen: 150000, label: '¥1500', bonus: 0, description: '约 508 次完整生成' },
+  { id: 'pack_150', name: '起步包', amountFen: 15000, label: '¥150', bonus: 0, description: packDescription(15000) },
+  { id: 'pack_300', name: '标准包', amountFen: 30000, label: '¥300', bonus: 0, description: packDescription(30000) },
+  { id: 'pack_750', name: '专业包', amountFen: 75000, label: '¥750', bonus: 0, description: packDescription(75000) },
+  { id: 'pack_1500', name: '企业包', amountFen: 150000, label: '¥1500', bonus: 0, description: packDescription(150000) },
 ] as const;

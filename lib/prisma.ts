@@ -67,6 +67,12 @@ function createProxyClient(): PrismaClient {
   });
 }
 
+/** 当前运行时是否为 PostgreSQL（部分查询特性如 mode: 'insensitive' 仅 PG 支持） */
+export const isPostgres = (() => {
+  const url = getDatabaseUrl();
+  return !!url && !url.startsWith('file:');
+})();
+
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;

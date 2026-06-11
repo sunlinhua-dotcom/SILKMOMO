@@ -1,6 +1,6 @@
 'use client';
 
-import { SKIN_TONES, type SkinToneConfig } from '@/lib/models';
+import { SKIN_TONES } from '@/lib/models';
 
 interface SkinToneSelectorProps {
   selectedSkinTone: 'light' | 'medium' | 'deep';

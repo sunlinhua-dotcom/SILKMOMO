@@ -72,13 +72,21 @@ export function ResultGallery({
     setDownloadingAll(true);
     try {
       const zip = new JSZip();
+      // 同 shotIndex 的新旧版本会生成相同文件名，JSZip 同名后写覆盖先写 → 静默丢图。
+      // 重名时追加图片 id 保证唯一。
+      const usedNames = new Set<string>();
       images.forEach((img) => {
         const imageData = atob(img.data);
         const array = new Uint8Array(imageData.length);
         for (let i = 0; i < imageData.length; i++) {
           array[i] = imageData.charCodeAt(i);
         }
-        zip.file(`silkmomo-${img.imageType}-${img.index || 1}.png`, array);
+        let name = `silkmomo-${img.imageType}-${img.index || 1}.png`;
+        if (usedNames.has(name)) {
+          name = `silkmomo-${img.imageType}-${img.index || 1}-${img.id}.png`;
+        }
+        usedNames.add(name);
+        zip.file(name, array);
       });
 
       const blob = await zip.generateAsync({ type: 'blob' });

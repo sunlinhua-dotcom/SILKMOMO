@@ -28,15 +28,21 @@ export async function deductBalance(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      // 1. 查询当前余额（锁定行）
-      const user = await tx.user.findUnique({ where: { id: userId } });
-      if (!user) throw new Error('用户不存在');
-      if (user.balanceFen < cost) throw new Error('余额不足');
-
-      // 2. 扣费
-      const updated = await tx.user.update({
-        where: { id: userId },
+      // 1+2. 原子条件扣费：余额不足时 where 不命中任何行。
+      // 不能先 findUnique 再 update —— 普通 SELECT 不加行锁，
+      // 并发请求会同时通过余额检查导致双花 / 负余额。
+      const updated = await tx.user.updateMany({
+        where: { id: userId, balanceFen: { gte: cost } },
         data: { balanceFen: { decrement: cost } },
+      });
+      if (updated.count === 0) {
+        const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
+        if (!user) throw new Error('用户不存在');
+        throw new Error('余额不足');
+      }
+      const after = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { balanceFen: true },
       });
 
       // 3. 记录流水
@@ -45,14 +51,14 @@ export async function deductBalance(
           userId,
           type: 'consume',
           amountFen: -cost,
-          balanceAfter: updated.balanceFen,
+          balanceAfter: after.balanceFen,
           description,
           apiModel,
           projectId,
         },
       });
 
-      return { balanceAfter: updated.balanceFen };
+      return { balanceAfter: after.balanceFen };
     });
 
     return { success: true, balanceAfter: result.balanceAfter };
@@ -73,13 +79,19 @@ export async function deductCustom(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.findUnique({ where: { id: userId } });
-      if (!user) throw new Error('用户不存在');
-      if (user.balanceFen < amountFen) throw new Error('余额不足');
-
-      const updated = await tx.user.update({
-        where: { id: userId },
+      // 原子条件扣费，理由同 deductBalance
+      const updated = await tx.user.updateMany({
+        where: { id: userId, balanceFen: { gte: amountFen } },
         data: { balanceFen: { decrement: amountFen } },
+      });
+      if (updated.count === 0) {
+        const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
+        if (!user) throw new Error('用户不存在');
+        throw new Error('余额不足');
+      }
+      const after = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { balanceFen: true },
       });
 
       await tx.transaction.create({
@@ -87,13 +99,13 @@ export async function deductCustom(
           userId,
           type: 'consume',
           amountFen: -amountFen,
-          balanceAfter: updated.balanceFen,
+          balanceAfter: after.balanceFen,
           description,
           apiModel,
         },
       });
 
-      return { balanceAfter: updated.balanceFen };
+      return { balanceAfter: after.balanceFen };
     });
 
     return { success: true, balanceAfter: result.balanceAfter };
@@ -136,6 +148,14 @@ export async function refundBalance(
     return { success: true, balanceAfter: result.balanceAfter };
   } catch (error) {
     const msg = error instanceof Error ? error.message : '退款失败';
+    // 退款失败意味着用户的钱静默蒸发，必须留下可对账的痕迹
+    console.error('[billing] 退款失败（需人工对账）', {
+      userId,
+      amountFen,
+      description,
+      projectId,
+      error: msg,
+    });
     return { success: false, balanceAfter: 0, error: msg };
   }
 }
@@ -200,31 +220,61 @@ export async function getTransactions(
 
 // ═══ 统计（管理后台用）═══
 export async function getAdminStats() {
-  const [totalUsers, totalRecharge, totalConsume, todayConsume] = await Promise.all([
-    prisma.user.count(),
-    prisma.transaction.aggregate({
-      where: { type: 'recharge' },
-      _sum: { amountFen: true },
-    }),
-    prisma.transaction.aggregate({
-      where: { type: 'consume' },
-      _sum: { amountFen: true },
-    }),
-    prisma.transaction.aggregate({
-      where: {
-        type: 'consume',
-        createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-      },
-      _sum: { amountFen: true },
-      _count: true,
-    }),
-  ]);
+  // "今日"按中国时区（UTC+8）切，避免容器默认 UTC 导致日期偏移 8 小时
+  const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const todayStart = new Date(
+    Math.floor((Date.now() + SHANGHAI_OFFSET_MS) / DAY_MS) * DAY_MS - SHANGHAI_OFFSET_MS
+  );
+
+  const [totalUsers, totalRecharge, totalConsume, totalRefund, todayConsume, todayRefund] =
+    await Promise.all([
+      prisma.user.count(),
+      prisma.transaction.aggregate({
+        where: { type: 'recharge' },
+        _sum: { amountFen: true },
+      }),
+      prisma.transaction.aggregate({
+        where: { type: 'consume' },
+        _sum: { amountFen: true },
+      }),
+      prisma.transaction.aggregate({
+        where: { type: 'refund' },
+        _sum: { amountFen: true },
+      }),
+      prisma.transaction.aggregate({
+        where: {
+          type: 'consume',
+          createdAt: { gte: todayStart },
+        },
+        _sum: { amountFen: true },
+        _count: true,
+      }),
+      prisma.transaction.aggregate({
+        where: {
+          type: 'refund',
+          createdAt: { gte: todayStart },
+        },
+        _sum: { amountFen: true },
+        _count: true,
+      }),
+    ]);
+
+  // 消费需扣除退款，否则失败生成（扣费+退款两条流水）会让营收虚高
+  const totalConsumeFen = Math.max(
+    0,
+    Math.abs(totalConsume._sum.amountFen || 0) - (totalRefund._sum.amountFen || 0)
+  );
+  const todayConsumeFen = Math.max(
+    0,
+    Math.abs(todayConsume._sum.amountFen || 0) - (todayRefund._sum.amountFen || 0)
+  );
 
   return {
     totalUsers,
     totalRechargeFen: totalRecharge._sum.amountFen || 0,
-    totalConsumeFen: Math.abs(totalConsume._sum.amountFen || 0),
-    todayConsumeFen: Math.abs(todayConsume._sum.amountFen || 0),
-    todayConsumeCount: todayConsume._count || 0,
+    totalConsumeFen,
+    todayConsumeFen,
+    todayConsumeCount: Math.max(0, (todayConsume._count || 0) - (todayRefund._count || 0)),
   };
 }

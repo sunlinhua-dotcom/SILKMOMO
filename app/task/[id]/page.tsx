@@ -68,6 +68,11 @@ export default function TaskDetailPage() {
   // 防止双击 重做 同一张图：第一次点击在 setGenerating(true) 之前还有窗口期，
   // 用 ref 立刻置位，第二次点击直接 return（避免备份图被自己刚生成的"备份"匹配并物理删除）
   const regenLockRef = useRef(false);
+  // 主生成入口同样有窗口期：guard 检查后还有两次 IndexedDB await 才 setGenerating(true)，
+  // 双击"全部生成/先试1张/重试"会并行跑两条 SSE 流 → 双倍扣费。同步 ref 锁先行置位。
+  const startLockRef = useRef(false);
+  // "调整参数重新生成"（含 AI 聊天整任务重做）的同步锁
+  const regenParamsLockRef = useRef(false);
 
   // --- 调整参数面板 State ---
   const [showAdjustPanel, setShowAdjustPanel] = useState(false);
@@ -94,6 +99,20 @@ export default function TaskDetailPage() {
       const results = allImages.filter(img => img.type === 'result');
       const backups = allImages.filter(img => img.type === 'result_backup');
 
+      // 孤儿 processing 恢复：生成是客户端 SSE 驱动的，生成中刷新/关闭页面后
+      // 状态会永远停在 processing，而 processing 态没有任何操作按钮 → 任务死锁。
+      // 页面挂载时（本组件无 in-flight 请求）发现 processing 即视为被中断，按已有产出回退状态。
+      if (task.status === 'processing' && !abortControllerRef.current) {
+        const recoveredStatus: Project['status'] = results.length > 0 ? 'completed' : 'pending';
+        await db.projects.update(taskId, {
+          status: recoveredStatus,
+          lastError: results.length > 0 ? '上次生成被中断（页面刷新或关闭），已保留生成完成的图片' : undefined,
+          updatedAt: new Date(),
+        });
+        task.status = recoveredStatus;
+        task.lastError = results.length > 0 ? '上次生成被中断（页面刷新或关闭），已保留生成完成的图片' : undefined;
+      }
+
       // 关联备份：严格按 shotIndex 匹配（产品图）；shotIndex 都是 undefined 时按场景图唯一匹配
       const imagesWithBackups = results.map(img => {
         const backup = backups.find(b => backupMatchesImage(b, img.shotIndex));
@@ -117,8 +136,9 @@ export default function TaskDetailPage() {
       setNewBodyType(task.bodyType || DEFAULT_BODY_TYPE.id);
       setNewSkinTone(task.skinTone || DEFAULT_SKIN_TONE.id);
       setNewEngine(task.engine === 'openai' ? 'openai' : 'gemini');
-      // 失败任务：恢复持久化的错误信息（刷新页面后仍可看到原因）
-      if (task.status === 'failed' && task.lastError) {
+      // 恢复持久化的错误信息（刷新页面后仍可看到原因）：
+      // failed 的失败原因，以及 completed 但中途有镜次失败/余额不足的提示
+      if ((task.status === 'failed' || task.status === 'completed') && task.lastError) {
         setErrorMessage(task.lastError);
       }
     } catch (error) {
@@ -165,7 +185,9 @@ export default function TaskDetailPage() {
     const moduleType = project.moduleType || 'product';
     if (moduleType !== 'product') return handleStartGeneration();
     const selectedShotIndexes = parseSelectedShots(project.selectedShots);
-    await handleStartGeneration([selectedShotIndexes[0]]);
+    // 显式标记试生成：不能用 overrideShotIndexes.length === 1 推断，
+    // 否则单图重做成功也会误触发"试生成完成"横幅
+    await handleStartGeneration([selectedShotIndexes[0]], undefined, { isTrial: true });
   };
 
   const handleGenerateRemaining = async () => {
@@ -193,16 +215,26 @@ export default function TaskDetailPage() {
   // overrideShotIndexes: 不传 = 用 project 里的配置；传 = 只生成指定镜次
   // customPrompt: 用户对该次生成的额外要求（追加到 prompt）
   // ═══════════════════════════════════════════════════════════════
-  const handleStartGeneration = async (overrideShotIndexes?: number[], customPrompt?: string) => {
+  const handleStartGeneration = async (
+    overrideShotIndexes?: number[],
+    customPrompt?: string,
+    opts?: { isTrial?: boolean }
+  ) => {
     if (!project || inputImages.products.length === 0) return;
-    // 防重复点击：已经在生成中就直接忽略
-    if (generating || abortControllerRef.current) return;
+    // 防重复点击：generating 是异步 state，guard 后到 setGenerating(true) 之间
+    // 还有多个 await（IndexedDB 读取）——双击会双双放行并行扣费。
+    // startLockRef 同步置位封死这个窗口。
+    if (generating || abortControllerRef.current || startLockRef.current) return;
+    startLockRef.current = true;
 
     // —— 关键：从 DB 重新取 project + inputImages ——
     // handleRegenerateWithNewParams 会先写 DB 再调本函数，但 React state（project / inputImages）
     // 在同一同步任务里还没刷新 → 闭包仍是旧值。直接从 DB 读取保证拿到的是最新参数和最新输入图。
     const freshProject = await db.projects.get(taskId);
-    if (!freshProject) return;
+    if (!freshProject) {
+      startLockRef.current = false;
+      return;
+    }
     const allImgs = await db.images.where('projectId').equals(taskId).toArray();
     const freshInputs = {
       products: allImgs.filter(i => i.type === 'product'),
@@ -211,7 +243,10 @@ export default function TaskDetailPage() {
       sceneRefs: allImgs.filter(i => i.type === 'scene_ref'),
       accessories: allImgs.filter(i => i.type === 'accessory'),
     };
-    if (freshInputs.products.length === 0) return;
+    if (freshInputs.products.length === 0) {
+      startLockRef.current = false;
+      return;
+    }
 
     const moduleType = freshProject.moduleType || 'product';
     const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(freshProject.selectedShots);
@@ -255,20 +290,33 @@ export default function TaskDetailPage() {
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
     let lastFatalError: string | null = null;
+    let wasCancelled = false;
 
     try {
-      // —— 用户在 pending 状态用快选改了模特/引擎：持久化覆盖 ——
+      // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
       const effectiveModelId = newModelId || freshProject.modelId || '';
       const effectiveEngine: 'gemini' | 'openai' = newEngine;
+      const effectiveBodyType = newBodyType || freshProject.bodyType || DEFAULT_BODY_TYPE.id;
+      const effectiveSkinTone = newSkinTone || freshProject.skinTone || DEFAULT_SKIN_TONE.id;
       const modelChanged = effectiveModelId !== (freshProject.modelId || '');
       const engineChanged = effectiveEngine !== (freshProject.engine || 'gemini');
-      if (modelChanged || engineChanged) {
+      const bodyTypeChanged = effectiveBodyType !== (freshProject.bodyType || DEFAULT_BODY_TYPE.id);
+      const skinToneChanged = effectiveSkinTone !== (freshProject.skinTone || DEFAULT_SKIN_TONE.id);
+      if (modelChanged || engineChanged || bodyTypeChanged || skinToneChanged) {
         await db.projects.update(taskId, {
           modelId: effectiveModelId || undefined,
           engine: effectiveEngine,
+          bodyType: effectiveBodyType,
+          skinTone: effectiveSkinTone,
           updatedAt: new Date(),
         });
-        setProject(prev => prev ? { ...prev, modelId: effectiveModelId || undefined, engine: effectiveEngine } : null);
+        setProject(prev => prev ? {
+          ...prev,
+          modelId: effectiveModelId || undefined,
+          engine: effectiveEngine,
+          bodyType: effectiveBodyType,
+          skinTone: effectiveSkinTone,
+        } : null);
       }
 
       await db.projects.update(taskId, { status: 'processing', lastError: undefined });
@@ -289,19 +337,30 @@ export default function TaskDetailPage() {
           sceneRefImages: freshInputs.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           accessoryImages: freshInputs.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
           modelId: effectiveModelId || undefined,
-          bodyType: freshProject.bodyType || DEFAULT_BODY_TYPE.id,
-          skinTone: freshProject.skinTone || DEFAULT_SKIN_TONE.id,
+          bodyType: effectiveBodyType,
+          skinTone: effectiveSkinTone,
           engine: effectiveEngine,
           selectedShotIndexes,
           outputSize: freshProject.outputSize,
           sceneOutputSize: freshProject.sceneOutputSize,
+          // 自定义尺寸的实际宽高：服务端据此换算比例，否则 'custom' 永远按 3:4 生成
+          customWidth: freshProject.customWidth,
+          customHeight: freshProject.customHeight,
           sceneHasModel: freshProject.sceneHasModel !== false,
           customPrompt: effectiveCustomPrompt || undefined,
         }),
       });
 
+      if (response.status === 401) {
+        throw new Error('登录已过期，请重新登录后再试');
+      }
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+      // 兜底：若被中间层重定向到登录页（HTML 200），不能当成空 SSE 流静默吞掉
+      const sseContentType = response.headers.get('content-type') || '';
+      if (!sseContentType.includes('text/event-stream')) {
+        throw new Error('登录已过期或服务响应异常，请重新登录后再试');
       }
 
       // —— 读取 SSE 流 ——
@@ -422,10 +481,11 @@ export default function TaskDetailPage() {
               console.log(`[SSE] done 事件, successCount=${successCount}`);
               // 最终状态写入
               const finalStatus = successCount > 0 ? 'completed' : 'failed';
-              // 失败时把最后一条错误信息持久化到 DB，刷新页面也能看到
+              // 失败时持久化失败原因；部分成功（如中途余额不足）也要持久化提示，
+              // 否则任务显示"已完成"而余额不足的 fatal 信息在 UI 任何地方都看不到
               const persistedError = finalStatus === 'failed'
                 ? (lastFatalError || '生成失败（未捕获具体原因）')
-                : undefined;
+                : (lastFatalError ?? undefined);
               await db.projects.update(taskId, {
                 status: finalStatus,
                 lastError: persistedError,
@@ -434,8 +494,8 @@ export default function TaskDetailPage() {
               setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
               setGenerationPhase(successCount > 0 ? 'done' : 'error');
               setSecondsLeft(0);
-              // 如果是试生成（只生成 1 张），标记 trialDone
-              if (overrideShotIndexes?.length === 1 && successCount === 1) {
+              // 只有显式标记的试生成才触发"试生成完成"横幅（单图重做不算）
+              if (opts?.isTrial && successCount === 1) {
                 setTrialDone(true);
               }
             }
@@ -445,21 +505,24 @@ export default function TaskDetailPage() {
 
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
-      // 已成功生成的图保留：项目状态由实际产出决定
-      const finalStatus = successCount > 0 ? 'completed' : 'failed';
       if ((err as Error).name === 'AbortError') {
+        // 用户主动取消 ≠ 失败：不能把任务标成 failed + "生成失败（catch）"。
+        // 最终状态在 finally 的备份还原之后按实际产出决定（见 wasCancelled 分支）。
+        wasCancelled = true;
         setGenerationPhase('cancelled');
         setErrorMessage(successCount > 0 ? `已取消生成（保留已生成的 ${successCount} 张）` : '已取消生成');
       } else {
+        // 已成功生成的图保留：项目状态由实际产出决定
+        const finalStatus = successCount > 0 ? 'completed' : 'failed';
         const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
         console.error('[生图前端] 错误详情:', msg);
         setErrorMessage(msg);
         lastFatalError = msg;
         setGenerationPhase('error');
+        const persistedError = finalStatus === 'failed' ? (lastFatalError || '生成失败（catch）') : undefined;
+        await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
+        setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }
-      const persistedError = finalStatus === 'failed' ? (lastFatalError || '生成失败（catch）') : undefined;
-      await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
-      setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setSecondsLeft(0);
@@ -488,8 +551,24 @@ export default function TaskDetailPage() {
         console.error('[backup 还原] 失败:', e);
       }
 
+      // 用户取消：备份已还原完毕，按 DB 里的实际产出决定最终状态
+      // （单图重做被取消时任务原本就有图 → completed；全新任务取消 → 回到 pending 可重新开始）
+      if (wasCancelled) {
+        try {
+          const resultCount = await db.images
+            .where('projectId').equals(taskId)
+            .filter(i => i.type === 'result')
+            .count();
+          const cancelStatus: Project['status'] = resultCount > 0 ? 'completed' : 'pending';
+          await db.projects.update(taskId, { status: cancelStatus, lastError: undefined, updatedAt: new Date() });
+        } catch (e) {
+          console.error('[取消状态回写] 失败:', e);
+        }
+      }
+
       // 刷新最终图片列表
       await loadTaskData();
+      startLockRef.current = false;
     }
   };
 
@@ -499,8 +578,11 @@ export default function TaskDetailPage() {
   };
 
   // --- 调整参数并重新生成 ---
-  const handleRegenerateWithNewParams = async () => {
-    if (!project) return;
+  // customPromptOverride：AI 聊天触发整任务重做时附带的额外要求
+  const handleRegenerateWithNewParams = async (customPromptOverride?: string) => {
+    if (!project || generating || startLockRef.current || regenParamsLockRef.current) return;
+    // 同步锁：备份旧结果是多步异步操作，双触发会把备份图错乱地再次备份/删除
+    regenParamsLockRef.current = true;
 
     setShowAdjustPanel(false);
     setErrorMessage(null);
@@ -554,7 +636,7 @@ export default function TaskDetailPage() {
         setProject(task);
         await loadTaskData();
         // 用 await 而非 setTimeout（之前 100ms 是脆弱 race）
-        await handleStartGeneration();
+        await handleStartGeneration(undefined, customPromptOverride);
       }
 
     } catch (error) {
@@ -577,6 +659,7 @@ export default function TaskDetailPage() {
       await db.projects.update(taskId, { status: 'failed', updatedAt: new Date() });
       setProject(prev => prev ? { ...prev, status: 'failed' } : null);
     } finally {
+      regenParamsLockRef.current = false;
       setNewStyleImages([]);
     }
   };
@@ -624,13 +707,16 @@ export default function TaskDetailPage() {
 
   const handleAcceptNewVersion = async (imageId: number) => {
     try {
-      const img = images.find(i => i.id === imageId);
+      // 生成进行中新图只在 liveImages 里（images 还是旧列表），两个来源都要查，
+      // 否则实时画廊上的"保留新版"按钮点击静默无效
+      const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
       if (!img) return;
       const backups = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'result_backup').toArray();
       const backup = backups.find(b => backupMatchesImage(b, img.shotIndex));
       if (backup) {
         await db.images.delete(backup.id!);
       }
+      setLiveImages(prev => prev.map(i => i.id === imageId ? { ...i, backup: undefined } : i));
       await loadTaskData();
     } catch (e) {
       console.error('保留新版失败:', e);
@@ -639,7 +725,7 @@ export default function TaskDetailPage() {
 
   const handleRejectNewVersion = async (imageId: number) => {
     try {
-      const img = images.find(i => i.id === imageId);
+      const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
       if (!img) return;
       // 先定位备份；找到才删除新图 + 恢复备份，避免"删完新图找不到备份 → 两版都丢"
       const backups = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'result_backup').toArray();
@@ -650,6 +736,7 @@ export default function TaskDetailPage() {
       }
       await db.images.delete(imageId);
       await db.images.update(backup.id!, { type: 'result' });
+      setLiveImages(prev => prev.filter(i => i.id !== imageId));
       await loadTaskData();
     } catch (e) {
       console.error('还原旧版失败:', e);
@@ -676,7 +763,13 @@ export default function TaskDetailPage() {
     const sizes = moduleT === 'scene' ? SCENE_OUTPUT_SIZES : PRODUCT_OUTPUT_SIZES;
     const size = sizes.find(s => s.id === sizeId);
     if (!size) return null;
-    return size.id === 'custom' ? `自定义 (${size.aspectRatio})` : `${size.label} ${size.aspectRatio}`;
+    if (size.id === 'custom') {
+      // 显示用户实际输入的宽高（'custom' 条目里的 aspectRatio 只是 3:4 占位）
+      return project.customWidth && project.customHeight
+        ? `自定义 ${project.customWidth}×${project.customHeight}`
+        : '自定义尺寸';
+    }
+    return `${size.label} ${size.aspectRatio}`;
   })();
 
   // 生成按钮文案
@@ -805,11 +898,17 @@ export default function TaskDetailPage() {
           }
         }}
         onTriggerGenerate={() => {
-          if (!generating && project.status !== 'pending') {
-            // 直接触发整任务重做：附带从 chat 提取的 customPrompt
-            const customPrompt = pendingChatPromptRef.current;
-            pendingChatPromptRef.current = '';
+          if (generating) return;
+          const customPrompt = pendingChatPromptRef.current;
+          pendingChatPromptRef.current = '';
+          if (project.status === 'pending') {
+            // 待生成任务：直接开始（newBodyType/newSkinTone 等覆盖在 handleStartGeneration 里持久化）
             handleStartGeneration(undefined, customPrompt || undefined);
+          } else {
+            // 已有结果的任务：走调整参数路径 —— 会先把旧结果转成备份再重做，
+            // 否则新旧 result 在同 shotIndex 堆积、zip 下载同名互相覆盖；
+            // 同时该路径会持久化 chat 设置的 newBodyType/newSkinTone
+            handleRegenerateWithNewParams(customPrompt || undefined);
           }
         }}
       />
@@ -963,7 +1062,7 @@ export default function TaskDetailPage() {
             {/* 底部 */}
             <div className="p-5 border-t border-[var(--color-border-light)]">
               <button
-                onClick={handleRegenerateWithNewParams}
+                onClick={() => handleRegenerateWithNewParams()}
                 className="btn-primary w-full"
               >
                 <RefreshCcw className="w-5 h-5" />
@@ -1277,6 +1376,26 @@ export default function TaskDetailPage() {
         {/* 结果展示 */}
         {images.length > 0 && (
           <div>
+            {/* 部分成功提示：任务"已完成"但中途有镜次失败 / 余额不足。
+                不渲染的话余额不足等 fatal 信息在已完成任务上完全不可见 */}
+            {!generating && project.status === 'completed' && errorMessage && (
+              <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-sm text-amber-700 break-all">{errorMessage}</p>
+                    {moduleType === 'product' && images.length < getShotCount() && (
+                      <button
+                        onClick={handleGenerateRemaining}
+                        className="mt-2 text-xs font-medium text-amber-700 underline hover:text-amber-900"
+                      >
+                        补生成剩余 {getShotCount() - images.length} 张
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
             <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-3 flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
               生成结果 · {images.length} 张

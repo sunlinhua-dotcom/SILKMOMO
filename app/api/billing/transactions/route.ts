@@ -12,8 +12,9 @@ export async function GET(req: Request) {
   }
 
   const url = new URL(req.url);
-  const page = parseInt(url.searchParams.get('page') || '1');
-  const pageSize = parseInt(url.searchParams.get('pageSize') || '20');
+  // clamp：NaN / 0 / 负数会让 Prisma 抛 500，超大 pageSize 可拉全表
+  const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize')) || 20));
 
   const data = await getTransactions(auth.userId, page, pageSize);
   return NextResponse.json(data);

@@ -1,113 +1,130 @@
 /**
  * 图库 + 时光机：本地存储管理
- * 
- * 1. ImageLibrary — 保存用户上传过的图片缩略图（base64），供下次复用
- * 2. TimeMachine — 保存完整的生成参数快照，支持一键回放
+ *
+ * 1. ImageLibrary — 保存用户上传过的图片（IndexedDB），供下次复用。
+ *    历史版本存 localStorage：单条 dataUrl+base64 双份全图 ≈ 2MB 字符，
+ *    存 2-3 张即击穿 5MB 配额并静默丢图。现迁移至 Dexie，首次访问自动搬运旧数据。
+ * 2. TimeMachine — 保存完整的生成参数快照（仍在 localStorage，只存 64px 缩略图，体积小）
  */
 
 import type { CompressedImage } from './image-compressor';
+import { db, type LibraryImageRow } from './db';
 
 // ═══════════════════════════════════════
 // 图库（Image Library）
 // ═══════════════════════════════════════
 
-const IMAGE_LIBRARY_KEY = 'silkmomo_image_library';
+const LEGACY_IMAGE_LIBRARY_KEY = 'silkmomo_image_library';
 const MAX_LIBRARY_IMAGES = 20;
 
-export interface LibraryImage {
-  id: string;
-  dataUrl: string;       // 缩略图 dataUrl
-  base64: string;
-  mimeType: string;
-  size: number;
-  width: number;
-  height: number;
-  originalSize: number;
-  addedAt: number;       // 时间戳
-  label?: string;        // 可选标签（如"白色T恤"）
-  category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory';
+export type LibraryImage = LibraryImageRow;
+
+// 一次性迁移 localStorage 旧图库 → IndexedDB（互斥，避免并发双跑）
+let libraryMigrationPromise: Promise<void> | null = null;
+let libraryMigrationDone = false;
+
+function migrateLegacyLibrary(): Promise<void> {
+  if (libraryMigrationDone || typeof window === 'undefined') return Promise.resolve();
+  if (!libraryMigrationPromise) {
+    libraryMigrationPromise = (async () => {
+      try {
+        const raw = window.localStorage.getItem(LEGACY_IMAGE_LIBRARY_KEY);
+        if (raw) {
+          try {
+            const legacy = JSON.parse(raw) as LibraryImage[];
+            if (Array.isArray(legacy) && legacy.length > 0) {
+              await db.libraryImages.bulkPut(legacy.filter(i => i && i.id && i.base64));
+            }
+          } catch {
+            // 旧数据损坏，直接丢弃
+          }
+          window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
+        }
+        libraryMigrationDone = true;
+      } finally {
+        libraryMigrationPromise = null;
+      }
+    })();
+  }
+  return libraryMigrationPromise;
 }
 
-/** 获取图库所有图片 */
-export function getLibraryImages(): LibraryImage[] {
+/** 获取图库所有图片（按添加时间倒序） */
+export async function getLibraryImages(): Promise<LibraryImage[]> {
   try {
-    const raw = localStorage.getItem(IMAGE_LIBRARY_KEY);
-    if (!raw) return [];
-    const images = JSON.parse(raw) as LibraryImage[];
-    // 按添加时间倒序
-    return images.sort((a, b) => b.addedAt - a.addedAt);
+    await migrateLegacyLibrary();
+    return await db.libraryImages.orderBy('addedAt').reverse().toArray();
   } catch {
     return [];
   }
 }
 
 /** 将压缩后的图片添加到图库 */
-export function addToLibrary(
+export async function addToLibrary(
   images: CompressedImage[],
   category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory'
-): LibraryImage[] {
-  const existing = getLibraryImages();
-  
-  const newEntries: LibraryImage[] = images.map(img => ({
-    id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    dataUrl: img.dataUrl,
-    base64: img.base64,
-    mimeType: img.mimeType,
-    size: img.size,
-    width: img.width,
-    height: img.height,
-    originalSize: img.originalSize ?? img.size,
-    addedAt: Date.now(),
-    category,
-  }));
-
-  // 去重（按 base64 前 100 字符判断）
-  const existingFingerprints = new Set(existing.map(e => e.base64.slice(0, 100)));
-  const uniqueNew = newEntries.filter(n => !existingFingerprints.has(n.base64.slice(0, 100)));
-
-  // 合并并截断
-  const merged = [...uniqueNew, ...existing].slice(0, MAX_LIBRARY_IMAGES);
-
+): Promise<LibraryImage[]> {
   try {
-    localStorage.setItem(IMAGE_LIBRARY_KEY, JSON.stringify(merged));
-  } catch (e) {
-    // localStorage 满了，尝试缩减
-    console.warn('图库存储空间不足，清理旧图片', e);
-    const reduced = merged.slice(0, 10);
-    try {
-      localStorage.setItem(IMAGE_LIBRARY_KEY, JSON.stringify(reduced));
-    } catch {
-      // 仍然失败 — 彻底无法存储
-    }
-    // 返回带 warning 标记的结果
-    (reduced as LibraryImage[] & { _storageWarning?: boolean })._storageWarning = true;
-    return reduced;
-  }
+    await migrateLegacyLibrary();
+    const existing = await db.libraryImages.toArray();
 
-  return merged;
+    const newEntries: LibraryImage[] = images.map(img => ({
+      id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      dataUrl: img.dataUrl,
+      base64: img.base64,
+      mimeType: img.mimeType,
+      size: img.size,
+      width: img.width,
+      height: img.height,
+      originalSize: img.originalSize ?? img.size,
+      addedAt: Date.now(),
+      category,
+    }));
+
+    // 去重（按 base64 前 100 字符判断）
+    const existingFingerprints = new Set(existing.map(e => e.base64.slice(0, 100)));
+    const uniqueNew = newEntries.filter(n => !existingFingerprints.has(n.base64.slice(0, 100)));
+
+    if (uniqueNew.length > 0) {
+      await db.libraryImages.bulkAdd(uniqueNew);
+    }
+
+    // 超出上限时删除最旧的
+    const total = await db.libraryImages.count();
+    if (total > MAX_LIBRARY_IMAGES) {
+      const overflow = await db.libraryImages
+        .orderBy('addedAt')
+        .limit(total - MAX_LIBRARY_IMAGES)
+        .toArray();
+      await db.libraryImages.bulkDelete(overflow.map(o => o.id));
+    }
+
+    return await db.libraryImages.orderBy('addedAt').reverse().toArray();
+  } catch (e) {
+    console.warn('图库写入失败:', e);
+    return [];
+  }
 }
 
 /** 从图库删除指定图片 */
-export function removeFromLibrary(imageId: string): LibraryImage[] {
-  const images = getLibraryImages().filter(img => img.id !== imageId);
-  localStorage.setItem(IMAGE_LIBRARY_KEY, JSON.stringify(images));
-  return images;
+export async function removeFromLibrary(imageId: string): Promise<LibraryImage[]> {
+  try {
+    await db.libraryImages.delete(imageId);
+    return await db.libraryImages.orderBy('addedAt').reverse().toArray();
+  } catch {
+    return [];
+  }
 }
 
 /** 清空图库 */
-export function clearLibrary(): void {
-  localStorage.removeItem(IMAGE_LIBRARY_KEY);
-}
-
-/** 检查 localStorage 剩余空间是否不足（粗略估算） */
-export function isStorageNearFull(): boolean {
+export async function clearLibrary(): Promise<void> {
   try {
-    const libSize = (localStorage.getItem(IMAGE_LIBRARY_KEY) || '').length;
-    const snapSize = (localStorage.getItem(TIME_MACHINE_KEY) || '').length;
-    // 超过 4MB 视为接近满载（localStorage 上限通常 5MB）
-    return (libSize + snapSize) > 4 * 1024 * 1024;
+    await db.libraryImages.clear();
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
+    }
   } catch {
-    return true;
+    // ignore
   }
 }
 
@@ -136,21 +153,28 @@ export interface FlowSnapshot {
   id: string;
   createdAt: number;
   label: string;               // 自动生成的描述（如 "产品图 · 纤细 · 3张"）
-  
+
   // 核心参数
   module: 'product' | 'scene';
   bodyType: string;
   skinTone: string;
   modelId?: string;
 
+  // 引擎 / SKU / 尺寸 / 场景模式 —— 不存这些字段的话
+  // "用相同参数重新生成"会沿用页面当前残留值，与快照承诺不符
+  engine?: 'gemini' | 'openai';
+  skuType?: 'outfit' | 'top' | 'bottom';
+  sceneHasModel?: boolean;
+  outputSize?: string;          // product/scene 模块各自的尺寸 id
+
   // 产品图相关
   selectedShots?: number[];     // 镜次索引
   customPrompt?: string;
-  
+
   // 图片引用（存缩略图而非完整图）
   productImageThumbs: string[]; // 小尺寸缩略图 dataUrl
   sceneRefThumbs?: string[];
-  
+
   // 结果
   taskId?: string;              // 关联的任务 ID
 }
@@ -169,7 +193,7 @@ export function getSnapshots(): FlowSnapshot[] {
 /** 保存一个快照 */
 export function saveSnapshot(snapshot: Omit<FlowSnapshot, 'id' | 'createdAt'>): FlowSnapshot {
   const existing = getSnapshots();
-  
+
   const full: FlowSnapshot = {
     ...snapshot,
     id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -183,7 +207,11 @@ export function saveSnapshot(snapshot: Omit<FlowSnapshot, 'id' | 'createdAt'>): 
   } catch (e) {
     console.warn('时光机存储空间不足', e);
     const reduced = merged.slice(0, 5);
-    localStorage.setItem(TIME_MACHINE_KEY, JSON.stringify(reduced));
+    try {
+      localStorage.setItem(TIME_MACHINE_KEY, JSON.stringify(reduced));
+    } catch {
+      // 仍然失败 — 放弃本次快照
+    }
   }
 
   return full;
@@ -192,7 +220,11 @@ export function saveSnapshot(snapshot: Omit<FlowSnapshot, 'id' | 'createdAt'>): 
 /** 删除快照 */
 export function removeSnapshot(snapshotId: string): FlowSnapshot[] {
   const snapshots = getSnapshots().filter(s => s.id !== snapshotId);
-  localStorage.setItem(TIME_MACHINE_KEY, JSON.stringify(snapshots));
+  try {
+    localStorage.setItem(TIME_MACHINE_KEY, JSON.stringify(snapshots));
+  } catch {
+    // ignore
+  }
   return snapshots;
 }
 
@@ -208,12 +240,12 @@ export function generateThumb(dataUrl: string, size = 64): Promise<string> {
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext('2d')!;
-      
+
       // 居中裁切
       const minSide = Math.min(img.width, img.height);
       const sx = (img.width - minSide) / 2;
       const sy = (img.height - minSide) / 2;
-      
+
       ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
       resolve(canvas.toDataURL('image/webp', 0.5));
     };

@@ -20,14 +20,17 @@ export function TaskList({ limit = 5 }: TaskListProps) {
   const [statusFilter, setStatusFilter] = useState<'all' | Project['status']>('all');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
+  // 分页显示条数：limit 作为每页大小。不能在查询层截断 —— 否则第 limit+1 条
+  // 之前的任务在 UI 上永久不可达（搜索/筛选也只作用于截断后的子集）
+  const [displayCount, setDisplayCount] = useState(limit);
   const router = useRouter();
 
   const loadTasks = useCallback(async () => {
     try {
+      // Project 行不含图片数据，体量很小，全量加载供搜索/筛选
       const projects = await db.projects
         .orderBy('createdAt')
         .reverse()
-        .limit(limit)
         .toArray();
 
       const tasksWithImages = await Promise.all(
@@ -47,7 +50,7 @@ export function TaskList({ limit = 5 }: TaskListProps) {
     } finally {
       setLoading(false);
     }
-  }, [limit]);
+  }, []);
 
   useEffect(() => {
     loadTasks();
@@ -104,6 +107,12 @@ export function TaskList({ limit = 5 }: TaskListProps) {
       return true;
     });
   }, [tasks, search, statusFilter]);
+
+  const visibleTasks = useMemo(
+    () => filteredTasks.slice(0, displayCount),
+    [filteredTasks, displayCount]
+  );
+  const hasMore = filteredTasks.length > displayCount;
 
 
 
@@ -173,8 +182,8 @@ export function TaskList({ limit = 5 }: TaskListProps) {
             className="w-full pl-9 pr-3 py-2 text-sm rounded-xl bg-[var(--color-background)] border border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:outline-none focus:ring-0 transition-colors placeholder:text-[var(--color-text-muted)]"
           />
         </div>
-        <div className="flex gap-1 bg-[var(--color-background)] rounded-xl p-1 border border-[var(--color-border-light)]">
-          {(['all', 'completed', 'processing', 'failed'] as const).map(s => (
+        <div className="flex gap-1 bg-[var(--color-background)] rounded-xl p-1 border border-[var(--color-border-light)] overflow-x-auto">
+          {(['all', 'pending', 'completed', 'processing', 'failed'] as const).map(s => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
@@ -184,7 +193,7 @@ export function TaskList({ limit = 5 }: TaskListProps) {
                   : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]'
               }`}
             >
-              {s === 'all' ? '全部' : s === 'completed' ? '已完成' : s === 'processing' ? '生成中' : '失败'}
+              {s === 'all' ? '全部' : s === 'pending' ? '待生成' : s === 'completed' ? '已完成' : s === 'processing' ? '生成中' : '失败'}
             </button>
           ))}
         </div>
@@ -196,7 +205,7 @@ export function TaskList({ limit = 5 }: TaskListProps) {
         </div>
       ) : (
         <div className="space-y-2">
-          {filteredTasks.map((task) => (
+          {visibleTasks.map((task) => (
             <div
               key={task.id}
               onClick={() => editingId !== task.id && router.push(`/task/${task.id}`)}
@@ -278,6 +287,16 @@ export function TaskList({ limit = 5 }: TaskListProps) {
               </div>
             </div>
           ))}
+
+          {/* 加载更多 */}
+          {hasMore && (
+            <button
+              onClick={() => setDisplayCount(c => c + limit)}
+              className="w-full py-3 text-xs font-medium text-[var(--color-text-secondary)] bg-[var(--color-background)] rounded-2xl border border-[var(--color-border-light)] hover:border-[var(--color-accent)] hover:text-[var(--color-primary)] transition-all"
+            >
+              加载更多（还有 {filteredTasks.length - displayCount} 个任务）
+            </button>
+          )}
         </div>
       )}
     </div>

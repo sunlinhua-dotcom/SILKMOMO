@@ -51,17 +51,26 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: '该用户名已注册' }, { status: 409 });
     }
 
-    // 创建用户
+    // 创建用户。并发同名注册时 findUnique 检查会双双通过，
+    // 落败方撞 @unique 约束（P2002），应返回 409 而不是 500
     const passwordHash = await hashPassword(password);
-    const user = await prisma.user.create({
-      data: {
-        username,
-        passwordHash,
-        name: name || `用户${username.slice(0, 4)}`,
-        role: 'user',
-        balanceFen: 0,
-      },
-    });
+    let user;
+    try {
+      user = await prisma.user.create({
+        data: {
+          username,
+          passwordHash,
+          name: name || `用户${username.slice(0, 4)}`,
+          role: 'user',
+          balanceFen: 0,
+        },
+      });
+    } catch (e) {
+      if (e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === 'P2002') {
+        return NextResponse.json({ error: '该用户名已注册' }, { status: 409 });
+      }
+      throw e;
+    }
 
     // 签发 JWT + 设置 Cookie
     const token = await signToken({

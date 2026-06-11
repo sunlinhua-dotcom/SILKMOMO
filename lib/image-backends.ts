@@ -56,6 +56,12 @@ const OPENAI_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2-all';
 
 const MAX_RETRIES = 1;
 
+// 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
+// TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）
+function sanitizeError(msg: string): string {
+  return API_KEY ? msg.split(API_KEY).join('***') : msg;
+}
+
 // ═══════════════════════════════════════════════
 // 顶层入口：优先用调用方指定的 backend，否则退回 env / 默认
 // ═══════════════════════════════════════════════
@@ -103,7 +109,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
       console.log(`[gemini] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithGemini(input, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? '（超时 120s）' : ''}: ${msg}`, backend: 'gemini' };
+    return { success: false, error: `网络连接失败${isTimeout ? '（超时 120s）' : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
   }
 
   if (!response.ok) {
@@ -250,7 +256,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
       console.log(`[openai] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithOpenAI(input, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? '（超时 180s）' : ''}: ${msg}`, backend: 'openai' };
+    return { success: false, error: `网络连接失败${isTimeout ? '（超时 180s）' : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
   }
 
   if (!response.ok) {
@@ -278,12 +284,24 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
   const imgUrl = items?.[0]?.url;
   if (imgUrl) {
     try {
-      const imgRes = await fetch(imgUrl);
+      const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) });
+      // 临时 URL 过期/403 时返回的是 HTML 错误页，不校验会把坏数据
+      // 当成功图片交付（已扣费、不退款、还可能污染 anchor 参考图）
+      if (!imgRes.ok) {
+        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, backend: 'openai' };
+      }
+      const contentType = imgRes.headers.get('content-type') || '';
+      if (contentType && !contentType.startsWith('image/')) {
+        return { success: false, error: `图片 URL 返回了非图片内容 (${contentType.slice(0, 50)})`, backend: 'openai' };
+      }
       const buf = await imgRes.arrayBuffer();
+      if (buf.byteLength === 0) {
+        return { success: false, error: '图片 URL 返回空内容', backend: 'openai' };
+      }
       const b64Fallback = Buffer.from(buf).toString('base64');
       return { success: true, data: b64Fallback, backend: 'openai' };
     } catch (err) {
-      return { success: false, error: `获取图片 URL 失败: ${err instanceof Error ? err.message : ''}`, backend: 'openai' };
+      return { success: false, error: `获取图片 URL 失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
     }
   }
 
