@@ -83,9 +83,30 @@ export default function BrandSettingsPage() {
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
     if (!confirm('确定重置为默认值？这会清空当前的品牌偏好（之后生成时会重新自动学习）。')) return;
+    // 文案承诺"清空品牌偏好"，所以重置必须立即保存到服务端，
+    // 只重置本地表单的话用户离开页面后服务端偏好原封不动
     setForm(INITIAL_FORM);
+    setSaving(true);
+    try {
+      const res = await fetch('/api/brand', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(INITIAL_FORM),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`重置失败: ${err.error || res.statusText}`);
+        return;
+      }
+      setSavedHint(true);
+      setTimeout(() => setSavedHint(false), 2000);
+    } catch (e) {
+      alert(`重置失败: ${e instanceof Error ? e.message : '网络错误'}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading) {

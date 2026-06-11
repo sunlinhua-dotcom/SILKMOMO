@@ -34,9 +34,17 @@ export async function proxy(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // API 路由的认证失败必须返回 401 JSON，不能重定向：
+  // fetch 会静默跟随 307 到 /login 拿回 HTML 200，
+  // SSE 客户端把它当成"空流"（无 done 事件），任务永远卡在 processing
+  const isApiPath = pathname.startsWith('/api/');
+
   // 检查 JWT
   const token = req.cookies.get(TOKEN_NAME)?.value;
   if (!token) {
+    if (isApiPath) {
+      return NextResponse.json({ error: '未登录' }, { status: 401 });
+    }
     return NextResponse.redirect(new URL('/login', req.url));
   }
 
@@ -47,18 +55,32 @@ export async function proxy(req: NextRequest) {
     // 管理员页面权限检查
     if (pathname.startsWith('/admin') || pathname.startsWith('/api/admin')) {
       if (role !== 'admin') {
+        if (isApiPath) {
+          return NextResponse.json({ error: '无权访问' }, { status: 403 });
+        }
         return NextResponse.redirect(new URL('/', req.url));
       }
     }
 
-    // 将用户信息注入 header（Server Components 可读取）
-    const response = NextResponse.next();
-    response.headers.set('x-user-id', payload.userId as string);
-    response.headers.set('x-user-role', role);
-    response.headers.set('x-user-username', payload.username as string);
-    return response;
+    // 将用户信息注入「请求」header（Server Components / Route Handler 可读取）。
+    // 注意：不能写到 NextResponse.next() 的响应头上 —— 那只会把
+    // userId/role 泄露给浏览器，下游 handler 根本读不到。
+    // 同时先删除入站同名头，防止客户端伪造。
+    const requestHeaders = new Headers(req.headers);
+    requestHeaders.delete('x-user-id');
+    requestHeaders.delete('x-user-role');
+    requestHeaders.delete('x-user-username');
+    requestHeaders.set('x-user-id', payload.userId as string);
+    requestHeaders.set('x-user-role', role);
+    requestHeaders.set('x-user-username', encodeURIComponent(payload.username as string));
+    return NextResponse.next({ request: { headers: requestHeaders } });
   } catch {
-    // token 无效 -> 跳转登录
+    // token 无效/过期：API 返回 401 JSON，页面跳转登录
+    if (isApiPath) {
+      const response = NextResponse.json({ error: '登录已过期，请重新登录' }, { status: 401 });
+      response.cookies.delete(TOKEN_NAME);
+      return response;
+    }
     const response = NextResponse.redirect(new URL('/login', req.url));
     response.cookies.delete(TOKEN_NAME);
     return response;

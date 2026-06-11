@@ -26,10 +26,11 @@ function withWorkspaceTimeout<T>(operation: Promise<T>, label: string): Promise<
 async function clearIndexedDb() {
   const { db } = await import('@/lib/db');
   await db.open();
-  await db.transaction('rw', db.projects, db.images, db.stylePacks, async () => {
+  await db.transaction('rw', db.projects, db.images, db.stylePacks, db.libraryImages, async () => {
     await db.images.clear();
     await db.projects.clear();
     await db.stylePacks.clear();
+    await db.libraryImages.clear();
   });
 }
 
@@ -40,16 +41,28 @@ function clearLocalStorageWorkspace() {
 }
 
 async function hasLocalWorkspaceData() {
+  // localStorage 里的图库/时光机残留也算工作区数据：
+  // 旧版本只上传过图库没建过任务的账号，IndexedDB 是空的
+  try {
+    for (const key of LOCAL_WORKSPACE_KEYS) {
+      const v = window.localStorage.getItem(key);
+      if (v && v !== '[]') return true;
+    }
+  } catch {}
+
   try {
     const { db } = await import('@/lib/db');
-    const [projectCount, imageCount, stylePackCount] = await Promise.all([
+    const [projectCount, imageCount, stylePackCount, libraryCount] = await Promise.all([
       db.projects.count(),
       db.images.count(),
       db.stylePacks.count(),
+      db.libraryImages.count(),
     ]);
-    return projectCount + imageCount + stylePackCount > 0;
+    return projectCount + imageCount + stylePackCount + libraryCount > 0;
   } catch {
-    return false;
+    // fail-closed：检查不了就当"有数据"，触发上层 strict 清理，
+    // 否则 Dexie 异常时新账号会直接继承上一个账号的本地数据
+    return true;
   }
 }
 

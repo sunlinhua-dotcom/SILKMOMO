@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { rechargeBalance } from '@/lib/billing';
-import prisma from '@/lib/prisma';
+import prisma, { isPostgres } from '@/lib/prisma';
 
 // GET: 用户列表
 export async function GET(req: Request) {
@@ -15,13 +15,15 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const search = url.searchParams.get('search') || '';
-  const page = parseInt(url.searchParams.get('page') || '1');
+  const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
   const pageSize = 20;
 
+  // PG 的 contains 默认大小写敏感，会漏搜；SQLite 不支持 mode 参数
+  const insensitive = isPostgres ? ({ mode: 'insensitive' } as const) : {};
   const where = search
     ? { OR: [
-        { username: { contains: search } },
-        { name: { contains: search } },
+        { username: { contains: search, ...insensitive } },
+        { name: { contains: search, ...insensitive } },
       ]}
     : {};
 

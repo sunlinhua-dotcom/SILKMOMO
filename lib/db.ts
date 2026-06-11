@@ -79,12 +79,30 @@ export interface StylePack {
   // 风格包实际图片存在 ImageItem 中，通过 projectId 关联
 }
 
+// 图库条目（lib/image-library.ts 使用；放这里避免循环依赖）
+// 之前存 localStorage：单条 dataUrl+base64 双份全图 ≈ 2MB 字符，
+// 存 2-3 张就击穿 5MB 配额并静默丢图，因此迁移到 IndexedDB
+export interface LibraryImageRow {
+  id: string;
+  dataUrl: string;
+  base64: string;
+  mimeType: string;
+  size: number;
+  width: number;
+  height: number;
+  originalSize: number;
+  addedAt: number;
+  label?: string;
+  category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory';
+}
+
 // ===== Dexie 数据库类 =====
 
 export class SilkMomoDB extends Dexie {
   projects!: Table<Project>;
   images!: Table<ImageItem>;
   stylePacks!: Table<StylePack>;
+  libraryImages!: Table<LibraryImageRow>;
 
   constructor() {
     super('SilkMomoDB');
@@ -108,6 +126,14 @@ export class SilkMomoDB extends Dexie {
       images: '++id, projectId, stylePackId, type, imageType, index, shotIndex',
       stylePacks: '++id, createdAt'
     });
+
+    // version 4: 图库从 localStorage 迁入 IndexedDB（配额问题）
+    this.version(4).stores({
+      projects: '++id, createdAt, status, moduleType, skuType',
+      images: '++id, projectId, stylePackId, type, imageType, index, shotIndex',
+      stylePacks: '++id, createdAt',
+      libraryImages: 'id, addedAt'
+    });
   }
 }
 
@@ -115,42 +141,62 @@ export const db = new SilkMomoDB();
 
 export const STYLE_PACK_IMAGE_PROJECT_ID = 0;
 
-export async function migrateLegacyStylePackImages() {
-  const packs = await db.stylePacks.toArray();
+// 迁移互斥：getStylePackImages 会被多个组件 / 生成入口并发调用，
+// 双跑 "modernCount===0 → bulkAdd" 会把风格包图片复制成双份。
+// 成功跑完一次后置 done 标记，同时避免每次全量重扫（O(N²) IndexedDB 查询）。
+let stylePackMigrationPromise: Promise<void> | null = null;
+let stylePackMigrationDone = false;
 
-  for (const pack of packs) {
-    if (!pack.id) continue;
-
-    const legacyImages = await db.images
-      .where('projectId')
-      .equals(pack.id)
-      .filter(img => img.type === 'scene_ref' && !img.stylePackId)
-      .toArray();
-
-    if (legacyImages.length === 0) continue;
-
-    // 如果同 ID 的任务已经存在，legacy 图片归属无法可靠判断，避免迁移误伤任务数据。
-    const collidingProject = await db.projects.get(pack.id);
-    if (collidingProject) continue;
-
-    const modernCount = await db.images.where('stylePackId').equals(pack.id).count();
-    if (modernCount === 0) {
-      await db.images.bulkAdd(
-        legacyImages.map(img => ({
-          projectId: STYLE_PACK_IMAGE_PROJECT_ID,
-          stylePackId: pack.id,
-          type: img.type,
-          data: img.data,
-          mimeType: img.mimeType,
-        }))
-      );
-    }
-
-    const legacyIds = legacyImages.map(img => img.id!).filter(Boolean);
-    if (legacyIds.length > 0) {
-      await db.images.bulkDelete(legacyIds);
-    }
+export function migrateLegacyStylePackImages(): Promise<void> {
+  if (stylePackMigrationDone) return Promise.resolve();
+  if (!stylePackMigrationPromise) {
+    stylePackMigrationPromise = doMigrateLegacyStylePackImages()
+      .then(() => { stylePackMigrationDone = true; })
+      .finally(() => { stylePackMigrationPromise = null; });
   }
+  return stylePackMigrationPromise;
+}
+
+async function doMigrateLegacyStylePackImages() {
+  // 整个迁移放进一个事务：add 与 delete 要么都生效要么都回滚，
+  // 中途断电/关页不会留下"已复制未删除"的双份状态
+  await db.transaction('rw', db.stylePacks, db.images, db.projects, async () => {
+    const packs = await db.stylePacks.toArray();
+
+    for (const pack of packs) {
+      if (!pack.id) continue;
+
+      const legacyImages = await db.images
+        .where('projectId')
+        .equals(pack.id)
+        .filter(img => img.type === 'scene_ref' && !img.stylePackId)
+        .toArray();
+
+      if (legacyImages.length === 0) continue;
+
+      // 如果同 ID 的任务已经存在，legacy 图片归属无法可靠判断，避免迁移误伤任务数据。
+      const collidingProject = await db.projects.get(pack.id);
+      if (collidingProject) continue;
+
+      const modernCount = await db.images.where('stylePackId').equals(pack.id).count();
+      if (modernCount === 0) {
+        await db.images.bulkAdd(
+          legacyImages.map(img => ({
+            projectId: STYLE_PACK_IMAGE_PROJECT_ID,
+            stylePackId: pack.id,
+            type: img.type,
+            data: img.data,
+            mimeType: img.mimeType,
+          }))
+        );
+      }
+
+      const legacyIds = legacyImages.map(img => img.id!).filter(Boolean);
+      if (legacyIds.length > 0) {
+        await db.images.bulkDelete(legacyIds);
+      }
+    }
+  });
 }
 
 export async function getStylePackImages(packId: number): Promise<ImageItem[]> {

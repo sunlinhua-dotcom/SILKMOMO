@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -75,6 +75,9 @@ export default function HomePage() {
   const [currentUser, setCurrentUser] = useState<{ balanceFen: number } | null>(null);
   const [showRechargeModal, setShowRechargeModal] = useState(false);
 
+  // 风格包应用到的槽位（product → bgRefImages / scene → sceneRefImages），取消选中时按此清理
+  const stylePackTargetRef = useRef<'product' | 'scene' | null>(null);
+
   useEffect(() => {
     fetch('/api/auth/me')
       .then(r => r.json())
@@ -83,31 +86,68 @@ export default function HomePage() {
   }, [isGenerating]);
 
   // ── 品牌记忆自动回填 ──
+  // 只回填一次，且跳过用户已手动改过的字段：
+  // /api/brand 返回较慢时，无条件回填会把用户在加载完成前的手动选择静默改掉
+  const touchedRef = useRef<{ bodyType?: boolean; skinTone?: boolean; module?: boolean; modelId?: boolean; engine?: boolean }>({});
+  const brandAppliedRef = useRef(false);
   useEffect(() => {
-    if (brandPrefs.loaded && brandPrefs.hasProfile) {
-      setSelectedBodyType(brandPrefs.defaultBodyType);
-      setSelectedSkinTone(brandPrefs.defaultSkinTone);
-      setActiveModule(brandPrefs.defaultModule);
-      if (brandPrefs.defaultModelId) setSelectedModelId(brandPrefs.defaultModelId);
-      setSelectedEngine(brandPrefs.defaultEngine);
-    }
+    if (!brandPrefs.loaded || !brandPrefs.hasProfile || brandAppliedRef.current) return;
+    brandAppliedRef.current = true;
+    const touched = touchedRef.current;
+    if (!touched.bodyType) setSelectedBodyType(brandPrefs.defaultBodyType);
+    if (!touched.skinTone) setSelectedSkinTone(brandPrefs.defaultSkinTone);
+    if (!touched.module) setActiveModule(brandPrefs.defaultModule);
+    if (!touched.modelId && brandPrefs.defaultModelId) setSelectedModelId(brandPrefs.defaultModelId);
+    if (!touched.engine) setSelectedEngine(brandPrefs.defaultEngine);
   }, [brandPrefs.loaded, brandPrefs.hasProfile, brandPrefs.defaultBodyType, brandPrefs.defaultSkinTone, brandPrefs.defaultModule, brandPrefs.defaultModelId, brandPrefs.defaultEngine]);
 
+  // 用户手动选择参数（标记 touched，品牌回填不再覆盖）
+  const selectBodyType = useCallback((v: 'slim' | 'standard' | 'curvy') => {
+    touchedRef.current.bodyType = true;
+    setSelectedBodyType(v);
+  }, []);
+  const selectSkinTone = useCallback((v: 'light' | 'medium' | 'deep') => {
+    touchedRef.current.skinTone = true;
+    setSelectedSkinTone(v);
+  }, []);
+  const selectModule = useCallback((v: ModuleType) => {
+    touchedRef.current.module = true;
+    setActiveModule(v);
+  }, []);
+  const selectModelId = useCallback((v: string) => {
+    touchedRef.current.modelId = true;
+    setSelectedModelId(v);
+  }, []);
+  const selectEngine = useCallback((v: ImageEngine) => {
+    touchedRef.current.engine = true;
+    setSelectedEngine(v);
+  }, []);
+
   // ── 上传产品图后自动触发 AI 分析 ──
+  // 跟踪"第一张图"指纹：替换首图要重新分析（旧逻辑 !analysis.done 会一直展示上一件衣服的描述）
+  const lastAnalyzedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (productImages.length > 0 && !analysis.done && !analysis.loading) {
-      // 取第一张图分析
-      analyze(productImages[0].base64);
-    }
     if (productImages.length === 0) {
+      lastAnalyzedRef.current = null;
       resetAnalysis();
       setStep(1);
+      return;
     }
-  }, [productImages, analysis.done, analysis.loading, analyze, resetAnalysis]);
+    const first = productImages[0];
+    const fingerprint = `${first.base64.length}:${first.base64.slice(0, 64)}`;
+    if (lastAnalyzedRef.current !== fingerprint) {
+      lastAnalyzedRef.current = fingerprint;
+      analyze(first.base64, first.mimeType);
+    }
+  }, [productImages, analyze, resetAnalysis]);
 
-  // 上传完成后自动进入 Step 2
+  // 上传完成后自动进入 Step 2（只在 0 → N 的瞬间推进，
+  // 否则用户点步骤条"上传"回到 Step 1 会被立刻弹回 Step 2，按钮形同虚设）
+  const prevProductCountRef = useRef(0);
   useEffect(() => {
-    if (productImages.length > 0 && step === 1) {
+    const prev = prevProductCountRef.current;
+    prevProductCountRef.current = productImages.length;
+    if (prev === 0 && productImages.length > 0 && step === 1) {
       setStep(2);
     }
   }, [productImages.length, step]);
@@ -148,8 +188,13 @@ export default function HomePage() {
         skuType: activeModule === 'product' ? skuType : undefined,
         selectedShots: activeModule === 'product' ? JSON.stringify(effectiveShots) : undefined,
         outputSize: activeModule === 'product' ? productOutputSize : undefined,
-        customWidth: productOutputSize === 'custom' ? productCustomW : undefined,
-        customHeight: productOutputSize === 'custom' ? productCustomH : undefined,
+        // 自定义尺寸宽高：产品/场景模块各自的输入（场景模块此前漏存，导致自定义尺寸永远不生效）
+        customWidth: activeModule === 'product'
+          ? (productOutputSize === 'custom' ? productCustomW : undefined)
+          : (sceneOutputSize === 'custom' ? sceneCustomW : undefined),
+        customHeight: activeModule === 'product'
+          ? (productOutputSize === 'custom' ? productCustomH : undefined)
+          : (sceneOutputSize === 'custom' ? sceneCustomH : undefined),
         sceneOutputSize: activeModule === 'scene' ? sceneOutputSize : undefined,
         sceneHasModel: activeModule === 'scene' ? sceneHasModel : undefined,
         customPrompt: customPrompt.trim() || undefined,
@@ -189,6 +234,10 @@ export default function HomePage() {
           bodyType: selectedBodyType,
           skinTone: selectedSkinTone,
           modelId: selectedModelId || undefined,
+          engine: selectedEngine,
+          skuType: activeModule === 'product' ? skuType : undefined,
+          sceneHasModel: activeModule === 'scene' ? sceneHasModel : undefined,
+          outputSize: activeModule === 'product' ? productOutputSize : sceneOutputSize,
           selectedShots: activeModule === 'product' ? effectiveShots : undefined,
           customPrompt: customPrompt || undefined,
           productImageThumbs: thumbs.filter(Boolean),
@@ -221,11 +270,25 @@ export default function HomePage() {
 
   // ── 时光机回放 ──
   const handleReplay = useCallback((snapshot: FlowSnapshot) => {
-    setActiveModule(snapshot.module);
-    setSelectedBodyType(snapshot.bodyType as 'slim' | 'standard' | 'curvy');
-    setSelectedSkinTone(snapshot.skinTone as 'light' | 'medium' | 'deep');
+    selectModule(snapshot.module);
+    selectBodyType(snapshot.bodyType as 'slim' | 'standard' | 'curvy');
+    selectSkinTone(snapshot.skinTone as 'light' | 'medium' | 'deep');
     if (snapshot.modelId !== undefined) {
-      setSelectedModelId(snapshot.modelId);
+      selectModelId(snapshot.modelId);
+    }
+    // 引擎 / SKU / 尺寸 / 场景模式：旧快照没有这些字段时跳过（保持当前值）
+    if (snapshot.engine) {
+      selectEngine(snapshot.engine);
+    }
+    if (snapshot.skuType) {
+      setSkuType(snapshot.skuType);
+    }
+    if (snapshot.sceneHasModel !== undefined) {
+      setSceneHasModel(snapshot.sceneHasModel);
+    }
+    if (snapshot.outputSize) {
+      if (snapshot.module === 'product') setProductOutputSize(snapshot.outputSize);
+      else setSceneOutputSize(snapshot.outputSize);
     }
     if (snapshot.selectedShots) {
       setSelectedShots(snapshot.selectedShots);
@@ -239,7 +302,7 @@ export default function HomePage() {
     }
     // 滚到顶部
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [productImages.length]);
+  }, [productImages.length, selectModule, selectBodyType, selectSkinTone, selectModelId, selectEngine]);
 
   return (
     <div className="min-h-screen bg-[var(--color-background)] pb-36 lg:pb-12">
@@ -247,10 +310,10 @@ export default function HomePage() {
       <AIChatSidebar
         context={`体型:${selectedBodyType} 肤色:${selectedSkinTone} 模式:${activeModule === 'product' ? '产品图' : '场景图'} 已上传:${productImages.length}张`}
         onActions={(actions) => {
-          if (actions.bodyType) setSelectedBodyType(actions.bodyType);
-          if (actions.skinTone) setSelectedSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { setActiveModule('scene'); setShowAdvanced(true); }
-          if (actions.module === 'product') setActiveModule('product');
+          if (actions.bodyType) selectBodyType(actions.bodyType);
+          if (actions.skinTone) selectSkinTone(actions.skinTone);
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); }
+          if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
         }}
@@ -261,10 +324,10 @@ export default function HomePage() {
       <AIChatBottomBar
         context={`体型:${selectedBodyType} 肤色:${selectedSkinTone} 模式:${activeModule === 'product' ? '产品图' : '场景图'} 已上传:${productImages.length}张`}
         onActions={(actions) => {
-          if (actions.bodyType) setSelectedBodyType(actions.bodyType);
-          if (actions.skinTone) setSelectedSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { setActiveModule('scene'); setShowAdvanced(true); }
-          if (actions.module === 'product') setActiveModule('product');
+          if (actions.bodyType) selectBodyType(actions.bodyType);
+          if (actions.skinTone) selectSkinTone(actions.skinTone);
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); }
+          if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
         }}
@@ -419,7 +482,7 @@ export default function HomePage() {
                 {/* 模块切换 */}
                 <div className="grid grid-cols-2 gap-3 sm:gap-6">
                   <button
-                    onClick={() => setActiveModule('product')}
+                    onClick={() => selectModule('product')}
                     className={`
                       relative flex flex-col items-start gap-2 sm:gap-4 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] transition-[background-color,border-color,box-shadow] duration-500 overflow-hidden
                       ${activeModule === 'product'
@@ -441,7 +504,7 @@ export default function HomePage() {
                   </button>
 
                   <button
-                    onClick={() => { setActiveModule('scene'); setShowAdvanced(true); }}
+                    onClick={() => { selectModule('scene'); setShowAdvanced(true); }}
                     className={`
                       relative flex flex-col items-start gap-2 sm:gap-4 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] transition-[background-color,border-color,box-shadow] duration-500 overflow-hidden
                       ${activeModule === 'scene'
@@ -466,25 +529,25 @@ export default function HomePage() {
                 {/* 模特快选（一键切换人种 / 性别） */}
                 <ModelQuickPicker
                   selectedModel={selectedModelId}
-                  onSelect={setSelectedModelId}
+                  onSelect={selectModelId}
                 />
 
                 {/* 体型 + 肤色（并排紧凑） */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <BodyTypeSelector
                     selectedBodyType={selectedBodyType}
-                    onSelect={setSelectedBodyType}
+                    onSelect={selectBodyType}
                   />
                   <SkinToneSelector
                     selectedSkinTone={selectedSkinTone}
-                    onSelect={setSelectedSkinTone}
+                    onSelect={selectSkinTone}
                   />
                 </div>
 
                 {/* 生图引擎快选 */}
                 <EngineSelector
                   selected={selectedEngine}
-                  onSelect={setSelectedEngine}
+                  onSelect={selectEngine}
                   variant="compact"
                 />
 
@@ -611,14 +674,14 @@ export default function HomePage() {
                 {/* 生图引擎（卡片模式，详细对比两个 backend） */}
                 <EngineSelector
                   selected={selectedEngine}
-                  onSelect={setSelectedEngine}
+                  onSelect={selectEngine}
                   variant="full"
                 />
 
                 {/* 模特预设（5 张完整卡片，含肤色/发型细节） */}
                 <ModelSelector
                   selectedModel={selectedModelId}
-                  onSelect={setSelectedModelId}
+                  onSelect={selectModelId}
                 />
 
                 {/* 模特参考图 */}
@@ -692,6 +755,15 @@ export default function HomePage() {
                 <StylePackManager
                   variant="compact"
                   onApply={(imgs) => {
+                    // 取消选中（imgs 为空）要清"当初应用到"的槽位：
+                    // 在产品模式应用、切到场景模式再取消，清错槽位会让包图残留并继续参与生成
+                    if (imgs.length === 0) {
+                      if (stylePackTargetRef.current === 'scene') setSceneRefImages([]);
+                      else if (stylePackTargetRef.current === 'product') setBgRefImages([]);
+                      stylePackTargetRef.current = null;
+                      return;
+                    }
+                    stylePackTargetRef.current = activeModule === 'scene' ? 'scene' : 'product';
                     if (activeModule === 'scene') setSceneRefImages(imgs);
                     else setBgRefImages(imgs);
                   }}
@@ -783,6 +855,12 @@ export default function HomePage() {
                           skuType: activeModule === 'product' ? skuType : undefined,
                           selectedShots: activeModule === 'product' ? JSON.stringify(selectedShots) : undefined,
                           outputSize: activeModule === 'product' ? combo.outputSize : undefined,
+                          customWidth: combo.outputSize === 'custom'
+                            ? (activeModule === 'product' ? productCustomW : sceneCustomW)
+                            : undefined,
+                          customHeight: combo.outputSize === 'custom'
+                            ? (activeModule === 'product' ? productCustomH : sceneCustomH)
+                            : undefined,
                           sceneOutputSize: activeModule === 'scene' ? combo.outputSize : undefined,
                           sceneHasModel: activeModule === 'scene' ? sceneHasModel : undefined,
                           customPrompt: customPrompt.trim() || undefined,

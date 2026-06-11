@@ -323,11 +323,16 @@ export function getDefaultShots(skuType: 'outfit' | 'top' | 'bottom'): number[] 
     .map(shot => shot.index);
 }
 
-/** 将 AspectRatio 字符串转换为 API 格式 */
+/** 把自定义宽×高映射到最接近的受支持比例（自定义尺寸生成链路使用） */
 export function sizeToAspectRatio(width: number, height: number): '1:1' | '3:4' | '4:3' | '9:16' | '16:9' {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return '3:4';
+  }
   const ratio = width / height;
-  if (ratio > 1.5) return '16:9';
-  if (ratio > 0.9) return '1:1';
-  if (ratio < 0.6) return '9:16';
-  return '3:4';
+  // 阈值取相邻支持比例的中点：9:16≈0.56、3:4=0.75、1:1=1、4:3≈1.33、16:9≈1.78
+  if (ratio >= 1.55) return '16:9';
+  if (ratio >= 1.15) return '4:3';
+  if (ratio >= 0.87) return '1:1';
+  if (ratio >= 0.65) return '3:4';
+  return '9:16';
 }

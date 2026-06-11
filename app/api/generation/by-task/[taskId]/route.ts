@@ -20,7 +20,8 @@ export async function GET(
 
   const { taskId: taskIdStr } = await context.params;
   const taskId = Number(taskIdStr);
-  if (!Number.isFinite(taskId)) {
+  // 必须是整数：1.5 这类值能过 isFinite，但查询 Int 列时 Prisma 会抛 500
+  if (!Number.isInteger(taskId)) {
     return NextResponse.json({ error: 'taskId 非法' }, { status: 400 });
   }
 

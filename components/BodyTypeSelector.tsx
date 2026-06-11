@@ -1,6 +1,6 @@
 'use client';
 
-import { BODY_TYPES, type BodyTypeConfig } from '@/lib/models';
+import { BODY_TYPES } from '@/lib/models';
 
 interface BodyTypeSelectorProps {
   selectedBodyType: 'slim' | 'standard' | 'curvy';

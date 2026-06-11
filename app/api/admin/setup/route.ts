@@ -4,9 +4,17 @@
  * Body: { username, password, setupKey }
  */
 import { NextResponse } from 'next/server';
+import { createHash, timingSafeEqual } from 'crypto';
 import prisma from '@/lib/prisma';
 import { hashPassword, signToken, setAuthCookie } from '@/lib/auth';
 import { rateLimit, getClientIp } from '@/lib/rate-limit';
+
+// 常量时间比较（先哈希再比较，同时避免长度泄露）
+function safeKeyCompare(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
 
 export async function POST(req: Request) {
   try {
@@ -26,7 +34,7 @@ export async function POST(req: Request) {
     if (!expectedKey) {
       return NextResponse.json({ error: '服务器未配置安装密钥' }, { status: 500 });
     }
-    if (setupKey !== expectedKey) {
+    if (typeof setupKey !== 'string' || !safeKeyCompare(setupKey, expectedKey)) {
       return NextResponse.json({ error: '安装密钥错误' }, { status: 403 });
     }
 

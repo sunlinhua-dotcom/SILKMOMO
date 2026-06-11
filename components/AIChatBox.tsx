@@ -38,6 +38,17 @@ function useAIChat(context?: string, onActions?: (a: AIActions) => void, onTrigg
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
 
+  // 始终调用"最新一次渲染"的回调。
+  // 直接在 setTimeout 里调 props 会捕获发送时刻的旧闭包：
+  // onActions setState 改了体型/肤色/模块后，500ms 后触发的 onTriggerGenerate
+  // 仍读到改参数之前的旧 state → 用旧参数创建任务并扣费。
+  const onActionsRef = useRef(onActions);
+  const onTriggerGenerateRef = useRef(onTriggerGenerate);
+  useEffect(() => {
+    onActionsRef.current = onActions;
+    onTriggerGenerateRef.current = onTriggerGenerate;
+  });
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -60,16 +71,17 @@ function useAIChat(context?: string, onActions?: (a: AIActions) => void, onTrigg
       const reply = data.reply || '收到！';
       const actions: AIActions = data.actions || {};
       setMessages(prev => [...prev, { role: 'ai', text: reply, actions }]);
-      if (onActions && Object.keys(actions).length > 0) onActions(actions);
-      if (actions.triggerGenerate && onTriggerGenerate) {
-        setTimeout(() => onTriggerGenerate(), 500);
+      if (onActionsRef.current && Object.keys(actions).length > 0) onActionsRef.current(actions);
+      if (actions.triggerGenerate && onTriggerGenerateRef.current) {
+        // 等 onActions 引发的 re-render 完成后再触发，此时 ref 里已是携带新 state 的回调
+        setTimeout(() => onTriggerGenerateRef.current?.(), 500);
       }
     } catch {
       setMessages(prev => [...prev, { role: 'ai', text: '网络异常，请稍后再试。' }]);
     } finally {
       setLoading(false);
     }
-  }, [input, loading, context, onActions, onTriggerGenerate]);
+  }, [input, loading, context]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {

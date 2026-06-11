@@ -16,7 +16,7 @@ import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
-import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
+import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -48,9 +48,40 @@ interface GenerateStreamRequest {
   selectedShotIndexes?: number[];
   outputSize?: string;
   sceneOutputSize?: string;
+  customWidth?: number;  // outputSize/sceneOutputSize 为 'custom' 时的实际宽高
+  customHeight?: number;
   sceneHasModel?: boolean;
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
+}
+
+// ═══ 入参防线：参考图数量 / 单图体积 / MIME 白名单 ═══
+// 没有这些上限的话，已登录用户可以 POST 几百 MB JSON 整体进内存再放大转发上游
+const MAX_IMAGE_BASE64_LENGTH = 11_000_000; // ≈ 8MB 二进制（前端压缩目标 800KB，留足余量）
+const ALLOWED_IMAGE_MIME = /^image\/(jpeg|jpg|png|webp|gif|avif)$/i;
+const IMAGE_SLOT_LIMITS: Array<{ key: 'productImages' | 'modelRefImages' | 'bgRefImages' | 'sceneRefImages' | 'accessoryImages'; label: string; max: number }> = [
+  { key: 'productImages', label: '产品图', max: 8 },
+  { key: 'modelRefImages', label: '模特参考图', max: 6 },
+  { key: 'bgRefImages', label: '背景参考图', max: 6 },
+  { key: 'sceneRefImages', label: '场景参考图', max: 8 },
+  { key: 'accessoryImages', label: '配件参考图', max: 6 },
+];
+
+function validateImageInputs(body: GenerateStreamRequest): string | null {
+  for (const { key, label, max } of IMAGE_SLOT_LIMITS) {
+    const arr = body[key];
+    if (arr === undefined || arr === null) continue;
+    if (!Array.isArray(arr)) return `${label}格式非法`;
+    if (arr.length > max) return `${label}最多 ${max} 张`;
+    for (const img of arr) {
+      if (!img || typeof img.data !== 'string' || !img.data) return `${label}数据非法`;
+      if (img.data.length > MAX_IMAGE_BASE64_LENGTH) return `${label}单张超过大小上限`;
+      if (typeof img.mimeType !== 'string' || !ALLOWED_IMAGE_MIME.test(img.mimeType)) {
+        return `${label}类型不支持`;
+      }
+    }
+  }
+  return null;
 }
 
 // ═══════════════════════════════════════
@@ -96,6 +127,8 @@ export async function POST(req: NextRequest) {
     selectedShotIndexes,
     outputSize,
     sceneOutputSize,
+    customWidth,
+    customHeight,
     sceneHasModel,
     customPrompt,
     engine: rawEngine,
@@ -112,6 +145,19 @@ export async function POST(req: NextRequest) {
   if (!productImages || productImages.length === 0) {
     return new Response(JSON.stringify({ error: '产品图不能为空' }), { status: 400 });
   }
+
+  const imageError = validateImageInputs(body);
+  if (imageError) {
+    return new Response(JSON.stringify({ error: imageError }), { status: 400 });
+  }
+
+  // 自定义尺寸：从请求里的实际宽高换算比例。
+  // 'custom' 在 PRODUCT/SCENE_OUTPUT_SIZES 里硬编码为 3:4 占位，
+  // 不换算的话用户选的横版/方版自定义尺寸会永远按 3:4 竖图生成。
+  const customAspectRatio =
+    typeof customWidth === 'number' && typeof customHeight === 'number' && customWidth > 0 && customHeight > 0
+      ? sizeToAspectRatio(customWidth, customHeight)
+      : undefined;
 
   if (moduleType === 'product' && selectedShotIndexes) {
     const valid = Array.isArray(selectedShotIndexes)
@@ -169,14 +215,16 @@ export async function POST(req: NextRequest) {
           const shotConfigs = PRODUCT_SHOTS.filter(s => indexes.includes(s.index));
           const total = shotConfigs.length;
           const outputSizeConfig = PRODUCT_OUTPUT_SIZES.find(s => s.id === outputSize) ?? PRODUCT_OUTPUT_SIZES[0];
-          const aspectRatio = outputSizeConfig.aspectRatio;
+          const aspectRatio = outputSize === 'custom' && customAspectRatio
+            ? customAspectRatio
+            : outputSizeConfig.aspectRatio;
 
           // AI 服装分析（可选，失败不阻塞）
           let garmentDescription: string | undefined;
           push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
           try {
             const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await analyzeProductImage(productImages[0].data);
+            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
             if (analysis.description) {
               garmentDescription = analysis.description;
             }
@@ -273,7 +321,9 @@ export async function POST(req: NextRequest) {
                 modelRefImages,
                 bgRefImages,
                 accessoryImages,
-                anchorImage,
+                // 无模特镜次（如面料特写）不能附 anchor：
+                // anchor 的指令是"使用完全相同的模特"，与 "Do NOT include any human figure" 直接打架
+                anchorImage: shot.hasModel ? anchorImage : undefined,
                 aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
               }, engine);
               shotLatency = Date.now() - shotStart;
@@ -333,8 +383,8 @@ export async function POST(req: NextRequest) {
                 break;
               }
               successCount++;
-              // 锚定首图
-              if (!anchorImage) {
+              // 锚定首张"有模特"的成功图（无模特的面料特写不能当模特身份锚点）
+              if (!anchorImage && shot.hasModel) {
                 anchorImage = { data: result.data, mimeType: 'image/png' };
               }
               push('result', {
@@ -388,7 +438,19 @@ export async function POST(req: NextRequest) {
           }
 
           const outputSizeConfig = SCENE_OUTPUT_SIZES.find(s => s.id === sceneOutputSize) ?? SCENE_OUTPUT_SIZES[0];
-          const aspectRatio = outputSizeConfig.aspectRatio;
+          const aspectRatio = sceneOutputSize === 'custom' && customAspectRatio
+            ? customAspectRatio
+            : outputSizeConfig.aspectRatio;
+
+          // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
+          // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
+          let garmentDescription: string | undefined;
+          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+          try {
+            const { analyzeProductImage } = await import('@/lib/ai-assistant');
+            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+            if (analysis.description) garmentDescription = analysis.description;
+          } catch { /* skip */ }
 
           push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
 
@@ -436,17 +498,6 @@ export async function POST(req: NextRequest) {
             controller.close();
             return;
           }
-
-          // AI 服装分析
-          let garmentDescription: string | undefined;
-          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
-          try {
-            const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await analyzeProductImage(productImages[0].data);
-            if (analysis.description) garmentDescription = analysis.description;
-          } catch { /* skip */ }
-
-          push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
 
           const modelConfig = modelId ? MODELS.find(m => m.id === modelId) : undefined;
           const bodyTypeConfig = BODY_TYPES.find(b => b.id === (bodyType || 'standard'));

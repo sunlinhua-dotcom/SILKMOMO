@@ -85,6 +85,8 @@ export async function POST(req: Request) {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // 上游挂起时不能无限等：钱已扣，超时走 catch 分支自动退款
+        signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({
           system_instruction: {
             parts: [{ text: SYSTEM_PROMPT }]

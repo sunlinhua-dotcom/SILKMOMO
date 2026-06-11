@@ -5,8 +5,8 @@
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { analyzeProductImage } from '@/lib/ai-assistant';
-import { deductCustom } from '@/lib/billing';
+import { analyzeProductImage, isAiAssistantConfigured } from '@/lib/ai-assistant';
+import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
 
 export async function POST(req: Request) {
@@ -15,9 +15,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: '未登录' }, { status: 401 });
   }
 
-  const { imageBase64 } = await req.json();
+  const { imageBase64, mimeType } = await req.json();
   if (!imageBase64) {
     return NextResponse.json({ error: '缺少图片数据' }, { status: 400 });
+  }
+
+  // 服务未配置时直接返回空结果，不能先扣费
+  if (!isAiAssistantConfigured()) {
+    return NextResponse.json({
+      description: '',
+      keywords: [],
+      category: 'garment',
+      billingSkipped: true,
+    });
   }
 
   // 扣费（AI 分析）
@@ -38,7 +48,19 @@ export async function POST(req: Request) {
     });
   }
 
-  const result = await analyzeProductImage(imageBase64);
+  const result = await analyzeProductImage(imageBase64, typeof mimeType === 'string' ? mimeType : undefined);
+
+  // 上游失败（≠ 分析结果为空）时退款，不能让用户为失败的调用买单
+  if (!result.ok) {
+    await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 产品分析失败退款');
+    return NextResponse.json({
+      description: '',
+      keywords: [],
+      category: 'garment',
+      billingSkipped: true,
+    });
+  }
+
   return NextResponse.json({
     ...result,
     costFen: PRICING.aiAnalysisPricePerCallFen,

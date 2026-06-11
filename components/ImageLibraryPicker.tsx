@@ -43,11 +43,16 @@ export function ImageLibraryPicker({
   useEffect(() => {
     if (!isOpen) return;
 
+    let cancelled = false;
     queueMicrotask(() => {
-      setLibraryImages(getLibraryImages());
+      if (cancelled) return;
       setSelected(new Set());
       setActiveTab(category || 'all');
     });
+    getLibraryImages()
+      .then(imgs => { if (!cancelled) setLibraryImages(imgs); })
+      .catch(() => {});
+    return () => { cancelled = true; };
   }, [isOpen, category]);
 
   if (!isOpen) return null;
@@ -77,9 +82,9 @@ export function ImageLibraryPicker({
     onClose();
   };
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
+  const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const updated = removeFromLibrary(id);
+    const updated = await removeFromLibrary(id);
     setLibraryImages(updated);
     setSelected(prev => {
       const next = new Set(prev);
