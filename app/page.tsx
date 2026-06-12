@@ -334,6 +334,11 @@ export default function HomePage() {
         onTriggerGenerate={() => { if (productImages.length > 0) handleQuickGenerate(); }}
       />
 
+      {/* 桌面端：主内容向右偏移以避让左侧 AI 边栏（72 * 4 = 288px）。
+          header 必须在这个容器内 —— 放外面时毛玻璃导航会横跨全宽,
+          压住边栏顶部的 AI Stylist 区块,LOGO 也会叠进边栏(与任务页保持同构) */}
+      <div className="lg:pl-72 transition-all duration-500">
+
       {/* 顶部导航 */}
       <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]/30">
         <div className="max-w-[85rem] mx-auto px-4 sm:px-6 lg:px-12">
@@ -361,9 +366,6 @@ export default function HomePage() {
           </div>
         </div>
       </header>
-
-      {/* 桌面端：主内容向右偏移以避让侧边栏（72 * 4 = 288px） */}
-      <div className="lg:pl-72 transition-all duration-500">
 
       {/* 极简进度指示器 */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-12 pt-5 sm:pt-10 mb-2 sm:mb-4">
