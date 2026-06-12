@@ -7,11 +7,21 @@ import { getCurrentUser } from '@/lib/auth';
 import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
 
+// 主通道:DeepSeek(OpenAI 兼容协议)。配置 DEEPSEEK_API_KEY 即启用。
+const DEEPSEEK_CONFIG = {
+  baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+  model: process.env.DEEPSEEK_CHAT_MODEL || 'deepseek-v4-pro',
+  apiKey: process.env.DEEPSEEK_API_KEY || '',
+};
+
+// 回退通道:未配置 DeepSeek 时沿用 Gemini Lite(保证零中断切换)
 const API_CONFIG = {
   baseUrl: process.env.GEMINI_BASE_URL || 'https://api.apiyi.com/v1beta',
   model: 'gemini-3.1-flash-lite-preview',
   apiKey: process.env.GEMINI_API_KEY || '',
 };
+
+const USE_DEEPSEEK = !!DEEPSEEK_CONFIG.apiKey;
 
 const SYSTEM_PROMPT = `你是 SILXINE 电商图片生成的助手。用户会用中文描述想要的图片效果，你必须根据描述提取参数。
 
@@ -60,12 +70,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: '请输入内容' }, { status: 400 });
   }
 
-  // 扣费
+  // 扣费(按实际使用的模型归因)
+  const chatModel = USE_DEEPSEEK ? DEEPSEEK_CONFIG.model : API_CONFIG.model;
   const deduction = await deductCustom(
     auth.userId,
     PRICING.aiAnalysisPricePerCallFen,
     'AI 智能助手',
-    API_CONFIG.model
+    chatModel
   );
 
   if (!deduction.success) {
@@ -80,39 +91,72 @@ export async function POST(req: Request) {
       ? `当前配置：${context}\n\n用户说：${message}`
       : `用户说：${message}`;
 
-    const res = await fetch(
-      `${API_CONFIG.baseUrl}/models/${API_CONFIG.model}:generateContent?key=${API_CONFIG.apiKey}`,
-      {
+    // 上游挂起时不能无限等：钱已扣，超时走 catch 分支自动退款
+    let rawText = '';
+    if (USE_DEEPSEEK) {
+      // DeepSeek(OpenAI 兼容):messages + response_format json_object
+      const res = await fetch(`${DEEPSEEK_CONFIG.baseUrl}/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // 上游挂起时不能无限等：钱已扣，超时走 catch 分支自动退款
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${DEEPSEEK_CONFIG.apiKey}`,
+        },
         signal: AbortSignal.timeout(30_000),
         body: JSON.stringify({
-          system_instruction: {
-            parts: [{ text: SYSTEM_PROMPT }]
-          },
-          contents: [
-            { role: 'user', parts: [{ text: userMsg }] },
+          model: DEEPSEEK_CONFIG.model,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMsg },
           ],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            maxOutputTokens: 300,
-            temperature: 0.3,
-          },
+          response_format: { type: 'json_object' },
+          // v4-pro 是推理模型,reasoning tokens 也计入 completion,上限要给足
+          max_tokens: 600,
+          temperature: 0.3,
         }),
-      }
-    );
-
-    if (!res.ok) {
-      await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手调用失败退款');
-      return NextResponse.json({
-        reply: '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
-        actions: {},
       });
-    }
 
-    const data = await res.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      if (!res.ok) {
+        await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手调用失败退款');
+        return NextResponse.json({
+          reply: '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
+          actions: {},
+        });
+      }
+      const data = await res.json();
+      rawText = data?.choices?.[0]?.message?.content || '';
+    } else {
+      const res = await fetch(
+        `${API_CONFIG.baseUrl}/models/${API_CONFIG.model}:generateContent?key=${API_CONFIG.apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(30_000),
+          body: JSON.stringify({
+            system_instruction: {
+              parts: [{ text: SYSTEM_PROMPT }]
+            },
+            contents: [
+              { role: 'user', parts: [{ text: userMsg }] },
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
+              maxOutputTokens: 300,
+              temperature: 0.3,
+            },
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手调用失败退款');
+        return NextResponse.json({
+          reply: '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
+          actions: {},
+        });
+      }
+      const data = await res.json();
+      rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    }
 
     // 本地关键词兜底（lite 模型经常不填 enum 字段）
     const kw = (re: RegExp) => re.test(message);

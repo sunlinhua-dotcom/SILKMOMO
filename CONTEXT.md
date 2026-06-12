@@ -36,4 +36,5 @@
 - 线上"生图卡住"根因已解决:更换失效/限速的 `GEMINI_API_KEY`,修复中断卡 processing、过期 JWT 当空 SSE 流等问题。
 - GPT 图像通道已支持独立令牌 `OPENAI_IMAGE_API_KEY`(见 README 环境变量表;线上已配置,模型 `gpt-image-2`,~3 分钟/张属正常速度)。
 - 两引擎已在生产端到端验证出图(Gemini 19s / GPT 152-235s)。
+- AI 聊天助手主通道为 DeepSeek `deepseek-v4-pro`(`DEEPSEEK_API_KEY`,未配则回退 Gemini Lite);产品图分析/质量评分仍走 Gemini Lite(需要视觉能力)。
 - 待办与已知问题见 `docs/BUGS.md` 未决事项一节。

@@ -37,6 +37,8 @@ npm run lint       # ESLint
 | `ADMIN_SETUP_KEY` | ✅ | 管理员初始化接口的安装密钥 |
 | `OPENAI_IMAGE_API_KEY` | 可选 | GPT 图像通道独立令牌(不配则回退主令牌) |
 | `OPENAI_IMAGE_MODEL` | 可选 | GPT 模型名(独立令牌默认 `gpt-image-2`,否则 `gpt-image-2-all`) |
+| `DEEPSEEK_API_KEY` | 可选 | AI 聊天助手主通道(api.deepseek.com);不配则聊天回退 Gemini Lite |
+| `DEEPSEEK_CHAT_MODEL` | 可选 | 聊天模型,默认 `deepseek-v4-pro` |
 | `GEMINI_BASE_URL` | 可选 | 上游网关地址(默认 `https://api.apiyi.com`) |
 | `IMAGE_BACKEND` | 可选 | 默认引擎 `gemini` / `openai` |
 
