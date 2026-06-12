@@ -31,6 +31,7 @@ export interface BackendResult {
   data?: string;     // base64 PNG
   error?: string;
   backend: 'gemini' | 'openai';
+  model?: string;    // 实际调用的上游模型名（用于真实计费归因，而非硬编码）
 }
 
 export type ImageBackend = 'gemini' | 'openai';
@@ -161,7 +162,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
   for (const part of resultParts || []) {
     const inlineData = (part.inlineData || part.inline_data) as Record<string, string> | undefined;
     if (inlineData?.data) {
-      return { success: true, data: inlineData.data, backend: 'gemini' };
+      return { success: true, data: inlineData.data, backend: 'gemini', model: GEMINI_MODEL };
     }
   }
 
@@ -292,7 +293,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
   const b64 = items?.[0]?.b64_json;
   if (b64) {
-    return { success: true, data: b64, backend: 'openai' };
+    return { success: true, data: b64, backend: 'openai', model: OPENAI_MODEL };
   }
   // 兜底：apiyi 偶尔返回 url 而不是 b64
   const imgUrl = items?.[0]?.url;
@@ -313,7 +314,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
         return { success: false, error: '图片 URL 返回空内容', backend: 'openai' };
       }
       const b64Fallback = Buffer.from(buf).toString('base64');
-      return { success: true, data: b64Fallback, backend: 'openai' };
+      return { success: true, data: b64Fallback, backend: 'openai', model: OPENAI_MODEL };
     } catch (err) {
       return { success: false, error: `获取图片 URL 失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
     }
