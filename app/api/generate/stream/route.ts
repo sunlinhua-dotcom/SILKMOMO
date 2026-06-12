@@ -349,7 +349,8 @@ export async function POST(req: NextRequest) {
               }
               continue;
             }
-            const resultApiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+            // 用后端返回的真实模型名归因（独立令牌时 GPT 可能是 gpt-image-2 而非 gpt-image-2-all）
+            const resultApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
 
             // 持久化生成记录到 Postgres（无论成败）
             recordGeneration({
@@ -545,7 +546,7 @@ export async function POST(req: NextRequest) {
             controller.close();
             return;
           }
-          const sceneApiModel = result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+          const sceneApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
 
           // 持久化生成记录到 Postgres
           recordGeneration({
