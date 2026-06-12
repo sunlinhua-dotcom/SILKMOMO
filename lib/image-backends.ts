@@ -5,8 +5,9 @@
  * 通过 IMAGE_BACKEND=openai 切换到 gpt-image-2-all（apiyi 自定义路由名，
  * 面料 micro 质感渲染极佳，但 lifestyle 背景指令偏弱）。
  *
- * 两个 backend 都通过同一个 apiyi key（GEMINI_API_KEY，apiyi 内部按
- * 模型名路由 OpenAI / Gemini）。
+ * 默认两个 backend 共用 GEMINI_API_KEY（apiyi 内部按模型名路由）。
+ * 可选：设 OPENAI_IMAGE_API_KEY 给 GPT 图像通道配独立令牌（独立计费/额度）；
+ * 此时 GPT 模型默认用 gpt-image-2（该令牌支持的模型），可被 OPENAI_IMAGE_MODEL 覆盖。
  */
 
 export interface ImageInput {
@@ -51,15 +52,27 @@ export function normalizeBackend(input?: string | null): ImageBackend {
 const APIYI_BASE = process.env.GEMINI_BASE_URL || 'https://api.apiyi.com';
 const API_KEY = process.env.GEMINI_API_KEY || '';
 
+// GPT 图像通道可配独立令牌（OPENAI_IMAGE_API_KEY）；
+// 不配则回退到主 GEMINI_API_KEY（两个引擎共用，保持原行为）。
+const OPENAI_API_KEY = process.env.OPENAI_IMAGE_API_KEY || API_KEY;
+const HAS_DEDICATED_OPENAI_KEY = !!process.env.OPENAI_IMAGE_API_KEY;
+
 const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
-const OPENAI_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2-all';
+// 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
+// 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
+const OPENAI_MODEL =
+  process.env.OPENAI_IMAGE_MODEL || (HAS_DEDICATED_OPENAI_KEY ? 'gpt-image-2' : 'gpt-image-2-all');
 
 const MAX_RETRIES = 1;
 
 // 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
-// TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）
+// TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）。
+// 两个令牌都要脱敏。
 function sanitizeError(msg: string): string {
-  return API_KEY ? msg.split(API_KEY).join('***') : msg;
+  let out = msg;
+  if (API_KEY) out = out.split(API_KEY).join('***');
+  if (OPENAI_API_KEY && OPENAI_API_KEY !== API_KEY) out = out.split(OPENAI_API_KEY).join('***');
+  return out;
 }
 
 // ═══════════════════════════════════════════════
@@ -71,7 +84,8 @@ export async function generateImage(
   backendOverride?: ImageBackend | string | null
 ): Promise<BackendResult> {
   const backend = normalizeBackend(backendOverride ?? null);
-  if (!API_KEY) {
+  const requiredKey = backend === 'openai' ? OPENAI_API_KEY : API_KEY;
+  if (!requiredKey) {
     return { success: false, error: 'API Key 未配置', backend };
   }
   return backend === 'openai'
@@ -244,7 +258,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
   try {
     response = await fetch(`${APIYI_BASE}/v1/images/edits`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${API_KEY}` },
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: formData,
       signal: AbortSignal.timeout(180_000), // gpt-image 比 Gemini 慢，给更长超时
       cache: 'no-store',
