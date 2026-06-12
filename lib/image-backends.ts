@@ -211,7 +211,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
 // OpenAI gpt-image-2-all 通道（多图 edits）
 // ═══════════════════════════════════════════════
 
-// gpt-image 系列只接受固定尺寸；把 SilkMomo 的 aspectRatio 映射到最接近的
+// gpt-image 系列只接受固定尺寸；把 SILXINE 的 aspectRatio 映射到最接近的
 function mapAspectToOpenAISize(aspect: BackendInput['aspectRatio']): string {
   switch (aspect) {
     case '1:1': return '1024x1024';

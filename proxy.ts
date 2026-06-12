@@ -1,5 +1,5 @@
 /**
- * SILKMOMO 路由保护代理
+ * SILXINE 路由保护代理
  * - 公开页面：/login, /register
  * - 受保护页面：/, /tasks, /task/*, /billing
  * - 管理员页面：/admin/*
@@ -10,6 +10,7 @@ import { jwtVerify } from 'jose';
 import { getJwtSecret } from './lib/jwt-secret';
 
 const JWT_SECRET = getJwtSecret();
+// 品牌已更名 SILXINE;cookie 名保持不变,改名会强制所有用户掉登录
 const TOKEN_NAME = 'silkmomo_token';
 
 // 不需要认证的路径

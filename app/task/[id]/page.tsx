@@ -929,7 +929,7 @@ export default function TaskDetailPage() {
               <div className="w-10 h-10 flex items-center justify-center transition-transform hover:scale-105">
                 <Logo width={40} height={40} />
               </div>
-              <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
+              <span className="text-lg font-semibold tracking-tight">SILXINE</span>
             </Link>
 
             <div className="flex items-center gap-3">
@@ -1494,7 +1494,7 @@ export default function TaskDetailPage() {
       <footer className="border-t border-[var(--color-border-light)] py-8 mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
           <p className="text-xs text-[var(--color-text-muted)]">
-            SILKMOMO © 2025 · 奢华丝绸，AI 赋能
+            SILXINE © 2026 · 奢华丝绸，AI 赋能
           </p>
         </div>
       </footer>

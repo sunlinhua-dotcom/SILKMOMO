@@ -1,3 +1,5 @@
+// 注意:品牌已更名 SILXINE,但以下 localStorage/IndexedDB 键名保持 silkmomo_* 不变——
+// 改键名会丢失所有用户的本地工作区数据。切勿重命名。
 const ACTIVE_USERNAME_KEY = 'silkmomo_active_username';
 const LOCAL_WORKSPACE_KEYS = [
   'silkmomo_image_library',

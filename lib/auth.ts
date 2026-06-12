@@ -1,5 +1,5 @@
 /**
- * SILKMOMO 认证工具
+ * SILXINE 认证工具
  * jose（Edge Runtime 兼容）+ bcryptjs
  */
 import { SignJWT, jwtVerify } from 'jose';

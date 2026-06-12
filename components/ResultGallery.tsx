@@ -64,7 +64,7 @@ export function ResultGallery({
   const handleDownload = (image: ResultImage) => {
     const link = document.createElement('a');
     link.href = `data:image/png;base64,${image.data}`;
-    link.download = `silkmomo-${image.imageType}-${image.index || 1}.png`;
+    link.download = `silxine-${image.imageType}-${image.index || 1}.png`;
     link.click();
   };
 
@@ -81,16 +81,16 @@ export function ResultGallery({
         for (let i = 0; i < imageData.length; i++) {
           array[i] = imageData.charCodeAt(i);
         }
-        let name = `silkmomo-${img.imageType}-${img.index || 1}.png`;
+        let name = `silxine-${img.imageType}-${img.index || 1}.png`;
         if (usedNames.has(name)) {
-          name = `silkmomo-${img.imageType}-${img.index || 1}-${img.id}.png`;
+          name = `silxine-${img.imageType}-${img.index || 1}-${img.id}.png`;
         }
         usedNames.add(name);
         zip.file(name, array);
       });
 
       const blob = await zip.generateAsync({ type: 'blob' });
-      saveAs(blob, 'silkmomo-images.zip');
+      saveAs(blob, 'silxine-images.zip');
     } finally {
       setDownloadingAll(false);
     }

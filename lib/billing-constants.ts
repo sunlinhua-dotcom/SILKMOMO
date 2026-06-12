@@ -1,5 +1,5 @@
 /**
- * SILKMOMO 计费常量（客户端安全）
+ * SILXINE 计费常量（客户端安全）
  * 不含 Prisma 依赖，可在 client components 中使用
  */
 

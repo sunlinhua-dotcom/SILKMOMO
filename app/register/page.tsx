@@ -37,7 +37,7 @@ export default function RegisterPage() {
       } catch (workspaceError) {
         console.warn('注册后同步本地工作区失败:', workspaceError);
         await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-        setError('注册成功，但本地缓存清理失败。请关闭其它 SILKMOMO 标签页后重新登录，或清除本站点数据。');
+        setError('注册成功，但本地缓存清理失败。请关闭其它 SILXINE 标签页后重新登录，或清除本站点数据。');
         return;
       }
 
@@ -62,7 +62,7 @@ export default function RegisterPage() {
           <div className="w-16 h-16 mx-auto mb-4 flex items-center justify-center">
             <Logo width={64} height={64} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">SILKMOMO</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">SILXINE</h1>
           <p className="text-sm text-[var(--color-text-secondary)] mt-1">
             创建您的专属账户
           </p>

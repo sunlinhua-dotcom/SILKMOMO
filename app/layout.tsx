@@ -5,13 +5,13 @@ export const metadata: Metadata = {
   // ⭐ 核心：设置绝对路径的基础 URL
   metadataBase: new URL('https://silkmomo.digirepub.com'),
 
-  title: "SILKMOMO - AI 电商组图生成",
+  title: "SILXINE - AI 电商组图生成",
   description: "利用 AI 为丝绸服装及配饰生成专业的电商产品图片",
 
-  // 浏览器图标
+  // 浏览器图标(app/icon.svg 由 Next 自动服务于 /icon.svg,任意尺寸清晰)
   icons: {
-    icon: '/icon.png',
-    shortcut: '/icon.png',
+    icon: '/icon.svg',
+    shortcut: '/icon.svg',
     apple: '/apple-touch-icon.png',
     other: {
       rel: 'apple-touch-icon-precomposed',
@@ -21,16 +21,16 @@ export const metadata: Metadata = {
 
   // 微信/社交平台分享图
   openGraph: {
-    title: 'SILKMOMO - AI 电商组图生成',
+    title: 'SILXINE - AI 电商组图生成',
     description: '利用 AI 为丝绸服装及配饰生成专业的电商产品图片',
     images: ['/og-image.jpg'],
     type: 'website',
-    siteName: 'SILKMOMO',
+    siteName: 'SILXINE',
   },
 
   // iOS 添加到桌面时的配置
   appleWebApp: {
-    title: 'SILKMOMO',
+    title: 'SILXINE',
     statusBarStyle: 'black-translucent',
     startupImage: ['/apple-touch-icon.png'],
   },

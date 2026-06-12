@@ -36,7 +36,7 @@ export default function LoginPage() {
       } catch (workspaceError) {
         console.warn('登录后同步本地工作区失败:', workspaceError);
         await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-        setError('登录已验证，但本地缓存清理失败。请关闭其它 SILKMOMO 标签页后重试，或清除本站点数据。');
+        setError('登录已验证，但本地缓存清理失败。请关闭其它 SILXINE 标签页后重试，或清除本站点数据。');
         return;
       }
 
@@ -63,7 +63,7 @@ export default function LoginPage() {
           <div className="w-16 h-16 mx-auto mb-4 flex items-center justify-center">
             <Logo width={64} height={64} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">SILKMOMO</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">SILXINE</h1>
           <p className="text-sm text-[var(--color-text-secondary)] mt-1">
             AI 丝绸服装摄影平台
           </p>

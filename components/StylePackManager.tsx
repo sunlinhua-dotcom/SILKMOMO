@@ -74,7 +74,7 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
         }
 
         const packId = await db.stylePacks.add({
-          name: 'SILKMOMO高定美学 (默认)',
+          name: 'SILXINE 高定美学 (默认)',
           description: '基于 Deiji Studios / Eberjey 预设',
           createdAt: new Date(),
         });
