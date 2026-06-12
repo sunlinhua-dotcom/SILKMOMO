@@ -77,6 +77,7 @@ refs/                本地素材库(品牌案例、产品照、样例输出;不
 | [`CONTEXT.md`](CONTEXT.md) | AI 协作会话入口:约束、命令、当前状态 |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | 里程碑与进度时间线 |
 | [`docs/BUGS.md`](docs/BUGS.md) | 踩坑记录:未决事项 + 已修复归档 |
+| [`docs/BACKUP.md`](docs/BACKUP.md) | 备份与恢复手册(Zeabur 原生 + pg_dump 脚本 + 恢复演练) |
 | `docs/LOG.md` | 本地工作日志(追加式,不入库) |
 | `docs/SILKMOMO_开发需求.pdf` | 原始开发需求 |
 | `docs/business/` | 报价/合同等商务文件(不入库) |

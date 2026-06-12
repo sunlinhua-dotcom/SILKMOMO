@@ -79,3 +79,9 @@ silkmomo-*.png
 .DS_Store
 **/.DS_Store
 *.tsbuildinfo
+
+# 备份脚本配置与本地备份产物(含密钥/数据,不入库)
+/.backup.env
+/silxine-backups/
+*.dump
+*.dump.gpg
