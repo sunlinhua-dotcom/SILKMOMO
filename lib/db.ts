@@ -105,6 +105,8 @@ export class SilkMomoDB extends Dexie {
   libraryImages!: Table<LibraryImageRow>;
 
   constructor() {
+    // 注意:品牌已更名 SILXINE,但 IndexedDB 库名保持 'SilkMomoDB' 不变——
+    // 改名等于换库,所有用户的本地任务/图片会全部"丢失"。切勿重命名。
     super('SilkMomoDB');
 
     // version 1: 原始版本（保留，向后兼容）

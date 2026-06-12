@@ -13,7 +13,7 @@ const API_CONFIG = {
   apiKey: process.env.GEMINI_API_KEY || '',
 };
 
-const SYSTEM_PROMPT = `你是 SILKMOMO 电商图片生成的助手。用户会用中文描述想要的图片效果，你必须根据描述提取参数。
+const SYSTEM_PROMPT = `你是 SILXINE 电商图片生成的助手。用户会用中文描述想要的图片效果，你必须根据描述提取参数。
 
 只输出一个 JSON 对象，结构如下，每个字段都必须存在（不知道就用 null）：
 {

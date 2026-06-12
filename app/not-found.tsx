@@ -6,7 +6,7 @@ export default function NotFound() {
       <div className="text-center px-6 max-w-md">
         {/* 品牌标识 */}
         <h1 className="text-2xl font-light tracking-[0.3em] text-[var(--color-text)] mb-2">
-          SILKMOMO
+          SILXINE
         </h1>
         <div className="w-12 h-px bg-[var(--color-accent)] mx-auto mb-8" />
 

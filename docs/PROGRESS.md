@@ -1,8 +1,11 @@
-# SILKMOMO 进度
+# SILXINE 进度
 
 > 里程碑时间线(新条目加在最上方)。踩坑明细见 [BUGS.md](BUGS.md),过程日志见本地 `LOG.md`。
 
 ## 时间线
+
+### 2026-06-13
+- **品牌更名 SILXINE**:全部用户可见文案/标题/OG/SEO 从 SILKMOMO 改为客户正式名 SILXINE;全新品牌视觉——丝绸缎带 "S" SVG 标识(内联组件 + favicon icon.svg + logo.svg)、OG 分享图与 iOS 图标按 silxine.com 官网基因重绘(Newsreader 衬线/墨 #2C2825/米白 #F5EFE7/金棕)。内部存储键(silkmomo_*、SilkMomoDB、cookie)与仓库名保留代号并加防误改注释;下载文件名改为 silxine-*。旧品牌资产归档 refs/archive。
 
 ### 2026-06-12
 - **线上"生图卡住"根因解决**:生产 `GEMINI_API_KEY` 为失效/限速令牌(实测 100-150s/张,撞 120s 超时),更换为正常令牌后 Gemini 19 秒出图。管理员账号浏览器端到端实测通过(登录→上传→生成→出图→计费正确)。

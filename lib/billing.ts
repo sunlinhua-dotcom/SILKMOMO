@@ -1,5 +1,5 @@
 /**
- * SILKMOMO 计费系统（服务端）
+ * SILXINE 计费系统（服务端）
  * Ledger 模式 + 原子操作扣费
  */
 import prisma from './prisma';

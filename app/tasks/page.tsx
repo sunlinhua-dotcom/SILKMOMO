@@ -17,7 +17,7 @@ export default function TasksPage() {
                 <Logo width={32} height={32} />
               </div>
               <div className="min-w-0">
-                <span className="font-serif text-base sm:text-2xl tracking-[0.1em] sm:tracking-[0.15em] text-[var(--color-primary)]">SILKMOMO</span>
+                <span className="font-serif text-base sm:text-2xl tracking-[0.1em] sm:tracking-[0.15em] text-[var(--color-primary)]">SILXINE</span>
                 <span className="hidden sm:block text-[10px] tracking-[0.25em] uppercase text-[var(--color-text-muted)] mt-0.5">Maison de Création Digitale</span>
               </div>
             </Link>
@@ -56,7 +56,7 @@ export default function TasksPage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="border-t border-[var(--color-border-light)] pt-6 sm:pt-10 flex flex-col sm:flex-row items-center justify-between gap-3">
             <p className="font-serif text-xs sm:text-sm tracking-widest text-[var(--color-text-muted)]">
-              SILKMOMO
+              SILXINE
             </p>
             <p className="text-[9px] sm:text-[10px] tracking-widest uppercase text-[var(--color-text-muted)]">
               © 2025 · Haute Couture, AI-Powered

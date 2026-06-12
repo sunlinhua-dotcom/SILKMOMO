@@ -124,7 +124,7 @@ export default function BrandSettingsPage() {
           <Link href="/" className="flex items-center gap-3 group">
             <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" />
             <Logo width={32} height={32} />
-            <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
+            <span className="text-lg font-semibold tracking-tight">SILXINE</span>
           </Link>
           <h1 className="text-sm font-medium text-[var(--color-text-secondary)]">品牌设置</h1>
         </div>
@@ -149,7 +149,7 @@ export default function BrandSettingsPage() {
             type="text"
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder="如：SILKMOMO 主线 / 副牌青涩"
+            placeholder="如：SILXINE 主线 / 副牌青涩"
             className="w-full text-base font-serif text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/50 border-0 border-b border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:ring-0 px-2 py-3 bg-transparent transition-colors"
           />
         </div>

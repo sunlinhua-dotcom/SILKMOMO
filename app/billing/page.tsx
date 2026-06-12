@@ -74,7 +74,7 @@ export default function BillingPage() {
           <Link href="/" className="flex items-center gap-3 group">
             <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" aria-hidden="true" />
             <Logo width={32} height={32} />
-            <span className="text-lg font-semibold tracking-tight">SILKMOMO</span>
+            <span className="text-lg font-semibold tracking-tight">SILXINE</span>
           </Link>
           <h1 className="text-sm font-medium text-[var(--color-text-secondary)]">账户 & 账单</h1>
         </div>
