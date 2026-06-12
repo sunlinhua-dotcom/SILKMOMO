@@ -266,10 +266,15 @@ export default function TaskDetailPage() {
     setGenerationPhase('analyzing');
     setElapsedSeconds(0);
 
-    // —— 初始化预估剩余时间 ──
+    // —— 初始化预估剩余时间(按引擎区分:GPT Image 2 实测 ~150-235s/张,Gemini ~20-35s/张;
+    //     之前不分引擎统一按 15s/张 估算,GPT 会出现"预计剩余 17 秒"实跑 4 分钟的误导)——
+    const etaFirstShotSec = newEngine === 'openai' ? 180 : 25;
+    const etaPerShotSec = newEngine === 'openai' ? 180 : 15;
     const initialSeconds = moduleType === 'scene'
-      ? 25
-      : (selectedShotIndexes.length === 1 ? 25 : 25 + (selectedShotIndexes.length - 1) * 15);
+      ? etaFirstShotSec
+      : (selectedShotIndexes.length === 1
+          ? etaFirstShotSec
+          : etaFirstShotSec + (selectedShotIndexes.length - 1) * etaPerShotSec);
     setSecondsLeft(initialSeconds);
 
     setLiveImages([]);
@@ -412,9 +417,9 @@ export default function TaskDetailPage() {
               console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
               setProgress({ current: currentN, total, shotIndex });
 
-              // 动态修正预估剩余时间：剩余数量 * 15 秒
+              // 动态修正预估剩余时间：剩余数量 × 单张预估（按引擎）
               const remaining = Math.max(0, total - currentN);
-              setSecondsLeft(remaining * 15);
+              setSecondsLeft(remaining * etaPerShotSec);
 
               // 实时写入 IndexedDB + 追加到 liveImages
               const shotConfig = PRODUCT_SHOTS.find(s => s.index === shotIndex);
@@ -1110,7 +1115,7 @@ export default function TaskDetailPage() {
                   <p className="text-xs text-[var(--color-text-muted)] flex items-center gap-2">
                     <span>已耗时 {elapsedSeconds}s</span>
                     {secondsLeft > 0 && <span className="text-[var(--color-accent)] font-medium">预计剩余时间：{secondsLeft} 秒</span>}
-                    {elapsedSeconds > 90 && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
+                    {elapsedSeconds > (currentEngineId === 'openai' ? 300 : 90) && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
                   </p>
                 </div>
               </div>
@@ -1357,14 +1362,14 @@ export default function TaskDetailPage() {
             <div className="flex gap-3">
               <button
                 onClick={() => setShowAdjustPanel(true)}
-                className="flex items-center gap-2 px-4 py-2 text-sm border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
+                className="flex items-center gap-2 px-4 py-2.5 text-sm border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
               >
                 <Settings2 className="w-4 h-4" />
                 调整参数
               </button>
               <button
                 onClick={handleGenerateRemaining}
-                className="btn-primary text-sm px-5 py-2"
+                className="btn-primary text-sm px-5 py-2.5"
               >
                 <Wand2 className="w-4 h-4" strokeWidth={1.5} />
                 生成剩余 {getShotCount() - images.length} 张

@@ -361,65 +361,70 @@
   background: var(--color-accent);
 }
 
-/* 主按钮 — 温暖渐变（告别纯黑） */
-.btn-primary {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 1rem 2.5rem;
-  font-size: 1rem;
-  font-weight: 500;
-  font-family: 'Montserrat', sans-serif;
-  letter-spacing: 0.04em;
-  color: white;
-  background: linear-gradient(135deg, #8B6F47 0%, #C9A87C 100%);
-  border: 1px solid rgba(201,168,124,0.3);
-  border-radius: 12px;
-  cursor: pointer;
-  overflow: hidden;
-  transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
-  box-shadow: 0 4px 20px rgba(201,168,124,0.25), inset 0 1px 1px rgba(255,255,255,0.3);
-}
+/* 主按钮 — 温暖渐变（告别纯黑）
+   必须放在 @layer components 里：裸 CSS 会压过 Tailwind 工具类（utilities layer），
+   导致 "btn-primary text-sm px-5 py-2" 这类按场景缩小的覆盖全部失效，
+   同屏出现大小不一的按钮。layer 化后默认尺寸不变，但工具类可按需覆盖。 */
+@layer components {
+  .btn-primary {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem 2.5rem;
+    font-size: 1rem;
+    font-weight: 500;
+    font-family: 'Montserrat', sans-serif;
+    letter-spacing: 0.04em;
+    color: white;
+    background: linear-gradient(135deg, #8B6F47 0%, #C9A87C 100%);
+    border: 1px solid rgba(201,168,124,0.3);
+    border-radius: 12px;
+    cursor: pointer;
+    overflow: hidden;
+    transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
+    box-shadow: 0 4px 20px rgba(201,168,124,0.25), inset 0 1px 1px rgba(255,255,255,0.3);
+  }
 
-.btn-primary::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at center, rgba(232,196,184,0.3) 0%, transparent 80%);
-  opacity: 0;
-  transform: scale(0.8);
-  transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
-}
+  .btn-primary::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at center, rgba(232,196,184,0.3) 0%, transparent 80%);
+    opacity: 0;
+    transform: scale(0.8);
+    transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
+  }
 
-.btn-primary:hover::before {
-  opacity: 1;
-  transform: scale(2);
-}
+  .btn-primary:hover::before {
+    opacity: 1;
+    transform: scale(2);
+  }
 
-.btn-primary:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 16px 40px rgba(201,168,124,0.35), inset 0 1px 1px rgba(255,255,255,0.4);
-  border-color: rgba(232,196,184,0.8);
-}
+  .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 40px rgba(201,168,124,0.35), inset 0 1px 1px rgba(255,255,255,0.4);
+    border-color: rgba(232,196,184,0.8);
+  }
 
-.btn-primary span {
-  position: relative;
-  z-index: 1;
-}
+  .btn-primary span {
+    position: relative;
+    z-index: 1;
+  }
 
-.btn-primary:disabled {
-  background: #E5DDD3;
-  color: #B0A292;
-  border-color: transparent;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
+  .btn-primary:disabled {
+    background: #E5DDD3;
+    color: #B0A292;
+    border-color: transparent;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
 
-.btn-primary:disabled::before {
-  display: none;
+  .btn-primary:disabled::before {
+    display: none;
+  }
 }
 
 /* 侧边栏 */

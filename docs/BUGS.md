@@ -9,25 +9,22 @@
 ### UI/UX 优化清单(2026-06-12 审查产出,按优先级)
 
 **P1 建议优先**
-1. 移动端双底栏重叠:`app/page.tsx:973` 快速生成栏与 `components/AIChatBox.tsx:251` AI 底栏均为 `fixed bottom-0 z-50`,Step≥2 时同时渲染,快速生成栏盖住 AI 聊天入口。建议快速生成栏上移避让,或聊天栏收为浮球。
-2. 生成预估时间与引擎无关:`app/task/[id]/page.tsx` 预估按 25+(n-1)×15s、每张完成后 remaining×15s;GPT 实测 152-235s/张,出现"预计剩余 17 秒"实跑 4 分钟的误导。建议按引擎区分预估,并在 EngineSelector 标注「约 30 秒/张 / 约 3 分钟/张」。
-3. 原生 `alert/confirm` 共 12+ 处(`app/page.tsx` 6 处、`app/brand/page.tsx` 5 处、TaskList 删除确认等),不可样式化且与品牌视觉脱节。建议统一轻量 Toast + 确认 Dialog。
-4. 剪贴板复制无错误处理:`app/page.tsx:1081` `navigator.clipboard.writeText` 未 await/catch,权限拒绝时仍提示"已复制"。
+1. 移动端双底栏重叠:`app/page.tsx` 快速生成栏与 `components/AIChatBox.tsx` AI 底栏均为 `fixed bottom-0 z-50`,Step≥2 时同时渲染,快速生成栏盖住 AI 聊天入口。建议快速生成栏上移避让,或聊天栏收为浮球(待真机验证后改)。
+2. 原生 `alert/confirm` 共 12+ 处(`app/page.tsx`、`app/brand/page.tsx`、TaskList 删除确认等),不可样式化且与品牌视觉脱节。建议统一轻量 Toast + 确认 Dialog。
 
 **P2 打磨**
-5. `transition-all` 多处(`app/page.tsx:366,387,559,652,904,977`、`app/brand/page.tsx:163,182`、`app/register/page.tsx:94,109,125`):规范要求只动画 transform/opacity;尤其 `lg:pl-72 transition-all` 整列容器动画有性能隐患。
-6. 中文排版基线缺失:`app/globals.css` 无 `word-break: keep-all` / `text-wrap: balance`;金额与数字(¥9987.80、"约 46 次完整生成")未统一 `tabular-nums + white-space: nowrap`,窄屏有数字断行/孤字风险。
-7. 登录密码框缺 `autoComplete="current-password"`(`app/login/page.tsx`;用户名已配 ✓)。
-8. 画廊/缩略图 `<img>` 未声明宽高与懒加载:`ResultGallery:181`、`StylePackManager:344,439`、`ImageLibraryPicker:168`、`ImageLightbox:47`;建议 `loading="lazy"` + 固定宽高比占位,减少布局抖动(对应现存 lint warning)。
-9. 任务列表 N+1:`components/TaskList.tsx` 全量加载 projects 后逐个 count images;任务数到几百时明显变慢,建议批量统计。
-10. 步骤指示器(上传/参数/生成)移动端点击目标过小(text-[10px]);且 step/module 状态不进 URL,刷新即丢。
+3. `transition-all` 多处(`app/page.tsx:366,387,559,652,904,977`、`app/brand/page.tsx:163,182`、`app/register/page.tsx:94,109,125`):规范要求只动画 transform/opacity;尤其 `lg:pl-72 transition-all` 整列容器动画有性能隐患。
+4. 中文排版基线缺失:`app/globals.css` 无 `word-break: keep-all` / `text-wrap: balance`;金额与数字未统一 `tabular-nums + white-space: nowrap`,窄屏有数字断行/孤字风险。
+5. 画廊/缩略图 `<img>` 未声明宽高与懒加载:`ResultGallery`、`StylePackManager`、`ImageLibraryPicker`、`ImageLightbox`;建议 `loading="lazy"` + 固定宽高比占位(对应现存 lint warning)。
+6. 任务列表 N+1:`components/TaskList.tsx` 全量加载 projects 后逐个 count images;任务数到几百时明显变慢,建议批量统计。
+7. 步骤指示器(上传/参数/生成)移动端点击目标过小(text-[10px]);且 step/module 状态不进 URL,刷新即丢。
 
 **P3 可选**
-11. 充值弹窗套餐卡硬编码 `{yuan, times}` 数组(`app/page.tsx`~1049),与 `RECHARGE_PACKAGES` 重复定义,易再次不一致,应引用常量。
-12. 选择卡片 hover 对比度偏低(浅金描边),hover 态可加深;键盘 `:focus-visible` 全局样式已有 ✓。
-13. 空状态/按钮文案统一二人称 + 明确下一步动作(多数已达标)。
+8. 充值弹窗套餐卡硬编码 `{yuan, times}` 数组(`app/page.tsx`),与 `RECHARGE_PACKAGES` 重复定义,易再次不一致,应引用常量。
+9. 选择卡片 hover 对比度偏低(浅金描边),hover 态可加深;键盘 `:focus-visible` 全局样式已有 ✓。
+10. 空状态/按钮文案统一二人称 + 明确下一步动作(多数已达标)。
 
-**已达标项(审查确认,无需动)**:`:focus-visible` 全局焦点环、`prefers-reduced-motion`、注册页 autocomplete 全套、图标 `aria-hidden` 普遍覆盖、移动端 `safe-area-inset`、SSE 心跳保活、`outline-none` 处均有 focus 替代样式。
+**已达标项(审查确认,无需动)**:`:focus-visible` 全局焦点环、`prefers-reduced-motion`、登录/注册 autocomplete 全套(含 current-password,审查初稿误报缺失)、图标 `aria-hidden` 普遍覆盖、移动端 `safe-area-inset`、SSE 心跳保活、`outline-none` 处均有 focus 替代样式。
 
 ### 线上电商站点 silxine.com(2026-06-09 审计,Shopify 后台操作,不在本仓库)
 1. `silxine-long-sleeve-set` 变体重量疑似配错:`.json` 显示 `weight_unit: lb, weight: 250.0`(短袖套装为 250 g),正式售卖前需修正,否则运费异常。
@@ -45,6 +42,11 @@
 ---
 
 ## 二、已修复归档
+
+### 2026-06-12(UI/UX P1 快修)
+- 生成预估时间与引擎无关:统一按 15s/张估算,GPT 实测 150-235s/张,出现"预计剩余 17 秒"实跑 4 分钟。修复:任务页预估与"响应较慢"阈值按引擎区分(openai 180s/张、阈值 300s),EngineSelector 两种形态都标注「约 30 秒/张 / 约 3 分钟/张」。
+- 剪贴板复制未 await/catch,权限拒绝时仍提示"已复制"。修复:失败时提示手动添加微信号。
+- 审查清单第 7 条(登录密码框缺 current-password)为误报,实际已配置,已从未决移除。
 
 ### 2026-06-12(线上生图卡住根因 + GPT 独立令牌)
 - 线上"生图总是卡住"根因:生产 `GEMINI_API_KEY` 为限速/后失效令牌(实测同参数 100-150s/张,本地正常令牌 19-36s),撞代码 120s 超时反复重试。更换令牌后 Gemini 19s 出图。教训:**两个环境的 key 不一致时,先各自实测上游再查代码**。

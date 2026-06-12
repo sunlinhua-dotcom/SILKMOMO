@@ -133,7 +133,7 @@ export function ResultGallery({
         <button
           onClick={handleDownloadAll}
           disabled={downloadingAll}
-          className="btn-primary"
+          className="btn-primary text-sm px-5 py-2.5"
         >
           {downloadingAll ? (
             <>

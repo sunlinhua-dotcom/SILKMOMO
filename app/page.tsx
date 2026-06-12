@@ -1077,9 +1077,15 @@ export default function HomePage() {
             {/* 底部 */}
             <div className="p-5 border-t border-[var(--color-border-light)] flex gap-3">
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText('silkmomo-concierge');
-                  alert('管理员微信号 silkmomo-concierge 已复制到剪贴板，请前往微信添加。');
+                onClick={async () => {
+                  // clipboard API 在非安全上下文/权限被拒时会抛错，
+                  // 不能未 await 就提示"已复制"误导用户
+                  try {
+                    await navigator.clipboard.writeText('silkmomo-concierge');
+                    alert('管理员微信号 silkmomo-concierge 已复制到剪贴板，请前往微信添加。');
+                  } catch {
+                    alert('自动复制失败，请手动添加管理员微信号：silkmomo-concierge');
+                  }
                 }}
                 className="btn-primary w-full cursor-pointer"
               >
