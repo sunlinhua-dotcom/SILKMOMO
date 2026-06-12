@@ -9,6 +9,7 @@ export const ENGINES: Array<{
     name: string;
     sub: string;
     desc: string;
+    speed: string;   // 实测单张耗时预期，帮用户在"快"和"质感"之间自主选择
     icon: typeof Sparkles;
 }> = [
         {
@@ -16,6 +17,7 @@ export const ENGINES: Array<{
             name: 'Gemini Flash Image',
             sub: 'gemini-3.1-flash-image',
             desc: 'Lifestyle / 多图参考稳定 / 暖色背景',
+            speed: '约 30 秒/张',
             icon: Sparkles,
         },
         {
@@ -23,6 +25,7 @@ export const ENGINES: Array<{
             name: 'GPT Image 2',
             sub: 'gpt-image-2-all',
             desc: '面料 macro / 极致缎面光泽 / 详情页面料展示',
+            speed: '约 3 分钟/张',
             icon: Zap,
         },
     ];
@@ -59,6 +62,9 @@ export function EngineSelector({ selected, onSelect, variant = 'full' }: EngineS
                             >
                                 <Icon className="w-4 h-4" strokeWidth={1.5} />
                                 <span className="text-xs font-medium whitespace-nowrap">{e.name}</span>
+                                <span className={`text-[10px] whitespace-nowrap ${isSelected ? 'text-[var(--color-accent)]/80' : 'text-[var(--color-text-muted)]'}`}>
+                                    {e.speed}
+                                </span>
                             </button>
                         );
                     })}
@@ -104,6 +110,9 @@ export function EngineSelector({ selected, onSelect, variant = 'full' }: EngineS
                             </h3>
                             <p className="text-[10px] tracking-wider text-neutral-400 mb-1.5 font-mono">{e.sub}</p>
                             <p className="text-xs text-neutral-500 leading-relaxed">{e.desc}</p>
+                            <p className={`text-[11px] mt-1.5 font-medium whitespace-nowrap ${isSelected ? 'text-[#C9A86C]' : 'text-neutral-400'}`}>
+                                ⏱ {e.speed}
+                            </p>
                         </button>
                     );
                 })}
