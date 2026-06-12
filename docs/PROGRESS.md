@@ -5,6 +5,7 @@
 ## 时间线
 
 ### 2026-06-13
+- **AI 聊天切换 DeepSeek**:`/api/ai/chat` 主通道改为 api.deepseek.com `deepseek-v4-pro`(OpenAI 兼容协议 + json_object 结构化输出),新增 `DEEPSEEK_API_KEY`/`DEEPSEEK_CHAT_MODEL` 环境变量,未配置时自动回退 Gemini Lite 零中断;本地端到端实测 3s 响应、参数提取准确、计费按真实模型归因。产品图分析/质量评分保持 Gemini Lite(需视觉)。
 - **品牌更名 SILXINE**:全部用户可见文案/标题/OG/SEO 从 SILKMOMO 改为客户正式名 SILXINE;全新品牌视觉——丝绸缎带 "S" SVG 标识(内联组件 + favicon icon.svg + logo.svg)、OG 分享图与 iOS 图标按 silxine.com 官网基因重绘(Newsreader 衬线/墨 #2C2825/米白 #F5EFE7/金棕)。内部存储键(silkmomo_*、SilkMomoDB、cookie)与仓库名保留代号并加防误改注释;下载文件名改为 silxine-*。旧品牌资产归档 refs/archive。
 
 ### 2026-06-12
