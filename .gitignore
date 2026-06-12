@@ -43,16 +43,19 @@ next-env.d.ts
 /lib/generated/prisma
 
 # database
-/data/*.db
-/data/*.db-journal
 *.db
 *.db-journal
 
-# 大型本地素材文件（不上传到 Git）
+# 本地素材与参考资料（品牌案例 zip、产品照、样例输出、归档数据库，不入库）
+refs/
+
+# 商务文件（报价、合同，不入库）
+docs/business/
+
+# 大型本地素材文件（防止再次散落根目录）
 *.zip
 *.xlsx
 *.xls
-SKMM_LOGO.jpeg
 微信图片_*.jpg
 
 # 本地调性图库（体积过大，不入仓库）
@@ -62,8 +65,8 @@ SKMM_LOGO.jpeg
 # Instaloader 产生的乱码目录（防止意外提交）
 "∕Users*"
 
-# 本地日志
-LOG.md
+# 本地工作日志（约定不入库）
+docs/LOG.md
 
 # Codex / browser automation local artifacts
 .claude/
