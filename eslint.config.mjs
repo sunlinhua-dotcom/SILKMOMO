@@ -11,7 +11,7 @@ const eslintConfig = defineConfig([
     ".next/**",
     ".claude/**",
     ".playwright-mcp/**",
-    "seed-*.js",
+    "scripts/seed-*.js",
     "node_modules/**",
     "out/**",
     "build/**",
