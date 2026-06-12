@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd 定时任务模板:每天 03:30(本机时间)跑一次备份。
+  安装:
+    1) 改下面的 <PATH-TO-REPO> 为本仓库绝对路径
+    2) cp scripts/com.silxine.backup.plist ~/Library/LaunchAgents/
+    3) launchctl load ~/Library/LaunchAgents/com.silxine.backup.plist
+    4) 立刻试跑一次:launchctl start com.silxine.backup
+  卸载:launchctl unload ~/Library/LaunchAgents/com.silxine.backup.plist
+-->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.silxine.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string><PATH-TO-REPO>/scripts/backup-db.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/silxine-backup.out</string>
+  <key>StandardErrorPath</key><string>/tmp/silxine-backup.err</string>
+</dict></plist>
