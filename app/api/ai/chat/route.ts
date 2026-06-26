@@ -158,6 +158,16 @@ export async function POST(req: Request) {
       rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     }
 
+    // 上游 200 但内容为空（如 v4-pro 推理 token 吃满 max_tokens、completion 被截断）：
+    // 没有任何可用结果，与 !res.ok 分支一致退款，避免白扣费。
+    if (!rawText.trim()) {
+      await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手空回复退款');
+      return NextResponse.json({
+        reply: '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
+        actions: {},
+      });
+    }
+
     // 本地关键词兜底（lite 模型经常不填 enum 字段）
     const kw = (re: RegExp) => re.test(message);
     const localBodyType: 'slim' | 'standard' | 'curvy' | null =
@@ -214,9 +224,17 @@ export async function POST(req: Request) {
         });
       }
     } catch {
-      // JSON 解析失败，返回纯文本
+      // 有 { } 但 JSON 非法（截断/未加引号的 enum/尾逗号）：结构化提取失败，
+      // 与其它失败路径一致退款，不让用户为没解析出参数的调用买单。
+      await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 助手解析失败退款');
+      return NextResponse.json({
+        reply: rawText.slice(0, 200) || '我理解了你的需求，请在下方手动设置参数后生成。（已自动退款）',
+        actions: {},
+      });
     }
 
+    // 走到这里说明 rawText 非空但没有 { }，即模型回了纯文本答复（如"旗袍建议用纤细体型"）——
+    // 这是有价值的回答，照常计费。
     return NextResponse.json({
       reply: rawText.slice(0, 200) || '收到！请继续操作。',
       actions: {},

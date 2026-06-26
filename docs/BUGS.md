@@ -44,6 +44,23 @@
 
 ## 二、已修复归档
 
+### 2026-06-26(Gemini 超时尾巴 + 多代理代码审计 11 项小 bug）
+- **Gemini「响应 JSON 解析失败」尾巴**:`lib/image-backends.ts` 连上后读 body(`await response.text()`)被同一超时 signal abort,旧代码当成「JSON 解析失败」且不重试。修复:body 读取单独 try——Gemini 识别为超时并重试一次,GPT 如实报超时(不重试,策略一致);GPT/Gemini 解析失败文案统一脱敏。
+- **多代理审计**(9 区并行审查 + 对抗式验证,36 候选→确认 12,修 11、暂缓 1):
+  1. [medium] `auth/login`:IP 限流用 `rateLimit`(连成功登录也计数)且成功不重置 → 共享出口 IP(NAT/CGNAT)下 10 次正常登录就把整段 IP 锁死。改为 `isRateLimited` 只查 + 仅失败 `bumpRateLimit`(与用户名限流一致)。
+  2. [low] `ai/chat`:DeepSeek/Gemini 返回 200 但 content 为空时照扣费不退款 → 加空回复退款守卫。
+  3. [low] `ai/chat`:有 `{}` 但 JSON 非法(截断/未引号 enum/尾逗号)落到空 catch、白扣费 → catch 内退款。
+  4. [low] `brand` PUT:`req.json()` 未包 try/catch,坏体抛 500(应 400);非数组 colorPalette 入库污染 → 加解析守卫 + 丢弃非法 colorPalette。
+  5. [medium] `generate/stream`:选「自定义尺寸」却缺/非法宽高时静默回退占位 3:4,横版被当竖图且无报错 → 缺合法宽高直接 400。
+  6. [medium] `generate/stream`:出图成功但客户端断开时,既记一条 success 又记一条 disconnect 失败 → 合并为单条(按是否交付定 success),产品图与场景图两分支都改。
+  7. [low] `app/page` Step3 生成按钮:余额不足且参数不全时被 disable,充值入口点不动 → 仅「余额够但参数不全」才禁用。
+  8. [low] `app/page`:AI 触发的快速生成跳过余额校验,余额不足也建注定失败的任务 → 与可见按钮一致,余额不足转充值弹窗。
+  9. [medium] `task/[id]` 单图重做:`handleStartGeneration` 因 startLock/abort 提前 return 时,旧图已被降级为 backup → 永久丢图。`handleRegenerate` 守卫补 startLock/abortController 检查。
+  10. [medium] `image-library`:去重指纹只取 base64 前 100 字符,同源/同模板图被误判重复静默丢弃 → 改 体积+尺寸+长度+尾 64 字符 组合指纹。
+  11. [medium] `image-compressor`:<200KB 跳过压缩时不缩放,高压缩比的超大像素原图原分辨率流向下游 → 像素超 MAX_DIMENSION 仍走缩放路径。
+- **暂缓(非正确性 bug,纯效率)**:客户端断开时未取消正在进行的上游生成调用(整张跑完才退款,省不下上游 token)。需把 `req.signal` 透传进 image-backends 的 fetch(`AbortSignal.any`),改动较大,后续单独做。
+- 验证:`tsc` 通过、`eslint` 0 error;API 层 10 项断言全过(brand 坏体→400、自定义尺寸缺宽高→400、登录限流重构后正常登录/错密码行为不变)。
+
 ### 2026-06-26(GPT Image 2 一直失败:根因 = 模型不在该令牌计划内)
 - **症状**:GPT Image 2 生图持续失败——线上报「网络连接失败(超时 180s)已自动退款」,用客户给的 GPT 令牌本地复现则是秒级「OpenAI API 失败 (503):...no available channels for model **gpt-image-2-all**...」。
 - **根因(实测确认)**:无独立令牌时 `lib/image-backends.ts` 默认调 **`gpt-image-2-all`**;但客户 GPT 令牌(apiyi `image2Enterprise` 计划)`GET /v1/models` 只暴露 `gpt-image-1 / gpt-image-1-mini / gpt-image-1.5 / **gpt-image-2**`,**根本没有 `-all` 变体** → apiyi 直接 503「该计费模式下此模型无可用通道」。同款 3 图请求换成 `gpt-image-2` 立即 200 出图(75-120s)。(对照:我本地另一把主令牌 `sk-ACN…` 能跑 `-all`,所以代码一直"看起来没问题",问题只在换了这把只支持 `gpt-image-2` 的令牌时暴露。)

@@ -317,7 +317,7 @@ export default function HomePage() {
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
         }}
-        onTriggerGenerate={() => { if (productImages.length > 0) handleQuickGenerate(); }}
+        onTriggerGenerate={() => { if (productImages.length > 0) { if (isQuickBalanceSufficient) handleQuickGenerate(); else setShowRechargeModal(true); } }}
       />
 
       {/* ═══ 移动端 AI 底栏（hidden on desktop） ═══ */}
@@ -331,7 +331,7 @@ export default function HomePage() {
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
         }}
-        onTriggerGenerate={() => { if (productImages.length > 0) handleQuickGenerate(); }}
+        onTriggerGenerate={() => { if (productImages.length > 0) { if (isQuickBalanceSufficient) handleQuickGenerate(); else setShowRechargeModal(true); } }}
       />
 
       {/* 桌面端：主内容向右偏移以避让左侧 AI 边栏（72 * 4 = 288px）。
@@ -913,7 +913,9 @@ export default function HomePage() {
                 {/* Step 3 的自定义生成按钮 */}
                 <button
                   onClick={isBalanceSufficient ? () => handleGenerate() : () => setShowRechargeModal(true)}
-                  disabled={isGenerating || !currentUser || !canGenerate}
+                  /* 余额不足时不要 disable —— 否则用户连充值入口都点不动。
+                     仅在「余额够但参数不全」时禁用（此时无处可去）。 */
+                  disabled={isGenerating || !currentUser || (isBalanceSufficient && !canGenerate)}
                   className={`w-full transition-all duration-300 ${
                     isBalanceSufficient
                       ? 'btn-primary'

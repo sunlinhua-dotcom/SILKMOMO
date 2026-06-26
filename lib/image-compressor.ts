@@ -51,6 +51,12 @@ export async function compressImage(file: File): Promise<CompressedImage> {
         const dataUrl = e.target?.result as string;
         const img = new Image();
         img.onload = () => {
+          // 字节小不代表像素小：高压缩比的原图可能只有几十 KB 却是 4000px+，
+          // 直接放行会让超大分辨率原图流入下游(上传/生成)。像素超限时仍走缩放路径。
+          if (Math.max(img.width, img.height) > MAX_DIMENSION) {
+            compressImageLegacy(file).then(resolve).catch(reject);
+            return;
+          }
           resolve({
             dataUrl,
             base64: dataUrl.split(',')[1],
