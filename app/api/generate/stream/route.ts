@@ -163,6 +163,15 @@ export async function POST(req: NextRequest) {
       ? sizeToAspectRatio(customWidth, customHeight)
       : undefined;
 
+  // 选了「自定义尺寸」却没给合法宽高：旧逻辑会静默回退到占位 3:4，
+  // 用户选的横版/方版自定义尺寸被当竖图生成且无任何报错。直接拦下。
+  const wantsCustom =
+    (moduleType === 'product' && outputSize === 'custom') ||
+    (moduleType === 'scene' && sceneOutputSize === 'custom');
+  if (wantsCustom && !customAspectRatio) {
+    return new Response(JSON.stringify({ error: '自定义尺寸的宽高非法（需为大于 0 的数值）' }), { status: 400 });
+  }
+
   if (moduleType === 'product' && selectedShotIndexes) {
     const valid = Array.isArray(selectedShotIndexes)
       && selectedShotIndexes.length > 0
@@ -356,7 +365,10 @@ export async function POST(req: NextRequest) {
             // 用后端返回的真实模型名归因（独立令牌时 GPT 可能是 gpt-image-2 而非 gpt-image-2-all）
             const resultApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
 
-            // 持久化生成记录到 Postgres（无论成败）
+            // 持久化生成记录到 Postgres（无论成败）—— 只记一条，反映最终交付结果。
+            // 出图成功但客户端已断开属于「没交付」，记为失败（disconnect），否则同一镜次会
+            // 既记一条 success 又记一条 disconnect 失败，污染成功率统计。
+            const deliveredButDisconnected = result.success && !!result.data && clientClosed;
             recordGeneration({
               userId: auth.userId,
               taskId,
@@ -368,22 +380,18 @@ export async function POST(req: NextRequest) {
               skinTone,
               aspectRatio,
               apiModel: resultApiModel,
-              success: result.success,
+              success: result.success && !deliveredButDisconnected,
               apiLatencyMs: shotLatency,
-              errorMessage: result.success ? undefined : result.error,
+              errorMessage: deliveredButDisconnected
+                ? 'client disconnected before delivery'
+                : (result.success ? undefined : result.error),
             }).catch(err => console.error('[recordGeneration] 失败:', err));
 
             if (result.success && result.data) {
               // 关键：生成成功但客户端已断开 → push 会被吞，IndexedDB 也写不进去 → 用户付了钱拿不到图。
-              // 这里主动退款 + 记一笔 disconnect 失败，避免静默丢钱。
+              // 主动退款（记录已在上面记为 disconnect 失败，这里不再重复记）。
               if (clientClosed) {
                 await refundBalance(auth.userId, PRICING.pricePerCallFen, `生成镜次 #${shot.index} 客户端断开退款`, taskId);
-                recordGeneration({
-                  userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
-                  promptText: prompt, modelId, bodyType, skinTone, aspectRatio, apiModel: resultApiModel,
-                  success: false, apiLatencyMs: shotLatency,
-                  errorMessage: 'client disconnected before delivery',
-                }).catch(err => console.error('[recordGeneration]', err));
                 failedCount++;
                 break;
               }
@@ -552,7 +560,8 @@ export async function POST(req: NextRequest) {
           }
           const sceneApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
 
-          // 持久化生成记录到 Postgres
+          // 持久化生成记录到 Postgres —— 只记一条，反映最终交付结果（理由同产品图分支）
+          const sceneDeliveredButDisconnected = result.success && !!result.data && clientClosed;
           recordGeneration({
             userId: auth.userId,
             taskId,
@@ -563,21 +572,17 @@ export async function POST(req: NextRequest) {
             skinTone,
             aspectRatio,
             apiModel: sceneApiModel,
-            success: result.success,
+            success: result.success && !sceneDeliveredButDisconnected,
             apiLatencyMs: sceneShotLatency,
-            errorMessage: result.success ? undefined : result.error,
+            errorMessage: sceneDeliveredButDisconnected
+              ? 'client disconnected before delivery'
+              : (result.success ? undefined : result.error),
           }).catch(err => console.error('[recordGeneration] 失败:', err));
 
           if (result.success && result.data) {
-            // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款。
+            // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款（记录已在上面记为 disconnect 失败）。
             if (clientClosed) {
               await refundBalance(auth.userId, PRICING.pricePerCallFen, '场景图客户端断开退款', taskId);
-              recordGeneration({
-                userId: auth.userId, taskId, module: 'scene',
-                promptText: prompt, modelId, bodyType, skinTone, aspectRatio, apiModel: sceneApiModel,
-                success: false, apiLatencyMs: sceneShotLatency,
-                errorMessage: 'client disconnected before delivery',
-              }).catch(err => console.error('[recordGeneration]', err));
               failedCount = 1;
             } else {
               successCount = 1;

@@ -95,9 +95,12 @@ export async function addToLibrary(
       category,
     }));
 
-    // 去重（按 base64 前 100 字符判断）
-    const existingFingerprints = new Set(existing.map(e => e.base64.slice(0, 100)));
-    const uniqueNew = newEntries.filter(n => !existingFingerprints.has(n.base64.slice(0, 100)));
+    // 去重指纹：只取 base64 前 100 字符会把同源/同模板图片(头部相同)误判为重复而静默丢弃。
+    // 改用 体积 + 像素尺寸 + 长度 + 尾部 64 字符 组合，区分度足够且无需哈希全量。
+    const fp = (e: { size: number; width: number; height: number; base64: string }) =>
+      `${e.size}_${e.width}x${e.height}_${e.base64.length}_${e.base64.slice(-64)}`;
+    const existingFingerprints = new Set(existing.map(fp));
+    const uniqueNew = newEntries.filter(n => !existingFingerprints.has(fp(n)));
 
     if (uniqueNew.length > 0) {
       await db.libraryImages.bulkAdd(uniqueNew);

@@ -68,6 +68,7 @@ const MAX_RETRIES = 1;
 
 // Gemini 上游正常 ~20-35s/张。
 const GEMINI_TIMEOUT_MS = 120_000;
+const GEMINI_TIMEOUT_SEC = Math.round(GEMINI_TIMEOUT_MS / 1000);
 // GPT(gpt-image) 上游慢且抖动大：150-235s/张属正常速度（见 docs/BUGS.md）。
 // 旧值 180s 卡在「正常区间」中段，令牌偏慢或上游拥塞时正常调用也会被中途 abort →
 // 报「超时已退款」，且超时还会自动重试再等一轮，用户实际要等 ~360s 才看到失败。
@@ -133,7 +134,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
       console.log(`[gemini] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithGemini(input, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? '（超时 120s）' : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${GEMINI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
   }
 
   if (!response.ok) {
@@ -145,11 +146,26 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
     return { success: false, error: `Gemini API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'gemini' };
   }
 
+  // 读取响应体单独 try：连上后出图慢、读 body 时被同一个超时 signal abort，
+  // 旧代码会把它当成「响应 JSON 解析失败」且不重试。这里按真实成因——超时——处理并重试一次。
+  let rawText: string;
+  try {
+    rawText = await response.text();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '读取响应失败';
+    const isTimeout = /abort|timeout/i.test(msg);
+    if (isTimeout && retryCount < MAX_RETRIES) {
+      console.log(`[gemini] 读取响应超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
+      return generateWithGemini(input, retryCount + 1);
+    }
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${GEMINI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
+  }
+
   let data: Record<string, unknown>;
   try {
-    data = JSON.parse(await response.text());
+    data = JSON.parse(rawText);
   } catch (err) {
-    return { success: false, error: `响应 JSON 解析失败: ${err instanceof Error ? err.message : ''}`, backend: 'gemini' };
+    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'gemini' };
   }
 
   const candidates = data?.candidates as Array<Record<string, unknown>> | undefined;
@@ -295,11 +311,22 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
     return { success: false, error: `OpenAI API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'openai' };
   }
 
+  // 读取响应体单独 try：读 body 时被超时 abort 不应误报成「JSON 解析失败」。
+  // GPT 通道超时不自动重试（理由同 fetch catch），如实报超时即可。
+  let rawText: string;
+  try {
+    rawText = await response.text();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '读取响应失败';
+    const isTimeout = /abort|timeout/i.test(msg);
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${OPENAI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+  }
+
   let data: Record<string, unknown>;
   try {
-    data = JSON.parse(await response.text());
+    data = JSON.parse(rawText);
   } catch (err) {
-    return { success: false, error: `响应 JSON 解析失败: ${err instanceof Error ? err.message : ''}`, backend: 'openai' };
+    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
   }
 
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;

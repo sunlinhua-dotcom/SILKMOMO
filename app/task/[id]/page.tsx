@@ -670,7 +670,9 @@ export default function TaskDetailPage() {
   };
 
   const handleRegenerate = async (imageId: number, customPrompt?: string) => {
-    if (!project || generating || regenLockRef.current) return;
+    // 也要挡住 startLock / abortController 窗口：否则 handleStartGeneration 会因这些锁提前 return，
+    // 而旧图此前已被 update 成 result_backup —— 重做没发生、旧图却被永久降级，等于丢图。
+    if (!project || generating || regenLockRef.current || startLockRef.current || abortControllerRef.current) return;
     regenLockRef.current = true;
 
     try {
