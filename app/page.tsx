@@ -312,7 +312,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) selectBodyType(actions.bodyType);
           if (actions.skinTone) selectSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); }
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); setStep(3); }
           if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
@@ -326,7 +326,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) selectBodyType(actions.bodyType);
           if (actions.skinTone) selectSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); }
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); setStep(3); }
           if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
@@ -506,7 +506,7 @@ export default function HomePage() {
                   </button>
 
                   <button
-                    onClick={() => { selectModule('scene'); setShowAdvanced(true); }}
+                    onClick={() => { selectModule('scene'); setShowAdvanced(true); setStep(3); }}
                     className={`
                       relative flex flex-col items-start gap-2 sm:gap-4 p-4 sm:p-6 rounded-2xl sm:rounded-[2rem] transition-[background-color,border-color,box-shadow] duration-500 overflow-hidden
                       ${activeModule === 'scene'
@@ -528,11 +528,13 @@ export default function HomePage() {
                   </button>
                 </div>
 
-                {/* 模特快选（一键切换人种 / 性别） */}
-                <ModelQuickPicker
-                  selectedModel={selectedModelId}
-                  onSelect={selectModelId}
-                />
+                {/* 模特快选（一键切换人种 / 性别）— 展开高级后用 Step 3 的完整 ModelSelector，避免重复 */}
+                {!showAdvanced && (
+                  <ModelQuickPicker
+                    selectedModel={selectedModelId}
+                    onSelect={selectModelId}
+                  />
+                )}
 
                 {/* 体型 + 肤色（并排紧凑） */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -546,15 +548,17 @@ export default function HomePage() {
                   />
                 </div>
 
-                {/* 生图引擎快选 */}
-                <EngineSelector
-                  selected={selectedEngine}
-                  onSelect={selectEngine}
-                  variant="compact"
-                />
+                {/* 生图引擎快选 — 展开高级后用 Step 3 的完整 EngineSelector，避免重复 */}
+                {!showAdvanced && (
+                  <EngineSelector
+                    selected={selectedEngine}
+                    onSelect={selectEngine}
+                    variant="compact"
+                  />
+                )}
 
-                {/* 快速生成按钮 — 产品图模式 */}
-                {activeModule === 'product' && (
+                {/* 快速生成按钮 — 产品图模式；展开高级后改用 Step 3 底部的「生成」按钮（按自定义镜次） */}
+                {activeModule === 'product' && !showAdvanced && (
                   <button
                     onClick={isQuickBalanceSufficient ? handleQuickGenerate : () => setShowRechargeModal(true)}
                     disabled={isGenerating || productImages.length < 1}
@@ -588,15 +592,22 @@ export default function HomePage() {
                   </button>
                 )}
 
-                {/* 展开自定义选项 */}
-                <button
-                  onClick={() => { setStep(3); setShowAdvanced(true); }}
-                  className="flex items-center justify-center gap-2 w-full py-2.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
-                >
-                  <Settings2 className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>自定义镜次、模特参考图、配件和更多选项…</span>
-                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${step === 3 ? 'rotate-180' : ''}`} aria-hidden="true" />
-                </button>
+                {/* 展开 / 收起 高级选项（可来回切换）。
+                    仅产品图模式可折叠：场景图必须用 Step 3 里的「场景参考图」上传，强制展开、不显示折叠入口。 */}
+                {activeModule === 'product' && (
+                  <button
+                    onClick={() => {
+                      if (showAdvanced) { setShowAdvanced(false); setStep(2); }
+                      else { setShowAdvanced(true); setStep(3); }
+                    }}
+                    aria-expanded={showAdvanced}
+                    className="flex items-center justify-center gap-2 w-full py-2.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors"
+                  >
+                    <Settings2 className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>{showAdvanced ? '收起高级选项' : '自定义镜次、模特参考图、配件和更多选项…'}</span>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} aria-hidden="true" />
+                  </button>
+                )}
               </div>
             )}
 
