@@ -23,7 +23,11 @@ const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
 export const fetchCache = 'force-no-store';
-export const maxDuration = 300; // 最长 5 分钟
+// GPT(gpt-image) 单张正常 150-235s（见 lib/image-backends OPENAI_TIMEOUT_MS=280s），
+// 加上生成前的服装分析，单张就可能逼近 5 分钟；300s 会把正常的 GPT 单张/双张批次拦腰截断。
+// 放宽到 800s 覆盖「分析 + 1-2 张 GPT」这一 GPT 的典型用法；更大批量仍建议用 Gemini。
+// （Zeabur 自托管 next start 不强制 maxDuration，此处主要表意 + 兼容会强制的平台。）
+export const maxDuration = 800;
 
 // ═══════════════════════════════════════
 // 类型定义

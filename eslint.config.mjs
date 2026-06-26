@@ -16,6 +16,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // 本地素材库（不入库），含临时 E2E 脚本，非项目源码，无需 lint
+    "refs/**",
   ]),
 ]);
 
