@@ -35,13 +35,27 @@
 6. 控制台第三方脚本加载失败、`sf_private_access_tokens` 401、privacy banner `Uncaught (in promise)`,需在真实用户环境复核。
 
 ### 其它
-- GPT 图像通道(apiyi `gpt-image-2` / `gpt-image-2-all`)单张 150-235s 属上游速度,非故障;批量(5 张)可能撞 SSE 路由 300s 上限,大批量建议用 Gemini,或后续给 GPT 通道提高超时/并发。
+- **线上必须配 `OPENAI_IMAGE_API_KEY` 才能用 GPT 通道**(否则 GPT 全失败,见已修复归档 06-26):代码无独立令牌时默认调 `gpt-image-2-all`,而客户提供的 GPT 令牌(apiyi `image2Enterprise` 计划)`/v1/models` 只暴露 `gpt-image-1 / gpt-image-1-mini / gpt-image-1.5 / gpt-image-2`,**没有 `gpt-image-2-all`** → 503「no available channels」。把该令牌设为 `OPENAI_IMAGE_API_KEY`,代码会自动切到它支持的 `gpt-image-2`。本地已实测 `gpt-image-2` 出图正常(75-120s/张)。**改 Zeabur 环境变量后必须重启/重新部署才生效。**
+- GPT 图像通道单张 75-235s 属上游速度,非故障;**多张批量在单个 SSE 请求里串行跑,N 张 ≈ N×~120-200s**,大批量建议用 Gemini(路由预算已放宽到 800s,够「分析 + 1-2 张 GPT」)。
 - 线上测试残留可清理:任务 task 1-4(2026-06-12 端到端测试产生)、探测账号 `probe-test-0611`(余额 0)及其一条"余额不足"失败记录。
 - Zeabur 环境变量遗留项 `PASSWORD`、`NEXT_PUBLIC_API_URL` 代码均未读取,可删可留。
 
 ---
 
 ## 二、已修复归档
+
+### 2026-06-26(GPT Image 2 一直失败:根因 = 模型不在该令牌计划内)
+- **症状**:GPT Image 2 生图持续失败——线上报「网络连接失败(超时 180s)已自动退款」,用客户给的 GPT 令牌本地复现则是秒级「OpenAI API 失败 (503):...no available channels for model **gpt-image-2-all**...」。
+- **根因(实测确认)**:无独立令牌时 `lib/image-backends.ts` 默认调 **`gpt-image-2-all`**;但客户 GPT 令牌(apiyi `image2Enterprise` 计划)`GET /v1/models` 只暴露 `gpt-image-1 / gpt-image-1-mini / gpt-image-1.5 / **gpt-image-2**`,**根本没有 `-all` 变体** → apiyi 直接 503「该计费模式下此模型无可用通道」。同款 3 图请求换成 `gpt-image-2` 立即 200 出图(75-120s)。(对照:我本地另一把主令牌 `sk-ACN…` 能跑 `-all`,所以代码一直"看起来没问题",问题只在换了这把只支持 `gpt-image-2` 的令牌时暴露。)
+- **修法**:① 主修——把该令牌设为 **`OPENAI_IMAGE_API_KEY`**,`image-backends` 检测到独立令牌即自动切模型为 `gpt-image-2`(该计划支持的),与生图主令牌解耦;② 顺带加固 GPT 超时 180s→**280s**(覆盖上游正常上限 235s,抽成 `OPENAI_TIMEOUT_MS`)、**超时不再自动重试**(只重试非超时的瞬时网络错误)、SSE 路由 `maxDuration` 300s→**800s**;③ 任务页给「失败镜次」加 **「重试这张 / 重新生成这张」** 单张重生按钮(复用既有 `handleStartGeneration([shotIndex])`,部分失败/整体失败两处错误区都加)。
+- **验证**:本地配 `OPENAI_IMAGE_API_KEY` 后经 `/api/generate/stream` 真实出 GPT 图成功(`status→status→result→done` 109s,扣 65 分,归因 **`gpt-image-2`**);临时强制回 `gpt-image-2-all` 在 App 内复现了同样的 503,并确认失败镜次旁出现「重试这张」按钮;`tsc` 通过、`eslint` 0 error。
+- **仍需线上动作**:在 Zeabur 给 silkmomo 服务加环境变量 `OPENAI_IMAGE_API_KEY=<该 GPT 令牌>`(**不要**再设 `OPENAI_IMAGE_MODEL`,留空让代码自动选 `gpt-image-2`),**重启/重新部署**生效;并把本次代码改动 push 到 `main` 触发部署。生成本身串行(单 SSE 流 + 防双击锁),无需改并行逻辑。
+
+### 2026-06-24(全流程端到端回归 + 修复)
+- 全流程浏览器/API 回归:认证、品牌、计费、管理后台、AI 分析/聊天、生图(Gemini 产品+场景、GPT 产品)、反馈、记录全部跑通;含真实出图(本地令牌 Gemini 26-53s/张,扣费精确 65 分/张,失败/断开自动退款,GPT 通道归因 `gpt-image-2-all`)。53 项 API 断言 + 完整 UI 生图(上传→分析→选镜次→任务页 SSE→画廊→续生成)。
+- 页脚年份不一致:`app/tasks/page.tsx` 页脚为「© 2025」,而首页 `app/page.tsx`、任务页 `app/task/[id]/page.tsx` 均为「© 2026」。修复:统一为 2026。
+- `refs/`(本地素材库,gitignore)未被 eslint 忽略,临时 E2E 脚本产生无谓告警。修复:`eslint.config.mjs` globalIgnores 增加 `refs/**`。lint 现仅剩既有 `<img>` LCP 告警(P2-5),0 error;`tsc --noEmit` 通过。
+- 复核非 bug:`/logo-preview` 首屏截图疑似空白,实为 SVG 加载时序(`naturalWidth` 此刻为 0),稍后渲染正常,golden-S logo 与字标均正确;`/_next/image` 对 SVG 返回 400 属 Next 默认行为,next/image 直出原图不受影响。
 
 ### 2026-06-12(UI/UX P1 快修)
 - 生成预估时间与引擎无关:统一按 15s/张估算,GPT 实测 150-235s/张,出现"预计剩余 17 秒"实跑 4 分钟。修复:任务页预估与"响应较慢"阈值按引擎区分(openai 180s/张、阈值 300s),EngineSelector 两种形态都标注「约 30 秒/张 / 约 3 分钟/张」。

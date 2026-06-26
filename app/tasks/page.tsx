@@ -59,7 +59,7 @@ export default function TasksPage() {
               SILXINE
             </p>
             <p className="text-[9px] sm:text-[10px] tracking-widest uppercase text-[var(--color-text-muted)]">
-              © 2025 · Haute Couture, AI-Powered
+              © 2026 · Haute Couture, AI-Powered
             </p>
           </div>
         </div>

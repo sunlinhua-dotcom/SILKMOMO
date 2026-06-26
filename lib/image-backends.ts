@@ -66,6 +66,15 @@ const OPENAI_MODEL =
 
 const MAX_RETRIES = 1;
 
+// Gemini 上游正常 ~20-35s/张。
+const GEMINI_TIMEOUT_MS = 120_000;
+// GPT(gpt-image) 上游慢且抖动大：150-235s/张属正常速度（见 docs/BUGS.md）。
+// 旧值 180s 卡在「正常区间」中段，令牌偏慢或上游拥塞时正常调用也会被中途 abort →
+// 报「超时已退款」，且超时还会自动重试再等一轮，用户实际要等 ~360s 才看到失败。
+// 提到 280s（覆盖正常上限 + 余量），并停止对「超时」的自动重试（见下方 catch）。
+const OPENAI_TIMEOUT_MS = 280_000;
+const OPENAI_TIMEOUT_SEC = Math.round(OPENAI_TIMEOUT_MS / 1000);
+
 // 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
 // TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）。
 // 两个令牌都要脱敏。
@@ -107,7 +116,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       cache: 'no-store',
       body: JSON.stringify({
         contents: [{ parts }],
@@ -261,17 +270,20 @@ ${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
       method: 'POST',
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: formData,
-      signal: AbortSignal.timeout(180_000), // gpt-image 比 Gemini 慢，给更长超时
+      signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS), // gpt-image 比 Gemini 慢得多，给足超时
       cache: 'no-store',
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : '网络连接失败';
     const isTimeout = /abort|timeout/i.test(msg);
-    if (isTimeout && retryCount < MAX_RETRIES) {
-      console.log(`[openai] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
+    // 超时不重试：已经等满一整个超时窗口，上游多半是拥塞/令牌偏慢，
+    // 再等一轮只会把用户的等待时间翻倍且大概率还是失败（让用户用「重试」按钮自行再试）。
+    // 仅对非超时的网络错误（如连接重置/拒绝，通常是瞬时抖动）重试一次。
+    if (!isTimeout && retryCount < MAX_RETRIES) {
+      console.log(`[openai] 网络错误重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithOpenAI(input, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? '（超时 180s）' : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${OPENAI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
   }
 
   if (!response.ok) {

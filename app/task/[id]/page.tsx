@@ -1160,17 +1160,28 @@ export default function TaskDetailPage() {
               </div>
             )}
 
-            {/* 错误汇总（非 fatal，继续生成中的部分失败） */}
+            {/* 错误汇总（非 fatal，继续生成中的部分失败）— 每张可单独重试 */}
             {generationErrors.filter(e => !e.fatal).length > 0 && (
               <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertTriangle className="w-4 h-4 text-amber-500" />
-                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（生成继续）</p>
+                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（可单独重试）</p>
                 </div>
                 {generationErrors.filter(e => !e.fatal).map((e, i) => (
-                  <p key={i} className="text-xs text-amber-600 font-mono mt-1">
-                    镜次 #{e.shotIndex}: {e.message}
-                  </p>
+                  <div key={i} className="flex items-center justify-between gap-3 mt-1.5">
+                    <p className="text-xs text-amber-600 font-mono break-all">
+                      镜次 #{e.shotIndex}: {e.message}
+                    </p>
+                    {e.shotIndex > 0 && (
+                      <button
+                        onClick={() => handleStartGeneration([e.shotIndex])}
+                        disabled={generating}
+                        className="shrink-0 text-xs px-3 py-1 rounded-full border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-40 transition-colors"
+                      >
+                        重新生成这张
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -1463,15 +1474,26 @@ export default function TaskDetailPage() {
               </p>
             )}
 
-            {/* SSE 过程中的详细错误列表 */}
+            {/* SSE 过程中的详细错误列表 — 产品镜次可单张重试 */}
             {generationErrors.length > 0 && (
               <div className="max-w-lg mx-auto mb-6">
                 <div className="p-4 bg-[var(--color-background)] rounded-2xl text-left">
                   <p className="text-xs font-medium text-[var(--color-text-muted)] mb-2">错误详情</p>
                   {generationErrors.map((e, i) => (
-                    <p key={i} className="text-xs text-red-600 font-mono mt-1">
-                      {e.shotIndex >= 0 ? `镜次 #${e.shotIndex}: ` : ''}{e.message}
-                    </p>
+                    <div key={i} className="flex items-center justify-between gap-3 mt-1.5">
+                      <p className="text-xs text-red-600 font-mono break-all">
+                        {e.shotIndex >= 0 ? `镜次 #${e.shotIndex}: ` : ''}{e.message}
+                      </p>
+                      {e.shotIndex > 0 && (
+                        <button
+                          onClick={() => handleStartGeneration([e.shotIndex])}
+                          disabled={generating}
+                          className="shrink-0 text-xs px-3 py-1 rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] disabled:opacity-40 transition-colors"
+                        >
+                          重试这张
+                        </button>
+                      )}
+                    </div>
                   ))}
                 </div>
               </div>
