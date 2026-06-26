@@ -832,9 +832,21 @@ export default function TaskDetailPage() {
     return '场景图';
   })();
 
-  const progressBarWidth = generationPhase === 'analyzing'
-    ? '8%'
-    : `${Math.max(8, Math.min(100, (liveImages.length / Math.max(progress.total, 1)) * 100))}%`;
+  // 进度条宽度：
+  // - analyzing：固定 8% 起步
+  // - 收尾窗口（图都到齐、等 done 事件）：100%
+  // - 生成中：取「已完成镜次占比」与「按已耗时/预计时间的估算占比」的较大值。
+  //   单张长任务（GPT 一张 ~2-3 分钟）上游不返回中途进度，靠 timeFrac 让进度条
+  //   随秒表匀速往前爬，不至于卡在起点显得僵住；估算值封顶 95%，真正出图/收尾才到 100%。
+  const progressBarWidth = (() => {
+    if (generationPhase === 'analyzing') return '8%';
+    if (isFinishingUp) return '100%';
+    const shotFrac = liveImages.length / Math.max(progress.total, 1);
+    const denom = elapsedSeconds + secondsLeft;
+    const timeFrac = denom > 0 ? elapsedSeconds / denom : 0;
+    const frac = Math.min(0.95, Math.max(shotFrac, timeFrac));
+    return `${Math.max(8, frac * 100)}%`;
+  })();
 
   const currentEngineId: ImageEngine = project.engine === 'openai' ? 'openai' : 'gemini';
   const currentEngineName = ENGINES.find(e => e.id === currentEngineId)?.name ?? 'Gemini Flash Image';
