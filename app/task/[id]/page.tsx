@@ -1174,28 +1174,19 @@ export default function TaskDetailPage() {
               </div>
             )}
 
-            {/* 错误汇总（非 fatal，继续生成中的部分失败）— 每张可单独重试 */}
+            {/* 错误汇总（非 fatal，生成仍在继续）。这里只做信息展示——同一条 SSE 流还在跑，
+                无法中途单独重试某一张；失败镜次的单张重试在生成结束后用「补生成剩余」或失败态的
+                「重试这张」完成。 */}
             {generationErrors.filter(e => !e.fatal).length > 0 && (
               <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertTriangle className="w-4 h-4 text-amber-500" />
-                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（可单独重试）</p>
+                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（生成继续，稍后可补生成）</p>
                 </div>
                 {generationErrors.filter(e => !e.fatal).map((e, i) => (
-                  <div key={i} className="flex items-center justify-between gap-3 mt-1.5">
-                    <p className="text-xs text-amber-600 font-mono break-all">
-                      镜次 #{e.shotIndex}: {e.message}
-                    </p>
-                    {e.shotIndex > 0 && (
-                      <button
-                        onClick={() => handleStartGeneration([e.shotIndex])}
-                        disabled={generating}
-                        className="shrink-0 text-xs px-3 py-1 rounded-full border border-amber-300 text-amber-700 hover:bg-amber-100 disabled:opacity-40 transition-colors"
-                      >
-                        重新生成这张
-                      </button>
-                    )}
-                  </div>
+                  <p key={i} className="text-xs text-amber-600 font-mono mt-1 break-all">
+                    镜次 #{e.shotIndex}: {e.message}
+                  </p>
                 ))}
               </div>
             )}

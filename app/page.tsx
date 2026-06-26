@@ -148,9 +148,11 @@ export default function HomePage() {
     const prev = prevProductCountRef.current;
     prevProductCountRef.current = productImages.length;
     if (prev === 0 && productImages.length > 0 && step === 1) {
-      setStep(2);
+      // 场景图必须用 Step 3 的场景参考图上传框（且场景模式不显示折叠入口），
+      // 所以场景模式上传后直接推进到 Step 3，避免停在 Step 2 无处可去。
+      setStep(activeModule === 'scene' ? 3 : 2);
     }
-  }, [productImages.length, step]);
+  }, [productImages.length, step, activeModule]);
 
   const canGenerate = productImages.length >= 1 && productImages.length <= 3 && (
     activeModule === 'product' ? selectedShots.length > 0 : sceneRefImages.length > 0
@@ -312,7 +314,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) selectBodyType(actions.bodyType);
           if (actions.skinTone) selectSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); setStep(3); }
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); if (productImages.length > 0) setStep(3); }
           if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
@@ -326,7 +328,7 @@ export default function HomePage() {
         onActions={(actions) => {
           if (actions.bodyType) selectBodyType(actions.bodyType);
           if (actions.skinTone) selectSkinTone(actions.skinTone);
-          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); setStep(3); }
+          if (actions.module === 'scene') { selectModule('scene'); setShowAdvanced(true); if (productImages.length > 0) setStep(3); }
           if (actions.module === 'product') selectModule('product');
           if (actions.prompt) setCustomPrompt(prev => prev ? `${prev}, ${actions.prompt!}` : actions.prompt!);
           if (step < 2 && productImages.length > 0) setStep(2);
