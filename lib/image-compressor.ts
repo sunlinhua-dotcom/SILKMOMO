@@ -53,7 +53,9 @@ export async function compressImage(file: File): Promise<CompressedImage> {
         img.onload = () => {
           // 字节小不代表像素小：高压缩比的原图可能只有几十 KB 却是 4000px+，
           // 直接放行会让超大分辨率原图流入下游(上传/生成)。像素超限时仍走缩放路径。
-          if (Math.max(img.width, img.height) > MAX_DIMENSION) {
+          // 例外：GIF 走 canvas 会被拍平成静态首帧且 mimeType 被改写，动图丢失，
+          // 故大像素 GIF 仍原样放行（≥200KB 的 GIF 早已会被主路径拍平，属既有行为，不在此处理）。
+          if (file.type !== 'image/gif' && Math.max(img.width, img.height) > MAX_DIMENSION) {
             compressImageLegacy(file).then(resolve).catch(reject);
             return;
           }

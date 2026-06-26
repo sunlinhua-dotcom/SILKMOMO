@@ -60,6 +60,10 @@
   11. [medium] `image-compressor`:<200KB 跳过压缩时不缩放,高压缩比的超大像素原图原分辨率流向下游 → 像素超 MAX_DIMENSION 仍走缩放路径。
 - **暂缓(非正确性 bug,纯效率)**:客户端断开时未取消正在进行的上游生成调用(整张跑完才退款,省不下上游 token)。需把 `req.signal` 透传进 image-backends 的 fetch(`AbortSignal.any`),改动较大,后续单独做。
 - 验证:`tsc` 通过、`eslint` 0 error;API 层 10 项断言全过(brand 坏体→400、自定义尺寸缺宽高→400、登录限流重构后正常登录/错密码行为不变)。
+- **回归复审(多代理 review 本次 diff,8 候选确认 3 回归,全部已修)**:
+  1. [medium] `task/[id]` 失败镜次「重新生成这张」按钮误用 `disabled={generating}`,而该 amber 块整体只在 `generating` 时渲染 → 永远灰着、生成一结束就 unmount = 死按钮。修复:该块改回纯信息展示(同一条 SSE 流跑着本就无法中途单张重试);单张重试由生成结束后的「补生成剩余」与失败态「重试这张」(已验证可点)承担。
+  2. [low] `app/page` AI 场景动作无条件 `setStep(3)`,0 产品图时会提前渲染空的 Step2/3。修复:仅当已有产品图才 `setStep(3)`;上传完成的副作用按模式推进(场景→Step3、产品→Step2),保证场景流不卡死(已浏览器验证:切场景图→Step3+场景参考图上传框正常)。
+  3. [low] `image-compressor` <200KB 大像素 GIF 被新缩放守卫送进 canvas → 拍平成静态首帧且改写 mimeType。修复:守卫加 `file.type !== 'image/gif'` 例外,动图 GIF 原样放行。
 
 ### 2026-06-26(GPT Image 2 一直失败:根因 = 模型不在该令牌计划内)
 - **症状**:GPT Image 2 生图持续失败——线上报「网络连接失败(超时 180s)已自动退款」,用客户给的 GPT 令牌本地复现则是秒级「OpenAI API 失败 (503):...no available channels for model **gpt-image-2-all**...」。
