@@ -1366,8 +1366,12 @@ export default function TaskDetailPage() {
           </div>
         )}
 
-        {/* 试生成完成 → 生成剩余按钮 */}
-        {trialDone && !generating && images.length > 0 && images.length < getShotCount() && (
+        {/* 试生成完成 / 部分完成 → 生成剩余按钮。
+            用持久化的 project.status==='completed' 作主条件(trialDone 是内存态、刷新即丢,
+            否则 reload 一个"已完成但只出了部分镜次"的任务后,所有"继续生成剩余"入口全消失,
+            只剩会把已生成图降级重做的「调整参数」)。trialDone 作同会话兜底。 */}
+        {!generating && moduleType === 'product' && (project.status === 'completed' || trialDone)
+          && images.length > 0 && images.length < getShotCount() && (
           <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-accent)]/30 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium text-[var(--color-text)]">✅ 试生成完成 — 效果满意吗？</p>
@@ -1403,17 +1407,8 @@ export default function TaskDetailPage() {
               <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-sm text-amber-700 break-all">{errorMessage}</p>
-                    {moduleType === 'product' && images.length < getShotCount() && (
-                      <button
-                        onClick={handleGenerateRemaining}
-                        className="mt-2 text-xs font-medium text-amber-700 underline hover:text-amber-900"
-                      >
-                        补生成剩余 {getShotCount() - images.length} 张
-                      </button>
-                    )}
-                  </div>
+                  {/* 仅展示错误信息;"生成剩余"入口已由上方持久化条件的面板统一提供,此处不再重复按钮 */}
+                  <p className="text-sm text-amber-700 break-all flex-1">{errorMessage}</p>
                 </div>
               </div>
             )}
