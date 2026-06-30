@@ -44,6 +44,14 @@
 
 ## 二、已修复归档
 
+### 2026-06-30(同类排查:必需 UI 被瞬时状态门控的死胡同,共修 4 处）
+- 用多代理专项审计扫「必需 UI 被 step/showAdvanced/trialDone/errorMessage 等门控、某进入路径留下坏组合」的同类问题(7 候选确认 4):
+  1. [medium] 时光机回放**产品图**快照:恢复了 selectedShots 但没 `setShowAdvanced` → 镜次既不可见、「快速生成」又只用默认镜次,"按相同参数重做"落空。修复:回放带镜次的产品图快照时一并展开高级区并 `setStep(3)`(与场景按钮/AI/折叠开关一致)。已验证:回放 `[1,4]` 快照 → Step3 展开、镜次 1/4 选中、按钮「生成 2 张」。
+  2. [low] 步骤指示器点「3 生成」:只 `setStep(3)` 不展开高级 → step=3 但 advancedShown=false,Step3 不渲染,指示器高亮却无内容。修复:该分支一并 `setShowAdvanced(true)`。
+  3. [medium] 任务页「生成剩余」面板门控在内存态 `trialDone`(刷新即丢、DB 不存)→ reload 一个「已完成但只出了部分镜次」的任务后,所有续生成入口消失,只剩会降级重做的「调整参数」。修复:改用持久化的 `project.status==='completed' && images<getShotCount()` 作主条件(trialDone 作同会话兜底)。已验证:reload task5(1/5)后「生成剩余 4 张」正常出现。
+  4. [low] 同上连带:amber 错误块里的「补生成剩余」按钮与上面面板重复,且其门控 `errorMessage` 在取消/reload 后可能为空。修复:去掉重复按钮(续生成统一由 #3 面板提供),amber 块只留错误信息展示。reload 续生成入口由 #3 一并恢复。
+- 验证:`tsc` 通过、`eslint` 0 error、浏览器逐条验证、无 console 报错。
+
 ### 2026-06-30(场景图工作区整块消失 — 折叠改动的二次回归）
 - **症状**:用户进入场景图模式后,下方场景工作区(场景参考图上传框等)整块空白消失(只剩页脚)。
 - **根因**:场景图的必需控件(场景参考图等)都在 Step 3,渲染条件是 `step>=3 && showAdvanced`;而本轮「折叠」改动把展开/收起入口在场景模式下隐藏了。于是任何让 `showAdvanced` 停在 false 的进入路径——尤其**时光机「快速重做」回放场景快照**(`handleReplay` 只 `setStep(2)`、从不 `setShowAdvanced(true)`)——都会让场景模式既渲染不出 Step 3、又没有入口展开 = 工作区空白且无法恢复。

@@ -304,9 +304,15 @@ export default function HomePage() {
     if (snapshot.customPrompt) {
       setCustomPrompt(snapshot.customPrompt);
     }
-    // 跳到 Step 2
+    // 跳到对应步骤。产品图快照带自定义镜次时(saveSnapshot 总会写镜次),要展开高级区——
+    // 否则恢复的镜次既看不见、「快速生成」又只用默认镜次,"按相同参数重做"会落空。
+    // 场景图本就靠 advancedShown 恒展开。
+    const replayWantsAdvanced =
+      snapshot.module === 'scene' ||
+      (snapshot.module === 'product' && !!snapshot.selectedShots && snapshot.selectedShots.length > 0);
+    if (replayWantsAdvanced) setShowAdvanced(true);
     if (productImages.length > 0) {
-      setStep(2);
+      setStep(replayWantsAdvanced ? 3 : 2);
     }
     // 滚到顶部
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -391,7 +397,9 @@ export default function HomePage() {
                 onClick={() => {
                   if (s.num === 1) setStep(1);
                   else if (s.num === 2 && productImages.length > 0) setStep(2);
-                  else if (s.num === 3 && productImages.length > 0) setStep(3);
+                  // 点「3 生成」要同时展开高级区,否则 step=3 但 advancedShown=false 时
+                  // Step3 不渲染——指示器高亮"当前步"却没有对应内容(与场景按钮/折叠开关一致)
+                  else if (s.num === 3 && productImages.length > 0) { setShowAdvanced(true); setStep(3); }
                 }}
                 className={`
                   flex items-center gap-1.5 sm:gap-2 transition-all duration-500 tracking-widest uppercase
