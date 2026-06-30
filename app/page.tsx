@@ -158,6 +158,12 @@ export default function HomePage() {
     activeModule === 'product' ? selectedShots.length > 0 : sceneRefImages.length > 0
   );
 
+  // 场景图模式必须用 Step 3 里的「场景参考图」上传框,所以它的高级区是必需的、永远展开
+  // (且场景模式不显示折叠入口)。产品图模式才用 showAdvanced 控制折叠。
+  // 用这个派生值统一驱动「隐藏 Step2 重复控件」与「渲染 Step3」,避免某条进入场景模式的
+  // 路径(如时光机回放只 setStep 不 setShowAdvanced)导致场景工作区整块消失。
+  const advancedShown = showAdvanced || activeModule === 'scene';
+
   // ── 扣费计算与预警 ──
   // 注意：currentUser 未加载完前默认"余额不足"，避免在余额未知时让用户点击直接打到 /api/generate/stream
   const totalCostFen = activeModule === 'product' ? selectedShots.length * 65 : 65;
@@ -531,7 +537,7 @@ export default function HomePage() {
                 </div>
 
                 {/* 模特快选（一键切换人种 / 性别）— 展开高级后用 Step 3 的完整 ModelSelector，避免重复 */}
-                {!showAdvanced && (
+                {!advancedShown && (
                   <ModelQuickPicker
                     selectedModel={selectedModelId}
                     onSelect={selectModelId}
@@ -551,7 +557,7 @@ export default function HomePage() {
                 </div>
 
                 {/* 生图引擎快选 — 展开高级后用 Step 3 的完整 EngineSelector，避免重复 */}
-                {!showAdvanced && (
+                {!advancedShown && (
                   <EngineSelector
                     selected={selectedEngine}
                     onSelect={selectEngine}
@@ -613,8 +619,10 @@ export default function HomePage() {
               </div>
             )}
 
-            {/* ═══ STEP 3：高级自定义 ═══ */}
-            {step >= 3 && showAdvanced && (
+            {/* ═══ STEP 3：高级自定义 ═══
+                 场景图：上传后(step≥2)始终展开(场景参考图等必需控件都在这里);
+                 产品图：仅在用户点开折叠(showAdvanced)时展开。统一用 advancedShown 驱动。 */}
+            {step >= 2 && advancedShown && (
               <div className="animate-fade-in-up space-y-5 sm:space-y-10 pt-4 sm:pt-10 border-t border-[var(--color-border-light)]/50">
                 <div className="flex items-center justify-between mb-4 sm:mb-8">
                   <div className="flex items-center gap-2 sm:gap-4">
