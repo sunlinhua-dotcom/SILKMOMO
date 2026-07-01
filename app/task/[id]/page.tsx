@@ -329,6 +329,29 @@ export default function TaskDetailPage() {
 
       const productImgs = freshInputs.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
 
+      // ── 分块生成 ──
+      // GPT(openai)每张 ~3 分钟,5 张串在一个 SSE 请求里 ≈ 15 分钟,会撞路由预算/网关连接时长上限
+      // (表现为"第 5 张必失败")。产品图 + openai 时把镜次切成每块 ≤3 张的连续请求
+      // (每块 ≤ ~9 分钟,稳在预算内);首块产出的"有模特"图作为 anchor 回传给后续块,
+      // 让整组保持同一个模特身份。gemini(每张 ~25s)与场景图仍走单请求,行为不变。
+      const CHUNK_SIZE = 3;
+      const genChunks: number[][] =
+        (moduleType === 'product' && effectiveEngine === 'openai' && selectedShotIndexes.length > CHUNK_SIZE)
+          ? Array.from({ length: Math.ceil(selectedShotIndexes.length / CHUNK_SIZE) },
+              (_, i) => selectedShotIndexes.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE))
+          : [selectedShotIndexes];
+      let anchorForChunk: { data: string; mimeType: string } | undefined;
+      const grandTotal = moduleType === 'product' ? selectedShotIndexes.length : 1;
+      let doneSoFar = 0; // 已完成(成功或失败)的镜次数,用于跨块累计进度显示
+      let fatalStop = false; // 某块出现 fatal(余额不足/扣费失败)→ 不再向后续块发请求
+
+      for (let chunkIdx = 0; chunkIdx < genChunks.length; chunkIdx++) {
+      const chunkShots = genChunks[chunkIdx];
+      // 恰好在两块之间取消:此时没有在途 fetch 会抛 AbortError,必须在这里标记为取消,
+      // 否则会掉进"统一定稿"分支显示"已完成"。fatal 则直接停止后续块。
+      if (ac.signal.aborted) { wasCancelled = true; setGenerationPhase('cancelled'); break; }
+      if (fatalStop) break;
+
       const response = await fetch('/api/generate/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -345,7 +368,8 @@ export default function TaskDetailPage() {
           bodyType: effectiveBodyType,
           skinTone: effectiveSkinTone,
           engine: effectiveEngine,
-          selectedShotIndexes,
+          anchorImage: anchorForChunk,
+          selectedShotIndexes: chunkShots,
           outputSize: freshProject.outputSize,
           sceneOutputSize: freshProject.sceneOutputSize,
           // 自定义尺寸的实际宽高：服务端据此换算比例，否则 'custom' 永远按 3:4 生成
@@ -399,11 +423,14 @@ export default function TaskDetailPage() {
 
             if (eventType === 'status') {
               const phase = payload.phase as string;
-              setGenerationPhase(phase === 'analyzing' ? 'analyzing' : 'generating');
+              // 只在首块进入"分析中"相位。后续块的请求也会推 analyzing,若不 gate,
+              // 进度条会在每个后续块开头从 ~60% 回跳到 8%(可见倒退)。
+              setGenerationPhase(phase === 'analyzing' && chunkIdx === 0 ? 'analyzing' : 'generating');
               if (payload.current !== undefined) {
+                // 跨块累计:块内 current 加上此前块已完成数,总数用 grandTotal(否则多块时显示"4/2")
                 setProgress({
-                  current: (payload.current as number),
-                  total: (payload.total as number),
+                  current: doneSoFar + (payload.current as number),
+                  total: grandTotal,
                   shotIndex: (payload.shotIndex as number) ?? 0,
                 });
               }
@@ -412,13 +439,14 @@ export default function TaskDetailPage() {
               const shotIndex = payload.shotIndex as number;
               const imageData = payload.imageData as string;
               const currentN = payload.current as number;
-              const total = payload.total as number;
               successCount++;
               console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
-              setProgress({ current: currentN, total, shotIndex });
+              // 跨块累计进度(用 grandTotal 作分母,doneSoFar 作偏移)
+              const overallCurrent = doneSoFar + currentN;
+              setProgress({ current: overallCurrent, total: grandTotal, shotIndex });
 
-              // 动态修正预估剩余时间：剩余数量 × 单张预估（按引擎）
-              const remaining = Math.max(0, total - currentN);
+              // 动态修正预估剩余时间：整组剩余数量 × 单张预估（按引擎）
+              const remaining = Math.max(0, grandTotal - overallCurrent);
               setSecondsLeft(remaining * etaPerShotSec);
 
               // 实时写入 IndexedDB + 追加到 liveImages
@@ -477,34 +505,49 @@ export default function TaskDetailPage() {
                 const msg = payload.message as string;
                 setErrorMessage(msg);
                 lastFatalError = msg;
+                fatalStop = true; // fatal(余额不足/扣费失败)→ 循环外的 guard 会停掉后续块,避免多发请求
               } else {
                 // 非 fatal 也记录最后一条 SSE 错误（成功生成 0 张时作为兜底原因）
                 lastFatalError = payload.message as string;
               }
 
             } else if (eventType === 'done') {
-              console.log(`[SSE] done 事件, successCount=${successCount}`);
-              // 最终状态写入
-              const finalStatus = successCount > 0 ? 'completed' : 'failed';
-              // 失败时持久化失败原因；部分成功（如中途余额不足）也要持久化提示，
-              // 否则任务显示"已完成"而余额不足的 fatal 信息在 UI 任何地方都看不到
-              const persistedError = finalStatus === 'failed'
-                ? (lastFatalError || '生成失败（未捕获具体原因）')
-                : (lastFatalError ?? undefined);
-              await db.projects.update(taskId, {
-                status: finalStatus,
-                lastError: persistedError,
-                updatedAt: new Date(),
-              });
-              setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
-              setGenerationPhase(successCount > 0 ? 'done' : 'error');
-              setSecondsLeft(0);
-              // 只有显式标记的试生成才触发"试生成完成"横幅（单图重做不算）
-              if (opts?.isTrial && successCount === 1) {
-                setTrialDone(true);
-              }
+              // 单块结束:不在这里定稿(多块时会被后续块覆盖);仅累计本块已完成镜次数
+              // 供跨块进度偏移。全部块跑完后在循环外统一定稿。
+              console.log(`[SSE] 分块 done, successCount(累计)=${successCount}`);
+              const d = payload as { successCount?: number; failedCount?: number };
+              doneSoFar += (d.successCount ?? 0) + (d.failedCount ?? 0);
             }
           }
+        }
+      }
+      // ── 单块 SSE 读取结束 ──
+      // 首块跑完后抓一张"有模特"的成功图作为后续块的 anchor,让整组保持同一个模特身份
+      if (!anchorForChunk) {
+        try {
+          const a = await db.images.where('projectId').equals(taskId)
+            .filter(i => i.type === 'result' && i.hasModel === true).first();
+          if (a) anchorForChunk = { data: a.data, mimeType: 'image/png' };
+        } catch { /* 抓不到 anchor 不阻塞,后续块会各自锚定 */ }
+      }
+      } // ← 关闭分块 for 循环
+
+      // 全部分块跑完,统一定稿(不在每块 done 里定稿,否则多块状态会被后一块覆盖)。
+      // 若在块间被取消(wasCancelled),不在这里定稿——交给 finally 的取消分支按实际产出回写。
+      if (!wasCancelled) {
+        const finalStatus = successCount > 0 ? 'completed' : 'failed';
+        // 失败时持久化失败原因;部分成功(如中途余额不足)也持久化提示,
+        // 否则任务显示"已完成"而 fatal 信息在 UI 任何地方看不到
+        const persistedError = finalStatus === 'failed'
+          ? (lastFatalError || '生成失败（未捕获具体原因）')
+          : (lastFatalError ?? undefined);
+        await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
+        setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
+        setGenerationPhase(successCount > 0 ? 'done' : 'error');
+        setSecondsLeft(0);
+        // 只有显式标记的试生成且恰好出 1 张才触发"试生成完成"横幅(单图重做/多张不算)
+        if (opts?.isTrial && successCount === 1) {
+          setTrialDone(true);
         }
       }
 
