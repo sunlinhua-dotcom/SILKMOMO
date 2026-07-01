@@ -4,6 +4,19 @@
 
 ## 时间线
 
+### 2026-07-02
+- **「组图·换装」重构为独立入口 /lookbook**（承接 07-01 组图功能）：按用户「两个完全独立的入口」的架构，把组图从「场景图模块里的子 toggle」提成与产品图工作台平级的**独立路由** `app/lookbook/page.tsx`(LookbookStudio)。经**联网调研 + 3 代理设计 + 对抗式审查**定稿：独立路由让 A/B 的 state 编译期隔离、互不污染（业界对「不共享输入/画布的两种工作方式」的标准做法）。首页顶部新增 `WorkspaceSwitcher` 双卡入口。B 工作台流程：一进来直接上传整组 lookbook → 自动识别(骨架加载) → 按品类**动态每类一个上传框**(主品不限张) → 换新模特/尺寸 → 生成，写同一 SilkMomoDB(moduleType=scene, sceneGroup=true) 跳 /task/[id]，复用已建好的组图 SSE 内核（零改）。
+  - 新增 `components/WorkspaceSwitcher.tsx`、`components/LookbookGarmentSlots.tsx`；`app/page.tsx` 删净所有 sceneGroup 代码 + 接入 WorkspaceSwitcher；`components/SceneShotModule.tsx` 回退为纯单张场景。
+  - 对抗审查抓出并修：lookbook 上限对齐后端 **20**、主品图**合计≤8**(否则任务页超限 400 静默失败)、B 引擎默认 **GPT edit**(只有 edit 能冻结场景)、canGenerate 必含「≥1 件主品且落库 type=product」(任务页硬门控)、自动识别指纹只在成功后写(失败可自动重试)。
+  - **验证**：tsc/eslint/build 全绿；预览浏览器(带登录态)实时点验通过——首页双卡入口、/lookbook 独立工作台直达(无产品门控)、上传 lookbook→N进N出→自动识别→动态品类槽(合计x/8)、A 回归单张正常、无 console error。真实出图打样(冻结+换脸质量)仍需用户用真实图验收。未提交未推送。
+
+### 2026-07-01
+- **场景图「组图·换装」新功能**(需求 new0701 V3):场景图模块从"生成单张"升级为"上传 N 张 lookbook → 生成 N 张"。每张冻结原场景+姿势，只把服装换成用户主品、并换成同一个全新匿名模特(规避原图真人五官侵权)；附件默认保留(未上传替换时)；尺寸用户可选；张数动态无写死(软上限 20，张数多靠"生成剩余"分批续跑)。
+  - **后端**:`/api/generate/stream` 场景分支新增 `if(sceneGroup)` 的 N 循环，完全复用产品图分支的逐张 `checkBalance→deductBalance→失败/异常/断开退款→recordGeneration` 资金骨架(每张 65 分原子扣减/失败退款)；每张独立(某张失败不整批中止)；首张成功图作 anchor 锚定新模特、重做/补齐时由客户端带上已有结果图作 anchor 保证全组同一新人。默认走 GPT edit(`/v1/images/edits`，`sceneAsEditBase` 把 refs[i] 当底图)保留场景/姿势，Gemini 为可选回退。结果用 **1-based** `shotIndex`(参考图序号 1..N)承载，复用对比旧版/还原/单张重做/剩余补齐。
+  - **分析**:`lib/ai-assistant.analyzeLookbookGroup` 多图识别主品(衣/裤/裙) vs 附件(包/首饰/项链)，`/api/ai/analyze` 支持 `images[]` 组图分支(扣一次 aiAnalysisPricePerCallFen，失败退款)。
+  - **前端**:`SceneShotModule` 加"单张场景图/组图·换装"模式切换、lookbook 上传(最多 20 张)、识别品类动态槽位、可选替换附件、换新模特说明；`page.tsx` 落库 `sceneGroup`/`sceneGroupCategories`、成本按 N×65。`lib/db.ts` Project 加两个可选字段(无 Dexie 版本迁移)。
+  - **验证**:5 路设计 + 4 维对抗式代码审查(资金安全/循环边界/端到端契约/回归)修 3 处(analyze 按钮标价误述 ¥0.02→¥0.35、组图重做/补齐漏传 anchor 会换成第二个人、analyzeGroup stale 竞态)；tsc/eslint/build 全绿；预览浏览器登录态实时点验通过(模式切换、lookbook 3/20、`已上传 3 张→将生成 3 张`、`/api/ai/analyze` 组图 200、标价 ¥0.35)。**真实图的生成效果打样(冻结+换脸质量)需用户用真实产品/lookbook 图自行验收**。
+
 ### 2026-06-13
 - **AI 聊天切换 DeepSeek**:`/api/ai/chat` 主通道改为 api.deepseek.com `deepseek-v4-pro`(OpenAI 兼容协议 + json_object 结构化输出),新增 `DEEPSEEK_API_KEY`/`DEEPSEEK_CHAT_MODEL` 环境变量,未配置时自动回退 Gemini Lite 零中断;本地端到端实测 3s 响应、参数提取准确、计费按真实模型归因。产品图分析/质量评分保持 Gemini Lite(需视觉)。
 - **品牌更名 SILXINE**:全部用户可见文案/标题/OG/SEO 从 SILKMOMO 改为客户正式名 SILXINE;全新品牌视觉——丝绸缎带 "S" SVG 标识(内联组件 + favicon icon.svg + logo.svg)、OG 分享图与 iOS 图标按 silxine.com 官网基因重绘(Newsreader 衬线/墨 #2C2825/米白 #F5EFE7/金棕)。内部存储键(silkmomo_*、SilkMomoDB、cookie)与仓库名保留代号并加防误改注释;下载文件名改为 silxine-*。旧品牌资产归档 refs/archive。

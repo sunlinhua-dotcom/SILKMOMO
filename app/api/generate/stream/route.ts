@@ -12,7 +12,7 @@
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
-import { buildProductShotPrompt, buildSceneShotPrompt } from '@/lib/api';
+import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
@@ -55,6 +55,10 @@ interface GenerateStreamRequest {
   customWidth?: number;  // outputSize/sceneOutputSize 为 'custom' 时的实际宽高
   customHeight?: number;
   sceneHasModel?: boolean;
+  sceneGroup?: boolean;               // 场景图·组图（换装）模式：N 张 lookbook → N 张换装图
+  sceneGroupTargetIndexes?: number[]; // 组图只生成指定参考图序号（1-based；用于单张重做/补齐），不传=全部
+  sceneGroupAnchor?: ImageInput;      // 重做/补齐时带上已有一张结果图作「新模特身份锚」，保证与全组同一新人
+  sceneGroupGarmentCategories?: string[]; // 用户上传替换的主品品类（top/pants/dress…），点明换哪几件
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
   // 客户端分块生成时,把首块「有模特」镜次的产出回传作为锚点,
@@ -70,7 +74,7 @@ const IMAGE_SLOT_LIMITS: Array<{ key: 'productImages' | 'modelRefImages' | 'bgRe
   { key: 'productImages', label: '产品图', max: 8 },
   { key: 'modelRefImages', label: '模特参考图', max: 6 },
   { key: 'bgRefImages', label: '背景参考图', max: 6 },
-  { key: 'sceneRefImages', label: '场景参考图', max: 8 },
+  { key: 'sceneRefImages', label: '场景参考图', max: 20 },  // 组图 lookbook 上限（张数多会分批续跑）
   { key: 'accessoryImages', label: '配件参考图', max: 6 },
 ];
 
@@ -137,6 +141,10 @@ export async function POST(req: NextRequest) {
     customWidth,
     customHeight,
     sceneHasModel,
+    sceneGroup,
+    sceneGroupTargetIndexes,
+    sceneGroupAnchor,
+    sceneGroupGarmentCategories,
     customPrompt,
     engine: rawEngine,
     anchorImage: clientAnchorImage,
@@ -469,6 +477,165 @@ export async function POST(req: NextRequest) {
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
 
+          if (sceneGroup) {
+            // ═══════════════════════════════════════════════════════════
+            // 场景图·组图（换装）模式：N 张 lookbook 参考图 → N 张换装图
+            // 每张：冻结该张场景+姿势，只换服装（用户主品）+ 换全新匿名模特。
+            // 走 GPT edit（sceneAsEditBase）保留底图；逐张原子扣费/失败退款，
+            // 每张独立（某张失败不整批中止）。shotIndex = 1-based 参考图序号。
+            // ═══════════════════════════════════════════════════════════
+            const N = sceneRefImages.length;
+            // 目标参考图序号（1-based）：默认全部；单张重做/补齐时只跑指定序号
+            const rawTargets = Array.isArray(sceneGroupTargetIndexes) && sceneGroupTargetIndexes.length > 0
+              ? sceneGroupTargetIndexes
+              : Array.from({ length: N }, (_, i) => i + 1);
+            const targetIndexes = rawTargets.filter(t => Number.isInteger(t) && t >= 1 && t <= N);
+            if (targetIndexes.length === 0) {
+              push('error', { shotIndex: 0, current: 1, total: 1, message: '组图参考图序号非法', fatal: true });
+              push('done', { successCount: 0, failedCount: 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
+              controller.close();
+              return;
+            }
+            const total = targetIndexes.length;
+
+            // AI 分析用户主品服装（可选，失败不阻塞；放扣费前，避免"已扣费卡在分析"的资金悬置）
+            let garmentDescription: string | undefined;
+            push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+            try {
+              const { analyzeProductImage } = await import('@/lib/ai-assistant');
+              const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+              if (analysis.description) garmentDescription = analysis.description;
+            } catch { /* skip */ }
+
+            const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
+            // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
+            // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
+            // 首批全量生成时无锚，由本批首张成功图充当。
+            let anchorImage: ImageInput | undefined =
+              sceneGroupAnchor && typeof sceneGroupAnchor.data === 'string'
+                && sceneGroupAnchor.data && sceneGroupAnchor.data.length <= MAX_IMAGE_BASE64_LENGTH
+                ? { data: sceneGroupAnchor.data, mimeType: sceneGroupAnchor.mimeType || 'image/png' }
+                : undefined;
+
+            for (let i = 0; i < targetIndexes.length; i++) {
+              if (clientClosed) {
+                console.log(`[stream] 客户端已断开，提前终止组图生成（已完成 ${i}/${total}）`);
+                break;
+              }
+              const refSeq = targetIndexes[i];              // 1-based 参考图序号
+              const baseRef = sceneRefImages[refSeq - 1];
+
+              push('status', {
+                phase: 'generating',
+                current: i + 1,
+                total,
+                shotIndex: refSeq,
+                message: `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
+              });
+
+              const balance = await checkBalance(auth.userId);
+              if (!balance.sufficient) {
+                const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
+                push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                  promptText: '(skipped: balance insufficient)',
+                  modelId, bodyType, skinTone, aspectRatio,
+                  apiModel: requestedApiModel,
+                  success: false, apiLatencyMs: 0, errorMessage: errMsg,
+                }).catch(err => console.error('[recordGeneration]', err));
+                failedCount += total - i;
+                break;
+              }
+
+              const deduction = await deductBalance(auth.userId, `组图换装 #${refSeq}`, taskId, requestedApiModel);
+              if (!deduction.success) {
+                const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
+                push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                  promptText: '(skipped: deduction failed)',
+                  modelId, bodyType, skinTone, aspectRatio,
+                  apiModel: requestedApiModel,
+                  success: false, apiLatencyMs: 0, errorMessage: errMsg,
+                }).catch(err => console.error('[recordGeneration]', err));
+                failedCount += total - i;
+                break;
+              }
+
+              // —— 钱已扣：任何失败/异常/断开都必须退款 ——
+              let result: Awaited<ReturnType<typeof generateBackendImage>> | null = null;
+              let shotLatency = 0;
+              let prompt = '';
+              try {
+                prompt = buildSceneGroupPrompt({
+                  garmentDescription,
+                  garmentCategories: Array.isArray(sceneGroupGarmentCategories) ? sceneGroupGarmentCategories : undefined,
+                  hasAnchor: !!anchorImage,
+                  hasReplacementAccessory,
+                  customPrompt: safeCustomPrompt,
+                });
+                const shotStart = Date.now();
+                result = await generateBackendImage({
+                  prompt,
+                  productImages,
+                  sceneRefImages: [baseRef],
+                  accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
+                  anchorImage,
+                  sceneAsEditBase: true,
+                  aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                }, engine);
+                shotLatency = Date.now() - shotStart;
+              } catch (innerErr) {
+                const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
+                await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 异常退款`, taskId);
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                  promptText: prompt || '(throw before prompt built)',
+                  modelId, bodyType, skinTone, aspectRatio,
+                  apiModel: requestedApiModel,
+                  success: false, apiLatencyMs: 0, errorMessage: msg,
+                }).catch(err => console.error('[recordGeneration]', err));
+                push('error', { shotIndex: refSeq, current: i + 1, total, message: `${msg}（已自动退款）`, fatal: false });
+                failedCount++;
+                continue; // 组图每张独立，某张异常不整批中止
+              }
+
+              const resultApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
+              const deliveredButDisconnected = result.success && !!result.data && clientClosed;
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                promptText: prompt,
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: resultApiModel,
+                success: result.success && !deliveredButDisconnected,
+                apiLatencyMs: shotLatency,
+                errorMessage: deliveredButDisconnected
+                  ? 'client disconnected before delivery'
+                  : (result.success ? undefined : result.error),
+              }).catch(err => console.error('[recordGeneration] 失败:', err));
+
+              if (result.success && result.data) {
+                if (clientClosed) {
+                  await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 客户端断开退款`, taskId);
+                  failedCount++;
+                  break;
+                }
+                successCount++;
+                if (!anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
+                push('result', { shotIndex: refSeq, imageData: result.data, current: i + 1, total });
+              } else {
+                failedCount++;
+                await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 失败退款`, taskId);
+                push('error', {
+                  shotIndex: refSeq, current: i + 1, total,
+                  message: `${result.error ?? '生成失败（未知原因）'}（已自动退款）`,
+                  fatal: false,
+                });
+                // 组图每张独立：不整批中止，继续下一张
+              }
+            }
+          } else {
           // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
           // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
           let garmentDescription: string | undefined;
@@ -618,6 +785,7 @@ export async function POST(req: NextRequest) {
               fatal: true,
             });
           }
+          } // end 单张场景图 else
         }
 
         // 静默学习品牌偏好：至少 1 张成功就记住这次的 模特/体型/肤色/模块/引擎

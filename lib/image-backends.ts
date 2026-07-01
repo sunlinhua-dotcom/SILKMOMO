@@ -24,6 +24,9 @@ export interface BackendInput {
   accessoryImages?: ImageInput[];
   anchorImage?: ImageInput;
   aspectRatio: '1:1' | '3:4' | '4:3' | '9:16' | '16:9';
+  // 组图（换装）模式：把 sceneRefImages 当作可编辑底图，放在参考图队首（GPT edit 的
+  // image[] 首图 = 主底图），并在 Gemini parts 里前置，指令要求「保留底图、只换服装+人物」。
+  sceneAsEditBase?: boolean;
 }
 
 export interface BackendResult {
@@ -197,6 +200,14 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
 function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ text: input.prompt }];
 
+  // 组图模式：底图（场景参考图）必须排在最前，作为「要保留并编辑的底图」
+  if (input.sceneAsEditBase && input.sceneRefImages?.length) {
+    parts.push({ text: '\n\nScene-Base Image (tagged "scene-base" — PRESERVE its scene, lighting, framing, and the model pose EXACTLY; only swap garment and person):' });
+    input.sceneRefImages.forEach(img =>
+      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
+    );
+  }
+
   if (input.modelRefImages?.length) {
     parts.push({ text: '\n\nModel Reference Images (match hairstyle, makeup, mood, age):' });
     input.modelRefImages.forEach(img =>
@@ -213,7 +224,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
-  if (input.sceneRefImages?.length) {
+  if (!input.sceneAsEditBase && input.sceneRefImages?.length) {
     parts.push({ text: '\n\nScene Reference Images (recreate the spatial structure and lighting):' });
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
@@ -251,12 +262,21 @@ function mapAspectToOpenAISize(aspect: BackendInput['aspectRatio']): string {
 async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<BackendResult> {
   // 收集所有参考图（OpenAI 上限 16 张）
   const refImages: Array<{ img: ImageInput; tag: string }> = [];
-  input.productImages.forEach(img => refImages.push({ img, tag: 'product' }));
-  (input.modelRefImages || []).forEach(img => refImages.push({ img, tag: 'model' }));
-  (input.bgRefImages || []).forEach(img => refImages.push({ img, tag: 'bg' }));
-  (input.sceneRefImages || []).forEach(img => refImages.push({ img, tag: 'scene' }));
-  (input.accessoryImages || []).forEach(img => refImages.push({ img, tag: 'accessory' }));
-  if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
+  if (input.sceneAsEditBase) {
+    // 组图（换装）模式：底图排在最前——/v1/images/edits 的 image[] 首图作为主编辑底图，
+    // 保证 GPT 保留场景/姿势、只换服装+人物；不传 model/bg 参考图避免干扰底图。
+    (input.sceneRefImages || []).forEach(img => refImages.push({ img, tag: 'scene-base' }));
+    input.productImages.forEach(img => refImages.push({ img, tag: 'product' }));
+    (input.accessoryImages || []).forEach(img => refImages.push({ img, tag: 'accessory' }));
+    if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
+  } else {
+    input.productImages.forEach(img => refImages.push({ img, tag: 'product' }));
+    (input.modelRefImages || []).forEach(img => refImages.push({ img, tag: 'model' }));
+    (input.bgRefImages || []).forEach(img => refImages.push({ img, tag: 'bg' }));
+    (input.sceneRefImages || []).forEach(img => refImages.push({ img, tag: 'scene' }));
+    (input.accessoryImages || []).forEach(img => refImages.push({ img, tag: 'accessory' }));
+    if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
+  }
 
   const limited = refImages.slice(0, 16);
 
