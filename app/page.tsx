@@ -9,6 +9,7 @@ import { ModelQuickPicker } from '@/components/ModelQuickPicker';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 import { ProductShotModule } from '@/components/ProductShotModule';
 import { SceneShotModule } from '@/components/SceneShotModule';
+import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { StylePackManager } from '@/components/StylePackManager';
 import { BatchOutputMatrix } from '@/components/BatchOutputMatrix';
 import { AIChatSidebar, AIChatBottomBar } from '@/components/AIChatBox';
@@ -313,6 +314,9 @@ export default function HomePage() {
     if (replayWantsAdvanced) setShowAdvanced(true);
     if (productImages.length > 0) {
       setStep(replayWantsAdvanced ? 3 : 2);
+    } else {
+      // 没有已上传的源图（老快照没存源图）——跳到 step1 显示上传区，避免"点了没反应"。
+      setStep(1);
     }
     // 滚到顶部
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -381,8 +385,13 @@ export default function HomePage() {
         </div>
       </header>
 
+      {/* 双工作台入口：产品图工作台(本页) / 组图·换装(/lookbook) */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-12 pt-5 sm:pt-8">
+        <WorkspaceSwitcher active="product" />
+      </div>
+
       {/* 极简进度指示器 */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-12 pt-5 sm:pt-10 mb-2 sm:mb-4">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-12 pt-5 sm:pt-8 mb-2 sm:mb-4">
         <div className="flex items-center justify-center gap-2 sm:gap-6">
           {[
             { num: 1, label: '上传', icon: Upload },

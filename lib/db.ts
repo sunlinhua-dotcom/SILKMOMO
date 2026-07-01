@@ -38,6 +38,10 @@ export interface Project {
   sceneOutputSize?: string;      // 场景图输出尺寸
   sceneHasModel?: boolean;       // 场景图：true=有模特，false=氛围静物
 
+  // 场景图·组图（换装）模式专属
+  sceneGroup?: boolean;              // true=组图（N 张 lookbook → N 张换装图）
+  sceneGroupCategories?: string;     // JSON: 分析出的主品品类（用于展示/回显）
+
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
   lastError?: string;
 

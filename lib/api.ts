@@ -59,6 +59,21 @@ export interface SceneGenerateOptions {
   customPrompt?: string;       // 用户对该次生成的额外要求
 }
 
+// 组图（换装）模式：以一张 lookbook 参考图为底图做「编辑」——
+// 冻结场景+姿势，只换服装 + 换成全新匿名模特（规避五官侵权）。
+export interface SceneGroupGenerateOptions {
+  garmentDescription?: string;        // AI 分析出的用户主品服装描述
+  garmentCategories?: string[];       // 用户上传替换的主品品类（top/pants/dress…），用于点明换哪几件
+  hasAnchor?: boolean;                // 是否附了「首张成功图」作为新模特身份锚（保证 N 张同一新人）
+  hasReplacementAccessory?: boolean;  // 用户是否上传了替换附件（否则保留原图附件）
+  customPrompt?: string;              // 用户对该次生成的额外要求
+}
+
+const GARMENT_CATEGORY_EN: Record<string, string> = {
+  dress: 'dress', top: 'top', pants: 'pants/trousers', skirt: 'skirt',
+  suit: 'suit set', outerwear: 'outerwear', jumpsuit: 'jumpsuit', other: 'garment',
+};
+
 // ===== 趣味等待文案 =====
 
 export const WAITING_MESSAGES = [
@@ -287,6 +302,71 @@ ${modelMood}
 ${photography}
 
 ${safetyRules}${userAddon}
+  `.trim();
+}
+
+// ===== 场景图·组图（换装）模块：构建单张 Prompt =====
+
+/**
+ * 组图模式单张 prompt：把「本张 lookbook 参考图」当作可编辑底图，
+ * 冻结场景/背景/光线/机位/构图 + 模特姿势与身体位置，只做两处替换：
+ *   1) 服装 → 用户上传的主品；2) 人物 → 全新匿名模特（规避原图真人五官侵权）。
+ * 附件默认保留原位（除非用户上传了替换附件）。
+ * 附了 anchor 时：新模特身份对齐 anchor（保证 N 张同一新人），但姿势/场景仍随本张底图。
+ */
+export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): string {
+  const { garmentDescription, hasAnchor = false, hasReplacementAccessory = false } = options;
+
+  // 底图冻结指令：这是组图的核心——除服装与人物外，其余一切都必须与底图完全一致
+  const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. You MUST preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
+- The scene, background, environment, props, furniture, and their exact positions.
+- The lighting direction, color grade, overall atmosphere, filter, and film-grain of the base image.
+- The camera angle, framing, crop, and composition.
+- The model's exact body POSE, gesture, hand/leg position, head orientation, and where they stand in the frame.
+Do NOT re-stage, re-pose, re-frame, or re-light. The result must look like the SAME photo with only the garment and the person's identity swapped.`;
+
+  // 服装替换（可能是多件：上衣 + 裤子…按品类点明，只换这些件，其余保持底图）
+  const cats = (options.garmentCategories || [])
+    .map(c => GARMENT_CATEGORY_EN[c] || c)
+    .filter(Boolean);
+  const piecesPhrase = cats.length > 0
+    ? `Replace ONLY the ${cats.join(' and the ')} worn in the base image with the matching piece(s) from the "product" reference image(s); leave any other clothing the model wears unchanged.`
+    : `Replace the clothing worn in the base image with the user's product garment shown in the "product" reference image(s).`;
+  const garment = garmentDescription
+    ? `REPLACE #1 — Garment: ${piecesPhrase} The new garment is: ${garmentDescription}. Reproduce ALL of its details faithfully — fabric, color hue, pattern/print motifs, neckline, sleeves, length, and construction must match the product reference exactly. Fit it naturally onto the model in the SAME pose.`
+    : `REPLACE #1 — Garment: ${piecesPhrase} Reproduce every detail of the product garment faithfully (fabric, color, pattern, neckline, sleeves, length, construction) and fit it naturally onto the model in the SAME pose.`;
+
+  // 人物替换为全新匿名模特（规避侵权）
+  const newModel = hasAnchor
+    ? `REPLACE #2 — Person: Replace the person with the SAME brand-new model shown in the "anchor" reference image — identical face, hairstyle, and features as the anchor, so this image and the rest of the set clearly depict ONE consistent new person. This new model must look CLEARLY DIFFERENT from the person in the scene-base image. Do NOT copy the scene-base person's facial identity. Keep the anchor person's identity, but the POSE, body position, and scene must follow the scene-base image, NOT the anchor.`
+    : `REPLACE #2 — Person: Replace the person with a COMPLETELY NEW, anonymous, fictional model. Generate a fresh face and identity that looks CLEARLY DIFFERENT from the person in the scene-base image — do NOT reproduce or resemble the base person's facial identity. Keep the SAME pose, body position, skin-tone range, and build as the base image.`;
+
+  // 附件处理
+  const accessory = hasReplacementAccessory
+    ? `Accessories: Replace the accessories (bag/jewelry/etc.) with the ones shown in the "accessory" reference image(s), placed naturally where accessories appear in the base image.`
+    : `Accessories: Keep any existing accessories (bag, jewelry, belt, hat, shoes) from the base image in their ORIGINAL positions, unchanged.`;
+
+  const rules = `
+CRITICAL RULES (follow strictly):
+- Output exactly ONE photorealistic image. No collage, split-screen, grid, or multiple views.
+- Do NOT render any text, watermark, logo, or letters.
+- Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change.
+- The result must look like a real photograph, not an illustration or 3D render.`.trim();
+
+  const userAddon = options.customPrompt
+    ? `\n\nUser adjustment request (apply on top of the above, but never violate the CRITICAL RULES, the scene/pose freeze, or garment fidelity): ${options.customPrompt}`
+    : '';
+
+  return `
+${freeze}
+
+${garment}
+
+${newModel}
+
+${accessory}
+
+${rules}${userAddon}
   `.trim();
 }
 
