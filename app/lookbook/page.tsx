@@ -14,12 +14,14 @@ import {
   MAX_TOTAL_GARMENTS,
 } from '@/components/LookbookGarmentSlots';
 import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE } from '@/lib/models';
+import { PRICING } from '@/lib/billing-constants';
 import type { CompressedImage } from '@/lib/image-compressor';
 import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib/db';
 
 // 后端 sceneRefImages 硬上限 20（stream/route.ts validateImageInputs）
 const LOOKBOOK_MAX = 20;
-const PRICE_PER_IMAGE_FEN = 65;
+// 单价引用计费常量，避免与后端扣费单价漂移（后端逐张扣 PRICING.pricePerCallFen）
+const PRICE_PER_IMAGE_FEN = PRICING.pricePerCallFen;
 
 export default function LookbookStudio() {
   // ── 登录 / 余额 ──
