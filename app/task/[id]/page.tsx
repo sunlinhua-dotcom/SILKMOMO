@@ -88,6 +88,10 @@ export default function TaskDetailPage() {
   // AI Chat 的"待应用 prompt"：actions.prompt 在 onActions 里捕获，onTriggerGenerate 时使用
   const pendingChatPromptRef = useRef<string>('');
 
+  // 「快速重做」带 ?redo=1 进来时，加载完成后滚到生成结果区，让用户直接在每张图上重生成
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const redoScrolledRef = useRef(false);
+
   const loadTaskData = useCallback(async () => {
     try {
       const task = await db.projects.get(taskId);
@@ -156,6 +160,19 @@ export default function TaskDetailPage() {
     return () => clearInterval(interval);
   }, [loadTaskData]);
 
+  // 「快速重做」入口：URL 带 ?redo=1 时，结果加载好后滚动到生成结果区（只执行一次）
+  useEffect(() => {
+    if (loading || redoScrolledRef.current) return;
+    if (typeof window === 'undefined') return;
+    if (new URLSearchParams(window.location.search).get('redo') !== '1') return;
+    if (images.length === 0) return;
+    redoScrolledRef.current = true;
+    // 等一帧确保结果 DOM 已挂载
+    requestAnimationFrame(() => {
+      resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }, [loading, images.length]);
+
   // 组件卸载时清理 SSE 连接和计时器，避免泄漏
   useEffect(() => {
     return () => {
@@ -193,7 +210,8 @@ export default function TaskDetailPage() {
   const handleGenerateRemaining = async () => {
     if (!project || generating || inputImages.products.length === 0) return;
 
-    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
+    const moduleType = project.moduleType || 'product';
+    const isGroup = moduleType === 'scene' && !!project.sceneGroup;
 
     const existingResults = await db.images
       .where('projectId').equals(taskId)
@@ -202,6 +220,20 @@ export default function TaskDetailPage() {
     const existingShotIndexes = existingResults
       .map(img => img.shotIndex)
       .filter(Boolean) as number[];
+
+    if (isGroup) {
+      // 组图：目标是全部参考图序号 1..N，补齐缺失的那几张
+      const N = inputImages.sceneRefs.length;
+      const remaining: number[] = [];
+      for (let s = 1; s <= N; s++) {
+        if (!existingShotIndexes.includes(s)) remaining.push(s);
+      }
+      if (remaining.length === 0) return;
+      await handleStartGeneration(remaining);
+      return;
+    }
+
+    const selectedShotIndexes = parseSelectedShots(project.selectedShots);
     const remainingIndexes = selectedShotIndexes.filter(
       idx => !existingShotIndexes.includes(idx)
     );
@@ -250,6 +282,33 @@ export default function TaskDetailPage() {
 
     const moduleType = freshProject.moduleType || 'product';
     const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(freshProject.selectedShots);
+    // 组图（换装）：迭代维度是「参考图序号」，不是产品镜次
+    const isGroup = moduleType === 'scene' && !!freshProject.sceneGroup;
+    // 组图目标参考图序号（1-based）：overrideShotIndexes 传了就是单张重做/补齐；否则全部 N 张
+    const groupTargetIndexes = isGroup ? overrideShotIndexes : undefined;
+    const groupTotal = isGroup
+      ? (groupTargetIndexes?.length ?? freshInputs.sceneRefs.length)
+      : 0;
+    // 组图：用户上传替换的主品品类（供后端点明换哪几件）
+    let groupGarmentCategories: string[] | undefined;
+    if (isGroup && freshProject.sceneGroupCategories) {
+      try {
+        const parsed = JSON.parse(freshProject.sceneGroupCategories);
+        if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) groupGarmentCategories = parsed;
+      } catch { /* ignore */ }
+    }
+    // 组图重做/补齐（指定了目标序号）时，取一张已有结果图作「新模特身份锚」，让补的图与首批同一个新人；
+    // 全量生成（未指定 target）不带锚，由服务端首张成功图自锚。注意单张重做前该图已被降级为 result_backup，
+    // 故按 type==='result' 过滤能自然排除正在重做的那张。
+    let groupAnchor: { data: string; mimeType: string } | undefined;
+    if (isGroup && groupTargetIndexes && groupTargetIndexes.length > 0) {
+      const doneSiblings = allImgs
+        .filter(i => i.type === 'result' && typeof i.shotIndex === 'number' && !groupTargetIndexes.includes(i.shotIndex))
+        .sort((a, b) => (a.shotIndex as number) - (b.shotIndex as number));
+      if (doneSiblings.length > 0) {
+        groupAnchor = { data: doneSiblings[0].data, mimeType: doneSiblings[0].mimeType };
+      }
+    }
 
     // —— 持久化微调的 customPrompt ——
     if (customPrompt !== undefined) {
@@ -270,8 +329,11 @@ export default function TaskDetailPage() {
     //     之前不分引擎统一按 15s/张 估算,GPT 会出现"预计剩余 17 秒"实跑 4 分钟的误导)——
     const etaFirstShotSec = newEngine === 'openai' ? 180 : 25;
     const etaPerShotSec = newEngine === 'openai' ? 180 : 15;
+    const groupEtaCount = Math.max(1, groupTotal);
     const initialSeconds = moduleType === 'scene'
-      ? etaFirstShotSec
+      ? (isGroup
+          ? etaFirstShotSec + (groupEtaCount - 1) * etaPerShotSec
+          : etaFirstShotSec)
       : (selectedShotIndexes.length === 1
           ? etaFirstShotSec
           : etaFirstShotSec + (selectedShotIndexes.length - 1) * etaPerShotSec);
@@ -352,6 +414,10 @@ export default function TaskDetailPage() {
           customWidth: freshProject.customWidth,
           customHeight: freshProject.customHeight,
           sceneHasModel: freshProject.sceneHasModel !== false,
+          sceneGroup: isGroup || undefined,
+          sceneGroupTargetIndexes: isGroup ? groupTargetIndexes : undefined,
+          sceneGroupAnchor: groupAnchor,
+          sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
         }),
       });
@@ -422,7 +488,11 @@ export default function TaskDetailPage() {
               setSecondsLeft(remaining * etaPerShotSec);
 
               // 实时写入 IndexedDB + 追加到 liveImages
-              const shotConfig = PRODUCT_SHOTS.find(s => s.index === shotIndex);
+              // 只有产品图才按镜次查 shotConfig；场景组图的 shotIndex 是「参考图序号(1..N)」，
+              // 若也去 PRODUCT_SHOTS.find 会错配到产品镜次(1-9)，污染 frameType/角度/hasModel。
+              const shotConfig = moduleType === 'product'
+                ? PRODUCT_SHOTS.find(s => s.index === shotIndex)
+                : undefined;
               const persistedShotIndex = shotIndex > 0 ? shotIndex : undefined;
               const resultHasModel = moduleType === 'scene'
                 ? freshProject.sceneHasModel !== false
@@ -697,11 +767,13 @@ export default function TaskDetailPage() {
       // 将旧结果在数据库中标记为备份，暂不物理删除
       await db.images.update(imageId, { type: 'result_backup' });
 
-      // 场景图（moduleType=scene 且 shotIndex 通常为 undefined）整张重做；产品图按镜次重做。
+      // 单张场景图（无 shotIndex）整张重做；产品图 & 场景组图按序号单张重做。
       // 注意：用 shotIndex === undefined 而非 !shotIndex，避免 shotIndex=0 被误判
-      if (moduleType === 'scene' || shotIndex === undefined) {
+      const isGroup = moduleType === 'scene' && !!project.sceneGroup;
+      if (shotIndex === undefined || (moduleType === 'scene' && !isGroup)) {
         await handleStartGeneration(undefined, customPrompt);
       } else {
+        // 产品镜次 或 组图参考图序号：只重做这一张
         await handleStartGeneration([shotIndex], customPrompt);
       }
     } catch (e) {
@@ -786,11 +858,18 @@ export default function TaskDetailPage() {
     if (moduleType === 'product') {
       return `全部生成 ${parseSelectedShots(project.selectedShots).length} 张产品图`;
     }
+    if (project.sceneGroup) {
+      return `生成 ${inputImages.sceneRefs.length} 张组图`;
+    }
     return '开始生成场景图';
   };
 
   const getShotCount = () => {
     if (!project) return 7;
+    // 组图：目标张数 = lookbook 参考图张数
+    if (project.moduleType === 'scene' && project.sceneGroup) {
+      return inputImages.sceneRefs.length;
+    }
     return parseSelectedShots(project.selectedShots).length;
   };
 
@@ -1398,9 +1477,29 @@ export default function TaskDetailPage() {
           </div>
         )}
 
+        {/* 组图·部分完成（如大批量分批 / 中途失败）→ 生成剩余。张数多时 GPT 单条 SSE 跑不完，靠此续跑补齐 */}
+        {!generating && moduleType === 'scene' && project.sceneGroup && project.status === 'completed'
+          && images.length > 0 && getShotCount() > 0 && images.length < getShotCount() && (
+          <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-accent)]/30 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-[var(--color-text)]">已完成 {images.length} / {getShotCount()} 张组图</p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                还差 {getShotCount() - images.length} 张（张数多时会分批完成）——点下方补齐剩余。
+              </p>
+            </div>
+            <button
+              onClick={handleGenerateRemaining}
+              className="btn-primary text-sm px-5 py-2.5"
+            >
+              <Wand2 className="w-4 h-4" strokeWidth={1.5} />
+              生成剩余 {getShotCount() - images.length} 张
+            </button>
+          </div>
+        )}
+
         {/* 结果展示 */}
         {images.length > 0 && (
-          <div>
+          <div ref={resultsRef}>
             {/* 部分成功提示：任务"已完成"但中途有镜次失败 / 余额不足。
                 不渲染的话余额不足等 fatal 信息在已完成任务上完全不可见 */}
             {!generating && project.status === 'completed' && errorMessage && (

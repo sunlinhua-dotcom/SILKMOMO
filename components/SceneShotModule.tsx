@@ -26,7 +26,7 @@ export function SceneShotModule({
   onOutputSizeChange,
   customWidth = 1080,
   customHeight = 1350,
-  onCustomSizeChange
+  onCustomSizeChange,
 }: SceneShotModuleProps) {
   const [localCustomW, setLocalCustomW] = useState(customWidth);
   const [localCustomH, setLocalCustomH] = useState(customHeight);
