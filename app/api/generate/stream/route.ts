@@ -57,6 +57,9 @@ interface GenerateStreamRequest {
   sceneHasModel?: boolean;
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
+  // 客户端分块生成时,把首块「有模特」镜次的产出回传作为锚点,
+  // 让后续分块的镜次仍复用同一个模特身份(跨请求保持模特一致性)。
+  anchorImage?: ImageInput;
 }
 
 // ═══ 入参防线：参考图数量 / 单图体积 / MIME 白名单 ═══
@@ -136,6 +139,7 @@ export async function POST(req: NextRequest) {
     sceneHasModel,
     customPrompt,
     engine: rawEngine,
+    anchorImage: clientAnchorImage,
   } = body;
 
   const engine = normalizeBackend(rawEngine);
@@ -153,6 +157,15 @@ export async function POST(req: NextRequest) {
   const imageError = validateImageInputs(body);
   if (imageError) {
     return new Response(JSON.stringify({ error: imageError }), { status: 400 });
+  }
+
+  // 客户端锚点图(上一分块的产出)也要过同样的入参防线,避免超大/非法数据进内存
+  if (clientAnchorImage !== undefined) {
+    if (!clientAnchorImage || typeof clientAnchorImage.data !== 'string' || !clientAnchorImage.data
+      || clientAnchorImage.data.length > MAX_IMAGE_BASE64_LENGTH
+      || typeof clientAnchorImage.mimeType !== 'string' || !ALLOWED_IMAGE_MIME.test(clientAnchorImage.mimeType)) {
+      return new Response(JSON.stringify({ error: '锚点图数据非法' }), { status: 400 });
+    }
   }
 
   // 自定义尺寸：从请求里的实际宽高换算比例。
@@ -245,8 +258,9 @@ export async function POST(req: NextRequest) {
             // 分析失败，沿用默认 prompt
           }
 
-          // 首图锚定
-          let anchorImage: ImageInput | undefined;
+          // 首图锚定。客户端分块生成时会把首块的模特图作为 anchorImage 回传,
+          // 这里用它做种子,后续分块的有模特镜次就沿用同一个模特身份(跨请求一致)。
+          let anchorImage: ImageInput | undefined = clientAnchorImage;
 
           for (let i = 0; i < shotConfigs.length; i++) {
             // 客户端断开检测：用户关闭页面 / 切走，立刻停止后续 API 调用
