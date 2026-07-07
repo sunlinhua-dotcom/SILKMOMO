@@ -43,7 +43,14 @@ export function TimeMachine({ onReplay }: TimeMachineProps) {
 
   const handleReplayClick = (snap: FlowSnapshot, e: React.MouseEvent) => {
     e.stopPropagation();
-    onReplay(snap);
+    // 快照只存 64px 缩略图、没有源图，首页表单无法真正重跑。
+    // 有 taskId → 跳到任务详情页（源图 + 参数都持久化在 IndexedDB，可真正重生成）；
+    // 无 taskId（老快照）→ 回退到首页参数回放。
+    if (snap.taskId) {
+      router.push(`/task/${snap.taskId}?redo=1`);
+    } else {
+      onReplay(snap);
+    }
   };
 
   const formatTime = (ts: number) => {
