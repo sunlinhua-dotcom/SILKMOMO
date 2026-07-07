@@ -12,6 +12,7 @@ export interface GroupAnalysisState {
   done: boolean;
   primaryCategories: GroupCategory[];
   accessories: GroupAccessory[];
+  garmentsWornByPerson?: boolean;
   error?: string;
 }
 
@@ -42,6 +43,7 @@ interface Props {
   customWidth?: number;
   customHeight?: number;
   onCustomSizeChange?: (w: number, h: number) => void;
+  garmentsWornByPerson?: boolean;
 }
 
 export function LookbookGarmentSlots({
@@ -57,6 +59,7 @@ export function LookbookGarmentSlots({
   customWidth = 1080,
   customHeight = 1350,
   onCustomSizeChange,
+  garmentsWornByPerson = false,
 }: Props) {
   const [localCustomW, setLocalCustomW] = useState(customWidth);
   const [localCustomH, setLocalCustomH] = useState(customHeight);
@@ -136,6 +139,11 @@ export function LookbookGarmentSlots({
               variant="gold"
             />
           ))}
+          {garmentsWornByPerson && (
+            <p className="text-xs text-amber-600 leading-relaxed">
+              检测到产品图为真人穿拍，可能干扰新模特长相；建议补充平铺图/白底图效果更稳。
+            </p>
+          )}
           {totalGarments === 0 && (
             <p className="text-xs text-amber-600">请至少上传一件要换上的服装。</p>
           )}

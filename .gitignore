@@ -85,3 +85,8 @@ silkmomo-*.png
 /silxine-backups/
 *.dump
 *.dump.gpg
+
+# 客户需求整理素材(pptx/微信截图,体积极大 >100MB,本地留档不入库)
+*.pptx
+微信图片_*.png
+/new0701/

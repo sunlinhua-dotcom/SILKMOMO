@@ -64,6 +64,8 @@ export interface SceneGenerateOptions {
 export interface SceneGroupGenerateOptions {
   garmentDescription?: string;        // AI 分析出的用户主品服装描述
   garmentCategories?: string[];       // 用户上传替换的主品品类（top/pants/dress…），用于点明换哪几件
+  sceneGroupMode?: 'swap' | 'products'; // swap=N景1品；products=1景N品
+  productLabel?: string;              // products 模式下当前产品组名称（用于 prompt 点名）
   hasAnchor?: boolean;                // 是否附了「首张成功图」作为新模特身份锚（保证 N 张同一新人）
   hasReplacementAccessory?: boolean;  // 用户是否上传了替换附件（否则保留原图附件）
   customPrompt?: string;              // 用户对该次生成的额外要求
@@ -315,7 +317,13 @@ ${safetyRules}${userAddon}
  * 附了 anchor 时：新模特身份对齐 anchor（保证 N 张同一新人），但姿势/场景仍随本张底图。
  */
 export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): string {
-  const { garmentDescription, hasAnchor = false, hasReplacementAccessory = false } = options;
+  const {
+    garmentDescription,
+    hasAnchor = false,
+    hasReplacementAccessory = false,
+    sceneGroupMode = 'swap',
+    productLabel,
+  } = options;
 
   // 底图冻结指令：这是组图的核心——除服装与人物外，其余一切都必须与底图完全一致
   const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. You MUST preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
@@ -323,6 +331,7 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
 - The lighting direction, color grade, overall atmosphere, filter, and film-grain of the base image.
 - The camera angle, framing, crop, and composition.
 - The model's exact body POSE, gesture, hand/leg position, head orientation, and where they stand in the frame.
+- Preserve the base person's expression and mood exactly; only the facial identity/features may change.
 Do NOT re-stage, re-pose, re-frame, or re-light. The result must look like the SAME photo with only the garment and the person's identity swapped.`;
 
   // 服装替换（可能是多件：上衣 + 裤子…按品类点明，只换这些件，其余保持底图）
@@ -331,15 +340,18 @@ Do NOT re-stage, re-pose, re-frame, or re-light. The result must look like the S
     .filter(Boolean);
   const piecesPhrase = cats.length > 0
     ? `Replace ONLY the ${cats.join(' and the ')} worn in the base image with the matching piece(s) from the "product" reference image(s); leave any other clothing the model wears unchanged.`
-    : `Replace the clothing worn in the base image with the user's product garment shown in the "product" reference image(s).`;
+    : sceneGroupMode === 'products'
+      ? `Replace the clothing worn in the base image with this product group${productLabel ? ` ("${productLabel}")` : ''} shown in the "product" reference image(s).`
+      : `Replace the clothing worn in the base image with the user's product garment shown in the "product" reference image(s).`;
   const garment = garmentDescription
     ? `REPLACE #1 — Garment: ${piecesPhrase} The new garment is: ${garmentDescription}. Reproduce ALL of its details faithfully — fabric, color hue, pattern/print motifs, neckline, sleeves, length, and construction must match the product reference exactly. Fit it naturally onto the model in the SAME pose.`
     : `REPLACE #1 — Garment: ${piecesPhrase} Reproduce every detail of the product garment faithfully (fabric, color, pattern, neckline, sleeves, length, construction) and fit it naturally onto the model in the SAME pose.`;
 
   // 人物替换为全新匿名模特（规避侵权）
+  const productIdentityRule = `Any person visible in the "product" reference image(s) is NOT an identity reference. Completely ignore their face, hairstyle, facial features, age, expression, and identity. Use product images ONLY for garment fabric, color, pattern, silhouette, and construction.`;
   const newModel = hasAnchor
-    ? `REPLACE #2 — Person: Replace the person with the SAME brand-new model shown in the "anchor" reference image — identical face, hairstyle, and features as the anchor, so this image and the rest of the set clearly depict ONE consistent new person. This new model must look CLEARLY DIFFERENT from the person in the scene-base image. Do NOT copy the scene-base person's facial identity. Keep the anchor person's identity, but the POSE, body position, and scene must follow the scene-base image, NOT the anchor.`
-    : `REPLACE #2 — Person: Replace the person with a COMPLETELY NEW, anonymous, fictional model. Generate a fresh face and identity that looks CLEARLY DIFFERENT from the person in the scene-base image — do NOT reproduce or resemble the base person's facial identity. Keep the SAME pose, body position, skin-tone range, and build as the base image.`;
+    ? `REPLACE #2 — Person: Replace the person with the SAME brand-new model shown in the "anchor" reference image — identical face, hairstyle, and features as the anchor, so this image and the rest of the set clearly depict ONE consistent new person. The anchor is the ONLY identity reference. ${productIdentityRule} This new model must look CLEARLY DIFFERENT from the person in the scene-base image and from any person appearing in the product reference image(s). Do NOT copy the scene-base person's facial identity or any product-reference person's facial identity. Keep the anchor person's identity, but the POSE, body position, expression, mood, and scene must follow the scene-base image, NOT the anchor.`
+    : `REPLACE #2 — Person: Replace the person with a COMPLETELY NEW, anonymous, fictional model. Generate a fresh face and identity that looks CLEARLY DIFFERENT from the person in the scene-base image and from any person appearing in the product reference image(s). ${productIdentityRule} Do NOT reproduce or resemble the base person's facial identity or any product-reference person's facial identity. Keep the SAME pose, body position, skin-tone range, build, expression, and mood as the base image; only swap facial identity/features.`;
 
   // 附件处理
   const accessory = hasReplacementAccessory
@@ -351,6 +363,7 @@ CRITICAL RULES (follow strictly):
 - Output exactly ONE photorealistic image. No collage, split-screen, grid, or multiple views.
 - Do NOT render any text, watermark, logo, or letters.
 - Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change.
+- Product reference images are garment references ONLY — ignore any person, face, hairstyle, or identity visible in them.
 - The result must look like a real photograph, not an illustration or 3D render.`.trim();
 
   const userAddon = options.customPrompt

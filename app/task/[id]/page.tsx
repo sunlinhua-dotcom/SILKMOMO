@@ -27,6 +27,11 @@ import type { CompressedImage } from '@/lib/image-compressor';
 // ═══ SSE 事件类型 ═══
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
 interface GenerationError { shotIndex: number; message: string; fatal: boolean; }
+interface ProductGroupPayload {
+  images: Array<{ data: string; mimeType: string }>;
+  label?: string;
+  categories?: string[];
+}
 
 // 备份-图片严格配对：两侧都 defined 且 shotIndex 相等，或两侧都 undefined（场景图）；
 // 任一侧 undefined 而另一侧 defined → 不匹配（避免通配匹配到错误备份）。
@@ -34,6 +39,27 @@ function backupMatchesImage(b: ImageItem, imgShotIndex: number | undefined): boo
   if (b.shotIndex === undefined && imgShotIndex === undefined) return true;
   if (b.shotIndex === undefined || imgShotIndex === undefined) return false;
   return b.shotIndex === imgShotIndex;
+}
+
+function getSceneGroupMode(project: Project | null | undefined): 'swap' | 'products' {
+  return project?.sceneGroupMode === 'products' ? 'products' : 'swap';
+}
+
+function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
+  const grouped = new Map<number, ImageItem[]>();
+  for (const img of images) {
+    const groupIndex = typeof img.groupIndex === 'number' && img.groupIndex > 0 ? img.groupIndex : 1;
+    grouped.set(groupIndex, [...(grouped.get(groupIndex) || []), img]);
+  }
+  return Array.from(grouped.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, groupImages]) => {
+      const label = groupImages.find(img => typeof img.prompt === 'string' && img.prompt.trim())?.prompt?.trim();
+      return {
+        label,
+        images: groupImages.map(img => ({ data: img.data, mimeType: img.mimeType })),
+      };
+    });
 }
 
 export default function TaskDetailPage() {
@@ -222,8 +248,10 @@ export default function TaskDetailPage() {
       .filter(Boolean) as number[];
 
     if (isGroup) {
-      // 组图：目标是全部参考图序号 1..N，补齐缺失的那几张
-      const N = inputImages.sceneRefs.length;
+      // 组图：swap 目标是参考图序号；products 目标是产品组序号，补齐缺失的那几张
+      const N = getSceneGroupMode(project) === 'products'
+        ? buildProductGroupsFromImages(inputImages.products).length
+        : inputImages.sceneRefs.length;
       const remaining: number[] = [];
       for (let s = 1; s <= N; s++) {
         if (!existingShotIndexes.includes(s)) remaining.push(s);
@@ -284,14 +312,25 @@ export default function TaskDetailPage() {
     const selectedShotIndexes = overrideShotIndexes ?? parseSelectedShots(freshProject.selectedShots);
     // 组图（换装）：迭代维度是「参考图序号」，不是产品镜次
     const isGroup = moduleType === 'scene' && !!freshProject.sceneGroup;
-    // 组图目标参考图序号（1-based）：overrideShotIndexes 传了就是单张重做/补齐；否则全部 N 张
-    const groupTargetIndexes = isGroup ? overrideShotIndexes : undefined;
-    const groupTotal = isGroup
-      ? (groupTargetIndexes?.length ?? freshInputs.sceneRefs.length)
+    const sceneGroupMode = getSceneGroupMode(freshProject);
+    const productGroups = isGroup && sceneGroupMode === 'products'
+      ? buildProductGroupsFromImages(freshInputs.products)
+      : undefined;
+    const groupSourceCount = isGroup
+      ? (sceneGroupMode === 'products' ? (productGroups?.length || 0) : freshInputs.sceneRefs.length)
       : 0;
+    // 组图目标序号（1-based）：swap=参考图序号；products=产品组序号。override 传了就是单张重做/补齐。
+    const groupTargetIndexes = isGroup
+      ? (overrideShotIndexes ?? Array.from({ length: groupSourceCount }, (_, i) => i + 1))
+      : undefined;
+    const groupTotal = isGroup ? (groupTargetIndexes?.length ?? 0) : 0;
+    if (isGroup && groupSourceCount === 0) {
+      startLockRef.current = false;
+      return;
+    }
     // 组图：用户上传替换的主品品类（供后端点明换哪几件）
     let groupGarmentCategories: string[] | undefined;
-    if (isGroup && freshProject.sceneGroupCategories) {
+    if (isGroup && sceneGroupMode === 'swap' && freshProject.sceneGroupCategories) {
       try {
         const parsed = JSON.parse(freshProject.sceneGroupCategories);
         if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) groupGarmentCategories = parsed;
@@ -301,9 +340,15 @@ export default function TaskDetailPage() {
     // 全量生成（未指定 target）不带锚，由服务端首张成功图自锚。注意单张重做前该图已被降级为 result_backup，
     // 故按 type==='result' 过滤能自然排除正在重做的那张。
     let groupAnchor: { data: string; mimeType: string } | undefined;
-    if (isGroup && groupTargetIndexes && groupTargetIndexes.length > 0) {
+    if (isGroup) {
+      const savedAnchor = allImgs.find(i => i.type === 'anchor');
+      if (savedAnchor) {
+        groupAnchor = { data: savedAnchor.data, mimeType: savedAnchor.mimeType };
+      }
+    }
+    if (isGroup && !groupAnchor && overrideShotIndexes && overrideShotIndexes.length > 0) {
       const doneSiblings = allImgs
-        .filter(i => i.type === 'result' && typeof i.shotIndex === 'number' && !groupTargetIndexes.includes(i.shotIndex))
+        .filter(i => i.type === 'result' && typeof i.shotIndex === 'number' && !overrideShotIndexes.includes(i.shotIndex))
         .sort((a, b) => (a.shotIndex as number) - (b.shotIndex as number));
       if (doneSiblings.length > 0) {
         groupAnchor = { data: doneSiblings[0].data, mimeType: doneSiblings[0].mimeType };
@@ -392,18 +437,22 @@ export default function TaskDetailPage() {
       const productImgs = freshInputs.products.map(img => ({ data: img.data, mimeType: img.mimeType }));
 
       // ── 分块生成 ──
-      // GPT(openai)每张 ~3 分钟,5 张串在一个 SSE 请求里 ≈ 15 分钟,会撞路由预算/网关连接时长上限
-      // (表现为"第 5 张必失败")。产品图 + openai 时把镜次切成每块 ≤3 张的连续请求
-      // (每块 ≤ ~9 分钟,稳在预算内);首块产出的"有模特"图作为 anchor 回传给后续块,
-      // 让整组保持同一个模特身份。gemini(每张 ~25s)与场景图仍走单请求,行为不变。
+      // GPT(openai)每张 ~3 分钟,多张串在一个 SSE 请求里会撞路由预算/网关连接时长上限。
+      // 产品图与 sceneGroup + openai 都切成每块 ≤3 张的连续请求；Gemini 仍单请求。
       const CHUNK_SIZE = 3;
+      const targetIndexesForChunking = isGroup ? (groupTargetIndexes || []) : selectedShotIndexes;
+      const shouldChunk =
+        effectiveEngine === 'openai' &&
+        ((moduleType === 'product' && selectedShotIndexes.length > CHUNK_SIZE) ||
+          (isGroup && targetIndexesForChunking.length > CHUNK_SIZE));
       const genChunks: number[][] =
-        (moduleType === 'product' && effectiveEngine === 'openai' && selectedShotIndexes.length > CHUNK_SIZE)
-          ? Array.from({ length: Math.ceil(selectedShotIndexes.length / CHUNK_SIZE) },
-              (_, i) => selectedShotIndexes.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE))
-          : [selectedShotIndexes];
+        shouldChunk
+          ? Array.from({ length: Math.ceil(targetIndexesForChunking.length / CHUNK_SIZE) },
+              (_, i) => targetIndexesForChunking.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE))
+          : [targetIndexesForChunking];
       let anchorForChunk: { data: string; mimeType: string } | undefined;
-      const grandTotal = moduleType === 'product' ? selectedShotIndexes.length : 1;
+      let groupAnchorForChunk: { data: string; mimeType: string } | undefined = groupAnchor;
+      const grandTotal = isGroup ? targetIndexesForChunking.length : (moduleType === 'product' ? selectedShotIndexes.length : 1);
       let doneSoFar = 0; // 已完成(成功或失败)的镜次数,用于跨块累计进度显示
       let fatalStop = false; // 某块出现 fatal(余额不足/扣费失败)→ 不再向后续块发请求
 
@@ -421,7 +470,8 @@ export default function TaskDetailPage() {
         body: JSON.stringify({
           taskId,
           moduleType,
-          productImages: productImgs,
+          productImages: sceneGroupMode === 'products' ? [] : productImgs,
+          productGroups: sceneGroupMode === 'products' ? productGroups : undefined,
           modelRefImages: freshInputs.modelRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           bgRefImages: freshInputs.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           sceneRefImages: freshInputs.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
@@ -430,8 +480,8 @@ export default function TaskDetailPage() {
           bodyType: effectiveBodyType,
           skinTone: effectiveSkinTone,
           engine: effectiveEngine,
-          anchorImage: anchorForChunk,
-          selectedShotIndexes: chunkShots,
+          anchorImage: moduleType === 'product' ? anchorForChunk : undefined,
+          selectedShotIndexes: moduleType === 'product' ? chunkShots : selectedShotIndexes,
           outputSize: freshProject.outputSize,
           sceneOutputSize: freshProject.sceneOutputSize,
           // 自定义尺寸的实际宽高：服务端据此换算比例，否则 'custom' 永远按 3:4 生成
@@ -439,8 +489,9 @@ export default function TaskDetailPage() {
           customHeight: freshProject.customHeight,
           sceneHasModel: freshProject.sceneHasModel !== false,
           sceneGroup: isGroup || undefined,
-          sceneGroupTargetIndexes: isGroup ? groupTargetIndexes : undefined,
-          sceneGroupAnchor: groupAnchor,
+          sceneGroupMode: isGroup ? sceneGroupMode : undefined,
+          sceneGroupTargetIndexes: isGroup ? chunkShots : undefined,
+          sceneGroupAnchor: isGroup ? groupAnchorForChunk : undefined,
           sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
         }),
@@ -489,9 +540,12 @@ export default function TaskDetailPage() {
 
             if (eventType === 'status') {
               const phase = payload.phase as string;
-              // 只在首块进入"分析中"相位。后续块的请求也会推 analyzing,若不 gate,
-              // 进度条会在每个后续块开头从 ~60% 回跳到 8%(可见倒退)。
-              setGenerationPhase(phase === 'analyzing' && chunkIdx === 0 ? 'analyzing' : 'generating');
+              // 只在"本次运行还没产出任何图"时进入"分析中"相位。两种回跳都要 gate:
+              // ① 后续块(chunkIdx>0)的请求也会推 analyzing;② products 模式每个产品组开头
+              // 都会推一次 analyzing。若不 gate,进度条会从已完成进度回跳到 8%(可见倒退)。
+              setGenerationPhase(
+                phase === 'analyzing' && chunkIdx === 0 && successCount === 0 ? 'analyzing' : 'generating'
+              );
               if (payload.current !== undefined) {
                 // 跨块累计:块内 current 加上此前块已完成数,总数用 grandTotal(否则多块时显示"4/2")
                 setProgress({
@@ -499,6 +553,22 @@ export default function TaskDetailPage() {
                   total: grandTotal,
                   shotIndex: (payload.shotIndex as number) ?? 0,
                 });
+              }
+
+            } else if (eventType === 'anchor') {
+              const imageData = payload.imageData as string | undefined;
+              if (isGroup && imageData) {
+                groupAnchorForChunk = { data: imageData, mimeType: 'image/png' };
+                try {
+                  const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
+                  if (existingAnchor?.id) {
+                    await db.images.update(existingAnchor.id, { data: imageData, mimeType: 'image/png' });
+                  } else {
+                    await db.images.add({ projectId: taskId, type: 'anchor', data: imageData, mimeType: 'image/png' });
+                  }
+                } catch (e) {
+                  console.error('[anchor 落库] 失败:', e);
+                }
               }
 
             } else if (eventType === 'result') {
@@ -525,6 +595,7 @@ export default function TaskDetailPage() {
               const resultHasModel = moduleType === 'scene'
                 ? freshProject.sceneHasModel !== false
                 : shotConfig?.hasModel;
+              const resultGroupIndex = isGroup && sceneGroupMode === 'products' ? shotIndex : undefined;
               const newImgId = await db.images.add({
                 projectId: taskId,
                 type: 'result',
@@ -534,6 +605,7 @@ export default function TaskDetailPage() {
                 frameType: shotConfig?.frameType,
                 shootingAngle: shotConfig?.angle,
                 hasModel: resultHasModel,
+                groupIndex: resultGroupIndex,
                 imageType: shotConfig
                   ? (shotConfig.frameType === 'full_body' ? 'full_body'
                     : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
@@ -554,6 +626,7 @@ export default function TaskDetailPage() {
                 mimeType: 'image/png',
                 shotIndex: persistedShotIndex,
                 hasModel: resultHasModel,
+                groupIndex: resultGroupIndex,
                 imageType: shotConfig
                   ? (shotConfig.frameType === 'full_body' ? 'full_body'
                     : shotConfig.frameType === 'upper_body' ? 'half_body' : 'close_up')
@@ -593,12 +666,24 @@ export default function TaskDetailPage() {
       }
       // ── 单块 SSE 读取结束 ──
       // 首块跑完后抓一张"有模特"的成功图作为后续块的 anchor,让整组保持同一个模特身份
-      if (!anchorForChunk) {
+      if (moduleType === 'product' && !anchorForChunk) {
         try {
           const a = await db.images.where('projectId').equals(taskId)
             .filter(i => i.type === 'result' && i.hasModel === true).first();
           if (a) anchorForChunk = { data: a.data, mimeType: 'image/png' };
         } catch { /* 抓不到 anchor 不阻塞,后续块会各自锚定 */ }
+      }
+      if (isGroup && !groupAnchorForChunk) {
+        try {
+          const savedAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
+          if (savedAnchor) {
+            groupAnchorForChunk = { data: savedAnchor.data, mimeType: savedAnchor.mimeType };
+          } else {
+            const a = await db.images.where('projectId').equals(taskId)
+              .filter(i => i.type === 'result' && i.hasModel === true).first();
+            if (a) groupAnchorForChunk = { data: a.data, mimeType: 'image/png' };
+          }
+        } catch { /* 抓不到 anchor 不阻塞，服务端会回退首张成功图 */ }
       }
       } // ← 关闭分块 for 循环
 
@@ -724,6 +809,17 @@ export default function TaskDetailPage() {
       }
       for (const r of oldResults) {
         await db.images.update(r.id!, { type: 'result_backup' });
+      }
+      // 「调整参数重新生成」意味着要换新的模特/体型/肤色 → 必须删掉旧的身份锚(肖像卡)。
+      // 否则 handleStartGeneration 会复用旧锚并作为 sceneGroupAnchor 传给服务端,服务端见有锚
+      // 就跳过"按新参数重画肖像卡",导致新选的模特/肤色对人物身份完全不生效(却仍逐张扣费)。
+      // 注意:单张重做/补齐走 handleRegenerate,不经过这里,身份锚照常复用以保持同一新人。
+      const staleAnchors = await db.images
+        .where('projectId').equals(taskId)
+        .filter(img => img.type === 'anchor')
+        .toArray();
+      for (const a of staleAnchors) {
+        await db.images.delete(a.id!);
       }
       setImages([]);
 
@@ -902,7 +998,9 @@ export default function TaskDetailPage() {
       return `全部生成 ${parseSelectedShots(project.selectedShots).length} 张产品图`;
     }
     if (project.sceneGroup) {
-      return `生成 ${inputImages.sceneRefs.length} 张组图`;
+      return getSceneGroupMode(project) === 'products'
+        ? `生成 ${buildProductGroupsFromImages(inputImages.products).length} 张同景换品图`
+        : `生成 ${inputImages.sceneRefs.length} 张组图`;
     }
     return '开始生成场景图';
   };
@@ -911,10 +1009,27 @@ export default function TaskDetailPage() {
     if (!project) return 7;
     // 组图：目标张数 = lookbook 参考图张数
     if (project.moduleType === 'scene' && project.sceneGroup) {
-      return inputImages.sceneRefs.length;
+      return getSceneGroupMode(project) === 'products'
+        ? buildProductGroupsFromImages(inputImages.products).length
+        : inputImages.sceneRefs.length;
     }
     return parseSelectedShots(project.selectedShots).length;
   };
+
+  const productGroupLabels = (() => {
+    if (!project || project.moduleType !== 'scene' || !project.sceneGroup || getSceneGroupMode(project) !== 'products') {
+      return [];
+    }
+    if (project.sceneGroupCategories) {
+      try {
+        const parsed = JSON.parse(project.sceneGroupCategories);
+        if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) {
+          return parsed as string[];
+        }
+      } catch { /* ignore */ }
+    }
+    return buildProductGroupsFromImages(inputImages.products).map((group, index) => group.label || `产品 ${index + 1}`);
+  })();
 
   if (loading) {
     return (
@@ -1560,6 +1675,19 @@ export default function TaskDetailPage() {
             </h2>
 
             <div className="mb-6">{paramChips}</div>
+
+            {productGroupLabels.length > 0 && (
+              <div className="mb-5 flex flex-wrap gap-2">
+                {productGroupLabels.map((label, index) => (
+                  <span
+                    key={`${label}-${index}`}
+                    className="text-xs px-2.5 py-1 rounded-lg bg-[var(--color-background)] text-[var(--color-text-secondary)]"
+                  >
+                    产品 {index + 1}: {label || `产品 ${index + 1}`}
+                  </span>
+                ))}
+              </div>
+            )}
 
             <ResultGallery
               images={images.map(img => ({

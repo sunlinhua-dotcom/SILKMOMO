@@ -44,6 +44,12 @@
 
 ## 二、已修复归档
 
+### 2026-07-07(组图真人穿拍产品图污染新模特身份 → Prompt + anchor + 分块 + 新模式修复)
+- **症状**:`/lookbook`「组图·换装」在客户产品图是真人穿拍时，生成的新模特脸经常被产品参考图里的模特脸带偏；首张失败锚还会污染整批。
+- **根因**:① `buildSceneGroupPrompt` 只要求不抄 scene-base 人脸，没明确产品图里的人不是身份参考；② GPT edit sceneAsEditBase 参考图顺序把 anchor 放最后，1 张 anchor 抗不过多张产品真人脸；③ 首批第 1 张没有稳定 anchor，首张一旦被带偏会污染后续。
+- **修法**:Prompt 同时忽略 scene-base 与 product 人脸，产品图只作服装参考；sceneAsEditBase 顺序改为 scene-base → anchor → product → accessory；sceneGroup 首批扣费前不计费生成 Gemini 虚构模特肖像卡并通过 SSE `anchor` 落库，失败回退首张成功图；任务页 sceneGroup+OpenAI 按 ≤3 分块并跨块优先传 anchor；新增「同景换品 · 1景N品」模式复用同一 anchor 机制。
+- **验证**:`npx tsc --noEmit`、`npm run build`、`npm run lint` 均通过；未做真实出图打样。
+
 ### 2026-07-01(GPT 一次生成 >5 张:单请求过长第 5 张必挂 → 分块生成，先稳）
 - **症状**:GPT(openai)串行生成,一次 5 张(默认镜次 [1,2,3,4,9])到第 5 张必失败。
 - **根因**:5 张 GPT 串在**同一个 SSE 请求**里,每张上游 ~3 分钟 → 单请求 ≈ 15 分钟,超过路由预算(maxDuration 800s)与 Zeabur 网关的单连接总时长上限(25s 心跳只防空闲、防不住总时长),第 4–5 张之间被掐断。客户端 fetch 无超时、每张 OpenAI 超时各 280s 不累计,都不是元凶——是整个请求跑太久。

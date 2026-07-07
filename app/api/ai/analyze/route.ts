@@ -42,7 +42,7 @@ export async function POST(req: Request) {
     }
 
     if (!isAiAssistantConfigured()) {
-      return NextResponse.json({ primaryCategories: [], accessories: [], billingSkipped: true });
+      return NextResponse.json({ primaryCategories: [], accessories: [], garmentsWornByPerson: false, billingSkipped: true });
     }
 
     const deduction = await deductCustom(
@@ -52,17 +52,18 @@ export async function POST(req: Request) {
       'gemini-3.1-flash-lite-preview'
     );
     if (!deduction.success) {
-      return NextResponse.json({ primaryCategories: [], accessories: [], billingSkipped: true });
+      return NextResponse.json({ primaryCategories: [], accessories: [], garmentsWornByPerson: false, billingSkipped: true });
     }
 
     const groupResult = await analyzeLookbookGroup(clean);
     if (!groupResult.ok) {
       await refundBalance(auth.userId, PRICING.aiAnalysisPricePerCallFen, 'AI 组图分析失败退款');
-      return NextResponse.json({ primaryCategories: [], accessories: [], billingSkipped: true });
+      return NextResponse.json({ primaryCategories: [], accessories: [], garmentsWornByPerson: false, billingSkipped: true });
     }
     return NextResponse.json({
       primaryCategories: groupResult.primaryCategories,
       accessories: groupResult.accessories,
+      garmentsWornByPerson: groupResult.garmentsWornByPerson,
       costFen: PRICING.aiAnalysisPricePerCallFen,
     });
   }

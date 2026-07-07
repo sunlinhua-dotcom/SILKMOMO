@@ -9,7 +9,7 @@ export type SkinTone = 'light' | 'medium' | 'deep';
 export type BodyType = 'slim' | 'standard' | 'curvy';
 export type ShootingAngle = 'front' | 'side' | 'back';
 export type FrameType = 'full_body' | 'upper_body' | 'lower_body' | 'close_up';
-export type ImageType = 'product' | 'model_ref' | 'scene_ref' | 'bg_ref' | 'accessory' | 'result' | 'result_backup';
+export type ImageType = 'product' | 'model_ref' | 'scene_ref' | 'bg_ref' | 'accessory' | 'anchor' | 'result' | 'result_backup';
 
 export interface Project {
   id?: number;
@@ -40,6 +40,7 @@ export interface Project {
 
   // 场景图·组图（换装）模式专属
   sceneGroup?: boolean;              // true=组图（N 张 lookbook → N 张换装图）
+  sceneGroupMode?: string;           // swap=N景1品；products=1景N品（非索引字段，不 bump Dexie version）
   sceneGroupCategories?: string;     // JSON: 分析出的主品品类（用于展示/回显）
 
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
@@ -65,6 +66,7 @@ export interface ImageItem {
   frameType?: FrameType;         // 取景框架
   hasModel?: boolean;            // 是否含模特
   outputSize?: string;           // 该图的输出尺寸
+  groupIndex?: number;           // 同景换品模式：产品组序号（非索引字段，不 bump Dexie version）
 
   // 兼容旧版
   imageType?: 'hero' | 'full_body' | 'half_body' | 'close_up';

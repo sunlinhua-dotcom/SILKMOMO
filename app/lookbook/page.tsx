@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { History, Sparkles, Wand2 } from 'lucide-react';
+import { History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { UserNav } from '@/components/UserNav';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
@@ -13,7 +13,7 @@ import {
   type GroupAnalysisState,
   MAX_TOTAL_GARMENTS,
 } from '@/components/LookbookGarmentSlots';
-import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE } from '@/lib/models';
+import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE, SCENE_OUTPUT_SIZES } from '@/lib/models';
 import { PRICING } from '@/lib/billing-constants';
 import type { CompressedImage } from '@/lib/image-compressor';
 import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib/db';
@@ -22,6 +22,95 @@ import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib
 const LOOKBOOK_MAX = 20;
 // 单价引用计费常量，避免与后端扣费单价漂移（后端逐张扣 PRICING.pricePerCallFen）
 const PRICE_PER_IMAGE_FEN = PRICING.pricePerCallFen;
+const PRODUCT_GROUP_MAX = 8;
+const PRODUCT_GROUP_IMAGE_MAX = 4;
+
+type LookbookMode = 'swap' | 'products';
+interface ProductGroupDraft {
+  id: string;
+  label: string;
+  images: CompressedImage[];
+}
+
+function createProductGroup(): ProductGroupDraft {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    label: '',
+    images: [],
+  };
+}
+
+function OutputSizeSelector({
+  value,
+  onChange,
+  customWidth,
+  customHeight,
+  onCustomSizeChange,
+  radioName,
+}: {
+  value: string;
+  onChange: (sizeId: string) => void;
+  customWidth: number;
+  customHeight: number;
+  onCustomSizeChange: (w: number, h: number) => void;
+  radioName: string;
+}) {
+  return (
+    <div className="space-y-2">
+      {SCENE_OUTPUT_SIZES.map((size) => (
+        <label
+          key={size.id}
+          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all duration-200 ${
+            value === size.id
+              ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.05)]'
+              : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
+          }`}
+        >
+          <input
+            type="radio"
+            name={radioName}
+            value={size.id}
+            checked={value === size.id}
+            onChange={() => onChange(size.id)}
+            className="sr-only"
+          />
+          <div className={`flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+            value === size.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
+          }`}>
+            {value === size.id && <div className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />}
+          </div>
+          <div className="flex-1">
+            <span className="text-sm font-medium text-[var(--color-text)]">{size.label}</span>
+            {size.sublabel && <span className="text-xs text-[var(--color-text-muted)] ml-2">{size.sublabel}</span>}
+          </div>
+          {size.id !== 'custom' && (
+            <span className="text-xs text-[var(--color-text-muted)] font-mono">{size.width}×{size.height}</span>
+          )}
+        </label>
+      ))}
+      {value === 'custom' && (
+        <div className="mt-3 flex items-center gap-3 p-3 bg-[var(--color-background)] rounded-xl">
+          <input
+            type="number"
+            value={customWidth}
+            onChange={(e) => onCustomSizeChange(parseInt(e.target.value) || 0, customHeight)}
+            placeholder="宽"
+            className="w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+          />
+          <span className="text-[var(--color-text-muted)] text-sm font-medium">×</span>
+          <input
+            type="number"
+            value={customHeight}
+            onChange={(e) => onCustomSizeChange(customWidth, parseInt(e.target.value) || 0)}
+            placeholder="高"
+            className="w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+          />
+          <span className="text-xs text-[var(--color-text-muted)]">px</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function LookbookStudio() {
   // ── 登录 / 余额 ──
@@ -38,12 +127,15 @@ export default function LookbookStudio() {
   }, []);
 
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
+  const [mode, setMode] = useState<LookbookMode>('swap');
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupAnalysis, setGroupAnalysis] = useState<GroupAnalysisState>({
-    loading: false, done: false, primaryCategories: [], accessories: [],
+    loading: false, done: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false,
   });
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
+  const [singleSceneImages, setSingleSceneImages] = useState<CompressedImage[]>([]);
+  const [productGroups, setProductGroups] = useState<ProductGroupDraft[]>([createProductGroup()]);
   // 组图默认走 GPT 图像编辑：只有 edit 路径能冻结原场景+姿势，Gemini 会重绘
   const [selectedEngine, setSelectedEngine] = useState<ImageEngine>('openai');
   const [sceneOutputSize, setSceneOutputSize] = useState('hero_desktop');
@@ -53,8 +145,18 @@ export default function LookbookStudio() {
   const [isGenerating, setIsGenerating] = useState(false);
 
   const groupGarmentImages = Object.values(groupGarments).flat();
+  const validProductGroups = productGroups.filter(g => g.images.length > 0);
   const handleGroupGarmentChange = (category: string, imgs: CompressedImage[]) => {
     setGroupGarments(prev => ({ ...prev, [category]: imgs }));
+  };
+  const updateProductGroup = (id: string, patch: Partial<ProductGroupDraft>) => {
+    setProductGroups(prev => prev.map(group => group.id === id ? { ...group, ...patch } : group));
+  };
+  const addProductGroup = () => {
+    setProductGroups(prev => prev.length >= PRODUCT_GROUP_MAX ? prev : [...prev, createProductGroup()]);
+  };
+  const removeProductGroup = (id: string) => {
+    setProductGroups(prev => prev.length <= 1 ? prev : prev.filter(group => group.id !== id));
   };
 
   // ── 自动识别（防抖 + 指纹去重 + 竞态守卫） ──
@@ -75,7 +177,7 @@ export default function LookbookStudio() {
       });
       if (seq !== seqRef.current) return;
       if (!res.ok) {
-        setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, error: 'AI 识别暂时不可用，可直接在下方通用槽上传服装' }));
+        setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, garmentsWornByPerson: false, error: 'AI 识别暂时不可用，可直接在下方通用槽上传服装' }));
         return; // 失败不烧指纹：同一组图还能自动重试一次
       }
       const data = await res.json();
@@ -86,10 +188,11 @@ export default function LookbookStudio() {
         loading: false, done: true,
         primaryCategories: Array.isArray(data.primaryCategories) ? data.primaryCategories : [],
         accessories: Array.isArray(data.accessories) ? data.accessories : [],
+        garmentsWornByPerson: data.garmentsWornByPerson === true,
       });
     } catch {
       if (seq !== seqRef.current) return;
-      setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, error: '识别失败，可点「重新识别」或直接在下方通用槽上传' }));
+      setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, garmentsWornByPerson: false, error: '识别失败，可点「重新识别」或直接在下方通用槽上传' }));
     }
   }, []);
 
@@ -109,15 +212,23 @@ export default function LookbookStudio() {
     setLookbookImages(imgs);
     seqRef.current++;
     setGroupAnalysis(prev => (prev.done || prev.loading)
-      ? { loading: false, done: false, primaryCategories: [], accessories: [] }
+      ? { loading: false, done: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false }
       : prev);
   };
 
   // ── 校验 + 成本 ──
   const lookbookOk = lookbookImages.length >= 1 && lookbookImages.length <= LOOKBOOK_MAX;
   const garmentsOk = groupGarmentImages.length >= 1 && groupGarmentImages.length <= MAX_TOTAL_GARMENTS;
-  const canGenerate = lookbookOk && garmentsOk;
-  const totalCostFen = Math.max(1, lookbookImages.length) * PRICE_PER_IMAGE_FEN;
+  const singleSceneOk = singleSceneImages.length === 1;
+  const productGroupsOk =
+    validProductGroups.length >= 1 &&
+    validProductGroups.length <= PRODUCT_GROUP_MAX &&
+    validProductGroups.every(group => group.images.length >= 1 && group.images.length <= PRODUCT_GROUP_IMAGE_MAX);
+  const targetCount = mode === 'products' ? validProductGroups.length : lookbookImages.length;
+  const canGenerate = mode === 'products'
+    ? singleSceneOk && productGroupsOk
+    : lookbookOk && garmentsOk;
+  const totalCostFen = Math.max(1, targetCount) * PRICE_PER_IMAGE_FEN;
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
@@ -130,11 +241,14 @@ export default function LookbookStudio() {
     setIsGenerating(true);
     try {
       await migrateLegacyStylePackImages();
+      const productModeLabels = validProductGroups.map((group, index) => group.label.trim() || `产品 ${index + 1}`);
       const projectId = await db.projects.add({
         createdAt: new Date(),
         updatedAt: new Date(),
         status: 'pending',
-        name: projectName.trim() || `组图·换装 ${new Date().toLocaleString('zh-CN')}`,
+        name: projectName.trim() || (mode === 'products'
+          ? `同景换品 ${new Date().toLocaleString('zh-CN')}`
+          : `组图·换装 ${new Date().toLocaleString('zh-CN')}`),
         moduleType: 'scene',
         bodyType: DEFAULT_BODY_TYPE.id,
         skinTone: DEFAULT_SKIN_TONE.id,
@@ -142,24 +256,45 @@ export default function LookbookStudio() {
         sceneOutputSize,
         sceneHasModel: true,
         sceneGroup: true,
-        // 只序列化真正上传了图的品类，避免后端 prompt 点名换不存在的件
-        sceneGroupCategories: JSON.stringify(
-          Object.keys(groupGarments).filter(k => (groupGarments[k]?.length || 0) > 0),
-        ),
+        sceneGroupMode: mode,
+        sceneGroupCategories: mode === 'products'
+          ? JSON.stringify(productModeLabels)
+          : JSON.stringify(
+              Object.keys(groupGarments).filter(k => (groupGarments[k]?.length || 0) > 0),
+            ),
         customWidth: sceneOutputSize === 'custom' ? sceneCustomW : undefined,
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
       });
 
       await prepareProjectImageSlot(projectId as number);
 
-      for (const img of groupGarmentImages) {
-        await db.images.add({ projectId, type: 'product', data: img.base64, mimeType: img.mimeType });
-      }
-      for (const img of lookbookImages) {
-        await db.images.add({ projectId, type: 'scene_ref', data: img.base64, mimeType: img.mimeType });
-      }
-      for (const img of accessoryImages) {
-        await db.images.add({ projectId, type: 'accessory', data: img.base64, mimeType: img.mimeType });
+      if (mode === 'products') {
+        for (const img of singleSceneImages) {
+          await db.images.add({ projectId, type: 'scene_ref', data: img.base64, mimeType: img.mimeType });
+        }
+        for (const [groupIdx, group] of validProductGroups.entries()) {
+          const label = group.label.trim() || `产品 ${groupIdx + 1}`;
+          for (const img of group.images) {
+            await db.images.add({
+              projectId,
+              type: 'product',
+              data: img.base64,
+              mimeType: img.mimeType,
+              groupIndex: groupIdx + 1,
+              prompt: label,
+            });
+          }
+        }
+      } else {
+        for (const img of groupGarmentImages) {
+          await db.images.add({ projectId, type: 'product', data: img.base64, mimeType: img.mimeType });
+        }
+        for (const img of lookbookImages) {
+          await db.images.add({ projectId, type: 'scene_ref', data: img.base64, mimeType: img.mimeType });
+        }
+        for (const img of accessoryImages) {
+          await db.images.add({ projectId, type: 'accessory', data: img.base64, mimeType: img.mimeType });
+        }
       }
 
       window.location.href = `/task/${projectId}`;
@@ -220,43 +355,169 @@ export default function LookbookStudio() {
           </p>
         </div>
 
-        {/* ① 整组 lookbook */}
-        <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-[var(--color-text)]">① 整组 lookbook</h3>
-            {lookbookImages.length > 0 && (
-              <span className="text-xs text-[var(--color-accent)] font-medium">已传 {lookbookImages.length} 张 → 出 {lookbookImages.length} 张</span>
-            )}
-          </div>
-          <ImageUploader
-            title="lookbook 参考图"
-            description={`上传整组场景主图（最多 ${LOOKBOOK_MAX} 张，上传几张最后就出几张）。系统会自动识别其中的服装与附件。`}
-            required
-            maxFiles={LOOKBOOK_MAX}
-            images={lookbookImages}
-            onImagesChange={onLookbookChange}
-            variant="gold"
-          />
-          {lookbookImages.length > LOOKBOOK_MAX && (
-            <p className="mt-2 text-xs text-amber-600">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
-          )}
+        <div className="grid grid-cols-2 gap-2 rounded-2xl bg-[var(--color-surface)] p-1 border border-[var(--color-border-light)]">
+          {([
+            { id: 'swap' as const, label: '换装 · N景1品' },
+            { id: 'products' as const, label: '同景换品 · 1景N品' },
+          ]).map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setMode(item.id)}
+              className={`rounded-xl px-3 py-3 text-xs sm:text-sm font-medium transition-colors ${
+                mode === item.id
+                  ? 'bg-[var(--color-accent)] text-white shadow-sm'
+                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background)]'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
 
-        {/* ②③④⑤⑥ 识别 + 品类槽 + 附件 + 模特 + 尺寸 */}
-        <LookbookGarmentSlots
-          lookbookCount={lookbookImages.length}
-          groupAnalysis={groupAnalysis}
-          onReanalyze={reanalyze}
-          groupGarments={groupGarments}
-          onGroupGarmentChange={handleGroupGarmentChange}
-          accessoryImages={accessoryImages}
-          onAccessoryImagesChange={setAccessoryImages}
-          outputSize={sceneOutputSize}
-          onOutputSizeChange={setSceneOutputSize}
-          customWidth={sceneCustomW}
-          customHeight={sceneCustomH}
-          onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
-        />
+        {mode === 'swap' ? (
+          <>
+            {/* ① 整组 lookbook */}
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-[var(--color-text)]">① 整组 lookbook</h3>
+                {lookbookImages.length > 0 && (
+                  <span className="text-xs text-[var(--color-accent)] font-medium">已传 {lookbookImages.length} 张 → 出 {lookbookImages.length} 张</span>
+                )}
+              </div>
+              <ImageUploader
+                title="lookbook 参考图"
+                description={`上传整组场景主图（最多 ${LOOKBOOK_MAX} 张，上传几张最后就出几张）。系统会自动识别其中的服装与附件。`}
+                required
+                maxFiles={LOOKBOOK_MAX}
+                images={lookbookImages}
+                onImagesChange={onLookbookChange}
+                variant="gold"
+              />
+              {lookbookImages.length > LOOKBOOK_MAX && (
+                <p className="mt-2 text-xs text-amber-600">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
+              )}
+            </div>
+
+            {/* ②③④⑤⑥ 识别 + 品类槽 + 附件 + 模特 + 尺寸 */}
+            <LookbookGarmentSlots
+              lookbookCount={lookbookImages.length}
+              groupAnalysis={groupAnalysis}
+              onReanalyze={reanalyze}
+              groupGarments={groupGarments}
+              onGroupGarmentChange={handleGroupGarmentChange}
+              accessoryImages={accessoryImages}
+              onAccessoryImagesChange={setAccessoryImages}
+              outputSize={sceneOutputSize}
+              onOutputSizeChange={setSceneOutputSize}
+              customWidth={sceneCustomW}
+              customHeight={sceneCustomH}
+              onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
+              garmentsWornByPerson={groupAnalysis.garmentsWornByPerson === true}
+            />
+          </>
+        ) : (
+          <>
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-[var(--color-text)]">① 场景参考图</h3>
+                {singleSceneImages.length === 1 && (
+                  <span className="text-xs text-[var(--color-accent)] font-medium">同一场景将复用到每个产品组</span>
+                )}
+              </div>
+              <ImageUploader
+                title="场景参考图"
+                description="上传 1 张带人物的场景图；所有结果都会保留这个场景、机位和姿势，只替换为不同产品组。"
+                required
+                maxFiles={1}
+                images={singleSceneImages}
+                onImagesChange={setSingleSceneImages}
+                variant="gold"
+              />
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)] space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--color-text)]">② 产品组</h3>
+                  <p className="text-xs text-[var(--color-text-muted)] mt-0.5">每组会生成 1 张结果；每组可上传 1-4 张产品参考图，可填写组名。</p>
+                </div>
+                <span className="shrink-0 text-xs text-[var(--color-text-muted)] tabular-nums">
+                  {validProductGroups.length}/{PRODUCT_GROUP_MAX} 组
+                </span>
+              </div>
+
+              {productGroups.map((group, index) => (
+                <div key={group.id} className="rounded-2xl border border-[var(--color-border-light)] p-4 space-y-3 bg-[var(--color-background)]/40">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="text"
+                      value={group.label}
+                      onChange={(e) => updateProductGroup(group.id, { label: e.target.value })}
+                      placeholder={`产品 ${index + 1} 组名（选填）`}
+                      aria-label={`产品 ${index + 1} 组名`}
+                      className="flex-1 text-sm border border-[var(--color-border-light)] rounded-xl px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeProductGroup(group.id)}
+                      disabled={productGroups.length <= 1}
+                      className="w-10 h-10 inline-flex items-center justify-center rounded-xl border border-[var(--color-border-light)] text-[var(--color-text-muted)] hover:text-red-500 hover:border-red-200 disabled:opacity-40 disabled:hover:text-[var(--color-text-muted)] disabled:hover:border-[var(--color-border-light)]"
+                      aria-label={`删除产品 ${index + 1}`}
+                    >
+                      <Trash2 className="w-4 h-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                  <ImageUploader
+                    title={`产品 ${index + 1}`}
+                    description={`上传本组产品图，最多 ${PRODUCT_GROUP_IMAGE_MAX} 张`}
+                    required
+                    maxFiles={PRODUCT_GROUP_IMAGE_MAX}
+                    images={group.images}
+                    onImagesChange={(images) => updateProductGroup(group.id, { images })}
+                    variant="gold"
+                  />
+                  {group.images.length > PRODUCT_GROUP_IMAGE_MAX && (
+                    <p className="text-xs text-amber-600">每组最多 {PRODUCT_GROUP_IMAGE_MAX} 张，请减少后再生成。</p>
+                  )}
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={addProductGroup}
+                disabled={productGroups.length >= PRODUCT_GROUP_MAX}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:text-[var(--color-text-secondary)]"
+              >
+                <Plus className="w-4 h-4" aria-hidden="true" />
+                添加产品组
+              </button>
+
+              {!productGroupsOk && (
+                <p className="text-xs text-amber-600">请至少保留 1 个产品组；每组上传 1-4 张，最多 {PRODUCT_GROUP_MAX} 组。</p>
+              )}
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">③ 模特</h3>
+              <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                每张都使用<span className="text-[var(--color-accent)] font-medium">同一个全新模特</span>，并保持场景图中的姿势、机位和情绪一致。
+              </p>
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">④ 输出尺寸</h3>
+              <OutputSizeSelector
+                value={sceneOutputSize}
+                onChange={setSceneOutputSize}
+                customWidth={sceneCustomW}
+                customHeight={sceneCustomH}
+                onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
+                radioName="productsOutputSize"
+              />
+            </div>
+          </>
+        )}
 
         {/* 引擎（组图默认 GPT 图像编辑以冻结场景） */}
         <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
@@ -278,8 +539,14 @@ export default function LookbookStudio() {
         {/* ⑦ 摘要 + 生成 CTA */}
         <div className="sticky bottom-0 pt-2 pb-4 bg-gradient-to-t from-[var(--color-background)] via-[var(--color-background)] to-transparent">
           <p className="text-xs text-[var(--color-text-muted)] text-center mb-2">
-            {groupAnalysis.done && detectedCount > 0 ? `识别到 ${detectedCount} 件 · ` : ''}
-            已上传 {Object.keys(groupGarments).filter(k => (groupGarments[k]?.length || 0) > 0).length} 类主品 · 将生成 {lookbookImages.length} 张
+            {mode === 'swap' ? (
+              <>
+                {groupAnalysis.done && detectedCount > 0 ? `识别到 ${detectedCount} 件 · ` : ''}
+                已上传 {Object.keys(groupGarments).filter(k => (groupGarments[k]?.length || 0) > 0).length} 类主品 · 将生成 {lookbookImages.length} 张
+              </>
+            ) : (
+              <>已上传 {validProductGroups.length} 个产品组 · 将生成 {validProductGroups.length} 张</>
+            )}
           </p>
           <button
             onClick={isBalanceSufficient ? handleGenerate : undefined}
@@ -304,13 +571,30 @@ export default function LookbookStudio() {
             ) : (
               <>
                 <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
-                <span>生成 {lookbookImages.length} 张换装图（¥{(totalCostFen / 100).toFixed(2)}）</span>
+                <span>
+                  {mode === 'products'
+                    ? `生成 ${validProductGroups.length} 张同景换品图`
+                    : `生成 ${lookbookImages.length} 张换装图`}
+                  （¥{(totalCostFen / 100).toFixed(2)}）
+                </span>
               </>
             )}
           </button>
           {!canGenerate && currentUser && isBalanceSufficient && (
             <p className="text-[11px] text-[var(--color-text-muted)] text-center mt-2">
-              {lookbookImages.length === 0 ? '先上传 lookbook' : groupGarmentImages.length === 0 ? '至少上传一件要换上的服装' : lookbookImages.length > LOOKBOOK_MAX ? `lookbook 最多 ${LOOKBOOK_MAX} 张` : `主品图合计最多 ${MAX_TOTAL_GARMENTS} 张`}
+              {mode === 'products'
+                ? singleSceneImages.length === 0
+                  ? '先上传 1 张场景参考图'
+                  : validProductGroups.length === 0
+                    ? '至少添加 1 个产品组'
+                    : '每个产品组需上传 1-4 张产品图'
+                : lookbookImages.length === 0
+                  ? '先上传 lookbook'
+                  : groupGarmentImages.length === 0
+                    ? '至少上传一件要换上的服装'
+                    : lookbookImages.length > LOOKBOOK_MAX
+                      ? `lookbook 最多 ${LOOKBOOK_MAX} 张`
+                      : `主品图合计最多 ${MAX_TOTAL_GARMENTS} 张`}
             </p>
           )}
         </div>
