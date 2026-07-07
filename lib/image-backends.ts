@@ -206,6 +206,10 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
+    if (input.anchorImage) {
+      parts.push({ text: '\n\nAnchor Reference Image (the ONLY identity reference for the new model):' });
+      parts.push({ inline_data: { mime_type: input.anchorImage.mimeType, data: input.anchorImage.data } });
+    }
   }
 
   if (input.modelRefImages?.length) {
@@ -214,7 +218,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
-  parts.push({ text: '\n\nProduct Reference Images (extract garment design, fabric, color):' });
+  parts.push({ text: '\n\nProduct Reference Images (garment reference ONLY — extract fabric, color, pattern, silhouette; ignore any person/face):' });
   input.productImages.forEach(img =>
     parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
   );
@@ -236,7 +240,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
-  if (input.anchorImage) {
+  if (!input.sceneAsEditBase && input.anchorImage) {
     parts.push({ text: '\n\nAnchor Reference Image (CRITICAL — use the EXACT same model identity):' });
     parts.push({ inline_data: { mime_type: input.anchorImage.mimeType, data: input.anchorImage.data } });
   }
@@ -264,11 +268,11 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   const refImages: Array<{ img: ImageInput; tag: string }> = [];
   if (input.sceneAsEditBase) {
     // 组图（换装）模式：底图排在最前——/v1/images/edits 的 image[] 首图作为主编辑底图，
-    // 保证 GPT 保留场景/姿势、只换服装+人物；不传 model/bg 参考图避免干扰底图。
+    // anchor 紧跟第二位，优先锁新模特身份；不传 model/bg 参考图避免干扰底图。
     (input.sceneRefImages || []).forEach(img => refImages.push({ img, tag: 'scene-base' }));
+    if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
     input.productImages.forEach(img => refImages.push({ img, tag: 'product' }));
     (input.accessoryImages || []).forEach(img => refImages.push({ img, tag: 'accessory' }));
-    if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
   } else {
     input.productImages.forEach(img => refImages.push({ img, tag: 'product' }));
     (input.modelRefImages || []).forEach(img => refImages.push({ img, tag: 'model' }));
@@ -281,10 +285,20 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   const limited = refImages.slice(0, 16);
 
   // 在 prompt 里给参考图分组打标，弥补 multipart 不能传图标签的限制
+  const roleText = (tag: string) => {
+    switch (tag) {
+      case 'product':
+        return 'product (garment reference ONLY — ignore any person/face in it)';
+      case 'anchor':
+        return 'anchor (the ONLY identity reference for the new model)';
+      default:
+        return tag;
+    }
+  };
   const taggedPrompt = `${input.prompt}
 
 Reference image roles (in order of upload):
-${limited.map((r, i) => `  ${i + 1}. ${r.tag}`).join('\n')}`;
+${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
 
   const formData = new FormData();
   formData.append('model', OPENAI_MODEL);

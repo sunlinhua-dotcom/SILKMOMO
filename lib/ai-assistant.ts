@@ -131,9 +131,10 @@ export async function analyzeLookbookGroup(
   ok: boolean;
   primaryCategories: Array<{ category: GarmentCategory; description: string; confidence?: number }>;
   accessories: Array<{ type: AccessoryType; description: string }>;
+  garmentsWornByPerson: boolean;
 }> {
   if (!LITE_CONFIG.apiKey || images.length === 0) {
-    return { ok: false, primaryCategories: [], accessories: [] };
+    return { ok: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false };
   }
 
   // 品类是全组共性，抽样前 4 张足够推断槽位，避免多图 payload 过大 / 上游不稳
@@ -149,11 +150,13 @@ export async function analyzeLookbookGroup(
 Split items into two groups:
 - primaryCategories: the MAIN worn garments that a seller would swap in — each one of: dress | top | pants | skirt | suit | outerwear | jumpsuit | other. Usually 1 (sometimes 2, e.g. a top + pants set). List the DISTINCT main garments visible across the set, most prominent first.
 - accessories: everything else worn/carried — bag | jewelry | necklace | belt | scarf | hat | shoes | other.
+- garmentsWornByPerson: true if the product/lookbook photos show the garments worn by a real person/model/mannequin with a visible human face or body; false if they are flat-lay, hanger, ghost mannequin, white-background product-only, or no person is visible.
 
 Return format:
 {
   "primaryCategories": [ { "category": "dress", "description": "short English description (fabric, color, silhouette)", "confidence": 0.9 } ],
-  "accessories": [ { "type": "bag", "description": "short English description" } ]
+  "accessories": [ { "type": "bag", "description": "short English description" } ],
+  "garmentsWornByPerson": true
 }
 
 JSON only, no explanation.`,
@@ -179,13 +182,13 @@ JSON only, no explanation.`,
 
     if (!response.ok) {
       console.warn('[AI Lite] 组图分析失败:', response.status);
-      return { ok: false, primaryCategories: [], accessories: [] };
+      return { ok: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false };
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-      return { ok: false, primaryCategories: [], accessories: [] };
+      return { ok: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false };
     }
 
     const parsed = JSON.parse(text);
@@ -208,10 +211,10 @@ JSON only, no explanation.`,
             description: a.description || '',
           }))
       : [];
-    return { ok: true, primaryCategories, accessories };
+    return { ok: true, primaryCategories, accessories, garmentsWornByPerson: parsed.garmentsWornByPerson === true };
   } catch (error) {
     console.warn('[AI Lite] 组图分析异常:', sanitizeUpstreamError(error));
-    return { ok: false, primaryCategories: [], accessories: [] };
+    return { ok: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false };
   }
 }
 

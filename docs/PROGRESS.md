@@ -4,6 +4,11 @@
 
 ## 时间线
 
+### 2026-07-07
+- **「组图·换装」换脸稳定性修复 + 同景换品模式落地**：针对真人穿拍产品图会把产品图模特脸带入新模特的问题，完成 P0/P1/P2 全链路修复。Prompt 明确产品图中的任何人物都不是身份参考，只保留服装面料/颜色/图案/版型；GPT edit 参考图顺序改为 `scene-base → anchor → product → accessory`，anchor role 明确为唯一身份参考。sceneGroup 首批生成前新增不计费 Gemini 肖像卡 anchor bootstrap，并通过 SSE `anchor` 事件写入 IndexedDB `type='anchor'`；失败静默回退首张成功图作锚。任务页扩展 sceneGroup+OpenAI ≤3 分块并跨块传 anchor。`/lookbook` 新增模式切换：「换装 · N景1品」保留现有流程，「同景换品 · 1景N品」支持单张场景图 + 最多 8 个产品组（每组 1-4 张 + 可选组名），写入 `sceneGroupMode='products'` 与 `groupIndex`，任务页按产品组序号重做/补齐。`analyzeLookbookGroup` 增加真人穿拍检测并在主品上传区提示补充平铺/白底图更稳。
+  - **资金与存储约束**：不新增付费点；肖像卡和服装分析仍在扣费前；sceneGroup `swap/products` 两种模式共用逐张 `checkBalance→deductBalance→inner try→成功/失败/断连` 骨架，`deductBalance` 成功后到 inner try 之间无 `await`。Dexie 不 bump 版本，`SilkMomoDB`、`silkmomo_*`、`silkmomo_token` 均未改名。
+  - **验证**：`npx tsc --noEmit` 通过；`npm run build` 通过（仅既有 CSS `@property` warning）；`npm run lint` 通过，0 error（保留既有 `<img>` warning）。未做真实出图打样，视觉效果需用户用客户产品图验证。
+
 ### 2026-07-02
 - **「组图·换装」重构为独立入口 /lookbook**（承接 07-01 组图功能）：按用户「两个完全独立的入口」的架构，把组图从「场景图模块里的子 toggle」提成与产品图工作台平级的**独立路由** `app/lookbook/page.tsx`(LookbookStudio)。经**联网调研 + 3 代理设计 + 对抗式审查**定稿：独立路由让 A/B 的 state 编译期隔离、互不污染（业界对「不共享输入/画布的两种工作方式」的标准做法）。首页顶部新增 `WorkspaceSwitcher` 双卡入口。B 工作台流程：一进来直接上传整组 lookbook → 自动识别(骨架加载) → 按品类**动态每类一个上传框**(主品不限张) → 换新模特/尺寸 → 生成，写同一 SilkMomoDB(moduleType=scene, sceneGroup=true) 跳 /task/[id]，复用已建好的组图 SSE 内核（零改）。
   - 新增 `components/WorkspaceSwitcher.tsx`、`components/LookbookGarmentSlots.tsx`；`app/page.tsx` 删净所有 sceneGroup 代码 + 接入 WorkspaceSwitcher；`components/SceneShotModule.tsx` 回退为纯单张场景。

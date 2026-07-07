@@ -41,7 +41,8 @@ interface ImageInput {
 interface GenerateStreamRequest {
   taskId: number;
   moduleType: 'product' | 'scene';
-  productImages: ImageInput[];
+  productImages?: ImageInput[];
+  productGroups?: Array<{ images?: ImageInput[]; label?: string; categories?: string[] }>;
   modelRefImages?: ImageInput[];
   bgRefImages?: ImageInput[];
   sceneRefImages?: ImageInput[];
@@ -56,6 +57,7 @@ interface GenerateStreamRequest {
   customHeight?: number;
   sceneHasModel?: boolean;
   sceneGroup?: boolean;               // 场景图·组图（换装）模式：N 张 lookbook → N 张换装图
+  sceneGroupMode?: 'swap' | 'products'; // swap=N景1品；products=1景N品
   sceneGroupTargetIndexes?: number[]; // 组图只生成指定参考图序号（1-based；用于单张重做/补齐），不传=全部
   sceneGroupAnchor?: ImageInput;      // 重做/补齐时带上已有一张结果图作「新模特身份锚」，保证与全组同一新人
   sceneGroupGarmentCategories?: string[]; // 用户上传替换的主品品类（top/pants/dress…），点明换哪几件
@@ -95,6 +97,91 @@ function validateImageInputs(body: GenerateStreamRequest): string | null {
   return null;
 }
 
+interface CleanProductGroup {
+  images: ImageInput[];
+  label?: string;
+  categories?: string[];
+}
+
+function validateAndCleanProductGroups(input: unknown): { groups: CleanProductGroup[]; error?: string } {
+  if (!Array.isArray(input)) return { groups: [], error: '同景换品模式需要提供产品组' };
+  if (input.length < 1 || input.length > 8) return { groups: [], error: '同景换品模式产品组需为 1-8 组' };
+
+  const groups: CleanProductGroup[] = [];
+  for (let groupIndex = 0; groupIndex < input.length; groupIndex++) {
+    const raw = input[groupIndex] as { images?: unknown; label?: unknown; categories?: unknown };
+    if (!raw || !Array.isArray(raw.images)) {
+      return { groups: [], error: `产品组 ${groupIndex + 1} 格式非法` };
+    }
+    if (raw.images.length < 1 || raw.images.length > 4) {
+      return { groups: [], error: `产品组 ${groupIndex + 1} 需上传 1-4 张产品图` };
+    }
+
+    const images: ImageInput[] = [];
+    for (const img of raw.images as ImageInput[]) {
+      if (!img || typeof img.data !== 'string' || !img.data) {
+        return { groups: [], error: `产品组 ${groupIndex + 1} 图片数据非法` };
+      }
+      if (img.data.length > MAX_IMAGE_BASE64_LENGTH) {
+        return { groups: [], error: `产品组 ${groupIndex + 1} 单张超过大小上限` };
+      }
+      if (typeof img.mimeType !== 'string' || !ALLOWED_IMAGE_MIME.test(img.mimeType)) {
+        return { groups: [], error: `产品组 ${groupIndex + 1} 图片类型不支持` };
+      }
+      images.push({ data: img.data, mimeType: img.mimeType });
+    }
+
+    const label = typeof raw.label === 'string' && raw.label.trim()
+      ? raw.label.trim().slice(0, 40)
+      : undefined;
+    const categories = Array.isArray(raw.categories)
+      ? raw.categories.filter((c): c is string => typeof c === 'string' && c.trim().length > 0).map(c => c.trim().slice(0, 30)).slice(0, 6)
+      : undefined;
+    groups.push({ images, label, categories });
+  }
+
+  return { groups };
+}
+
+function validateOptionalAnchor(anchor: ImageInput | undefined, label: string): string | null {
+  if (anchor === undefined) return null;
+  if (!anchor || typeof anchor.data !== 'string' || !anchor.data
+    || anchor.data.length > MAX_IMAGE_BASE64_LENGTH
+    || typeof anchor.mimeType !== 'string' || !ALLOWED_IMAGE_MIME.test(anchor.mimeType)) {
+    return `${label}数据非法`;
+  }
+  return null;
+}
+
+function buildSceneGroupPortraitPrompt(
+  modelConfig: (typeof MODELS)[number] | undefined,
+  bodyTypeConfig: (typeof BODY_TYPES)[number] | undefined,
+  skinToneConfig: (typeof SKIN_TONES)[number] | undefined,
+): string {
+  const modelLine = modelConfig
+    ? modelConfig.prompt
+    : 'A fictional premium fashion model with refined, memorable facial features, suitable for silk and luxury apparel lookbook photography.';
+  const bodyLine = bodyTypeConfig?.prompt || 'Balanced fashion model build with natural proportions.';
+  const skinLine = skinToneConfig?.prompt || 'Natural luminous skin tone.';
+
+  return `
+Create ONE photorealistic fictional model identity portrait card.
+
+This is an infrastructure identity anchor for a fashion generation set. The person must be fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
+
+Model direction:
+${modelLine}
+${bodyLine}
+${skinLine}
+
+Image requirements:
+- Half-body portrait, front-facing, neutral to slight warm smile.
+- Plain light neutral background, clean studio lighting.
+- Natural face, realistic hairstyle, no text, no logo, no watermark.
+- The output should be a clear identity reference for one consistent new model.
+`.trim();
+}
+
 // ═══════════════════════════════════════
 // SSE 辅助函数
 // ═══════════════════════════════════════
@@ -127,7 +214,8 @@ export async function POST(req: NextRequest) {
   const {
     taskId,
     moduleType,
-    productImages,
+    productImages: rawProductImages,
+    productGroups: rawProductGroups,
     modelRefImages,
     bgRefImages,
     sceneRefImages,
@@ -142,6 +230,7 @@ export async function POST(req: NextRequest) {
     customHeight,
     sceneHasModel,
     sceneGroup,
+    sceneGroupMode: rawSceneGroupMode,
     sceneGroupTargetIndexes,
     sceneGroupAnchor,
     sceneGroupGarmentCategories,
@@ -152,13 +241,16 @@ export async function POST(req: NextRequest) {
 
   const engine = normalizeBackend(rawEngine);
   const requestedApiModel = engine === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+  const sceneGroupMode: 'swap' | 'products' = rawSceneGroupMode === 'products' ? 'products' : 'swap';
+  const productImages = Array.isArray(rawProductImages) ? rawProductImages : [];
 
   // 截断防止滥用（DoS / token 浪费）
   const safeCustomPrompt = typeof customPrompt === 'string' && customPrompt.trim()
     ? customPrompt.trim().slice(0, 500)
     : undefined;
 
-  if (!productImages || productImages.length === 0) {
+  const isSceneGroupProductsMode = moduleType === 'scene' && !!sceneGroup && sceneGroupMode === 'products';
+  if (!isSceneGroupProductsMode && productImages.length === 0) {
     return new Response(JSON.stringify({ error: '产品图不能为空' }), { status: 400 });
   }
 
@@ -168,12 +260,25 @@ export async function POST(req: NextRequest) {
   }
 
   // 客户端锚点图(上一分块的产出)也要过同样的入参防线,避免超大/非法数据进内存
-  if (clientAnchorImage !== undefined) {
-    if (!clientAnchorImage || typeof clientAnchorImage.data !== 'string' || !clientAnchorImage.data
-      || clientAnchorImage.data.length > MAX_IMAGE_BASE64_LENGTH
-      || typeof clientAnchorImage.mimeType !== 'string' || !ALLOWED_IMAGE_MIME.test(clientAnchorImage.mimeType)) {
-      return new Response(JSON.stringify({ error: '锚点图数据非法' }), { status: 400 });
+  const clientAnchorError = validateOptionalAnchor(clientAnchorImage, '锚点图');
+  if (clientAnchorError) {
+    return new Response(JSON.stringify({ error: clientAnchorError }), { status: 400 });
+  }
+  const sceneGroupAnchorError = validateOptionalAnchor(sceneGroupAnchor, '组图锚点图');
+  if (sceneGroupAnchorError) {
+    return new Response(JSON.stringify({ error: sceneGroupAnchorError }), { status: 400 });
+  }
+
+  let cleanProductGroups: CleanProductGroup[] = [];
+  if (isSceneGroupProductsMode) {
+    if (!sceneRefImages || sceneRefImages.length !== 1) {
+      return new Response(JSON.stringify({ error: '同景换品模式需要且只能上传 1 张场景参考图' }), { status: 400 });
     }
+    const productGroupResult = validateAndCleanProductGroups(rawProductGroups);
+    if (productGroupResult.error) {
+      return new Response(JSON.stringify({ error: productGroupResult.error }), { status: 400 });
+    }
+    cleanProductGroups = productGroupResult.groups;
   }
 
   // 自定义尺寸：从请求里的实际宽高换算比例。
@@ -484,53 +589,99 @@ export async function POST(req: NextRequest) {
             // 走 GPT edit（sceneAsEditBase）保留底图；逐张原子扣费/失败退款，
             // 每张独立（某张失败不整批中止）。shotIndex = 1-based 参考图序号。
             // ═══════════════════════════════════════════════════════════
-            const N = sceneRefImages.length;
-            // 目标参考图序号（1-based）：默认全部；单张重做/补齐时只跑指定序号
+            const sourceCount = sceneGroupMode === 'products' ? cleanProductGroups.length : sceneRefImages.length;
+            // 目标序号（1-based）：swap=参考图序号；products=产品组序号。默认全部；单张重做/补齐时只跑指定序号
             const rawTargets = Array.isArray(sceneGroupTargetIndexes) && sceneGroupTargetIndexes.length > 0
               ? sceneGroupTargetIndexes
-              : Array.from({ length: N }, (_, i) => i + 1);
-            const targetIndexes = rawTargets.filter(t => Number.isInteger(t) && t >= 1 && t <= N);
+              : Array.from({ length: sourceCount }, (_, i) => i + 1);
+            const targetIndexes = rawTargets.filter(t => Number.isInteger(t) && t >= 1 && t <= sourceCount);
             if (targetIndexes.length === 0) {
-              push('error', { shotIndex: 0, current: 1, total: 1, message: '组图参考图序号非法', fatal: true });
+              push('error', { shotIndex: 0, current: 1, total: 1, message: sceneGroupMode === 'products' ? '产品组序号非法' : '组图参考图序号非法', fatal: true });
               push('done', { successCount: 0, failedCount: 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
               controller.close();
               return;
             }
             const total = targetIndexes.length;
 
-            // AI 分析用户主品服装（可选，失败不阻塞；放扣费前，避免"已扣费卡在分析"的资金悬置）
-            let garmentDescription: string | undefined;
-            push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
-            try {
-              const { analyzeProductImage } = await import('@/lib/ai-assistant');
-              const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
-              if (analysis.description) garmentDescription = analysis.description;
-            } catch { /* skip */ }
-
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
             // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
-            // 首批全量生成时无锚，由本批首张成功图充当。
+            // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
             let anchorImage: ImageInput | undefined =
               sceneGroupAnchor && typeof sceneGroupAnchor.data === 'string'
                 && sceneGroupAnchor.data && sceneGroupAnchor.data.length <= MAX_IMAGE_BASE64_LENGTH
                 ? { data: sceneGroupAnchor.data, mimeType: sceneGroupAnchor.mimeType || 'image/png' }
                 : undefined;
 
+            // swap 模式的产品图整批共用一份服装分析；products 模式每组在循环内单独分析。
+            let sharedGarmentDescription: string | undefined;
+            if (sceneGroupMode === 'swap') {
+              push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+              try {
+                const { analyzeProductImage } = await import('@/lib/ai-assistant');
+                const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+                if (analysis.description) sharedGarmentDescription = analysis.description;
+              } catch { /* skip */ }
+            }
+
+            if (!anchorImage && !clientClosed) {
+              push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
+              try {
+                // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
+                const anchorResult = await generateBackendImage({
+                  prompt: buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig),
+                  productImages: [],
+                  aspectRatio: '3:4',
+                }, 'gemini');
+                if (anchorResult.success && anchorResult.data) {
+                  anchorImage = { data: anchorResult.data, mimeType: 'image/png' };
+                  push('anchor', { imageData: anchorResult.data });
+                } else {
+                  console.log('[sceneGroup] 肖像卡生成失败，回退首张成功图作锚:', anchorResult.error);
+                }
+              } catch (anchorErr) {
+                console.log('[sceneGroup] 肖像卡生成异常，回退首张成功图作锚:', anchorErr instanceof Error ? anchorErr.message : anchorErr);
+              }
+            }
+
             for (let i = 0; i < targetIndexes.length; i++) {
               if (clientClosed) {
                 console.log(`[stream] 客户端已断开，提前终止组图生成（已完成 ${i}/${total}）`);
                 break;
               }
-              const refSeq = targetIndexes[i];              // 1-based 参考图序号
-              const baseRef = sceneRefImages[refSeq - 1];
+              const refSeq = targetIndexes[i];              // 1-based：swap=参考图序号；products=产品组序号
+              const currentProductGroup = sceneGroupMode === 'products' ? cleanProductGroups[refSeq - 1] : undefined;
+              const currentProductImages = currentProductGroup?.images ?? productImages;
+              const currentProductLabel = currentProductGroup?.label;
+              const currentGarmentCategories = currentProductGroup?.categories && currentProductGroup.categories.length > 0
+                ? currentProductGroup.categories
+                : (Array.isArray(sceneGroupGarmentCategories) ? sceneGroupGarmentCategories : undefined);
+              const baseRef = sceneGroupMode === 'products' ? sceneRefImages[0] : sceneRefImages[refSeq - 1];
+
+              let garmentDescription = sharedGarmentDescription;
+              if (sceneGroupMode === 'products') {
+                push('status', {
+                  phase: 'analyzing',
+                  current: i + 1,
+                  total,
+                  shotIndex: refSeq,
+                  message: `正在分析产品组 #${refSeq} 的服装特征...`,
+                });
+                try {
+                  const { analyzeProductImage } = await import('@/lib/ai-assistant');
+                  const analysis = await analyzeProductImage(currentProductImages[0].data, currentProductImages[0].mimeType);
+                  if (analysis.description) garmentDescription = analysis.description;
+                } catch { /* skip */ }
+              }
 
               push('status', {
                 phase: 'generating',
                 current: i + 1,
                 total,
                 shotIndex: refSeq,
-                message: `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
+                message: sceneGroupMode === 'products'
+                  ? `正在生成第 ${i + 1}/${total} 张同景换品（产品组 #${refSeq}）...`
+                  : `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
               });
 
               const balance = await checkBalance(auth.userId);
@@ -548,7 +699,8 @@ export async function POST(req: NextRequest) {
                 break;
               }
 
-              const deduction = await deductBalance(auth.userId, `组图换装 #${refSeq}`, taskId, requestedApiModel);
+              const chargeLabel = sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`;
+              const deduction = await deductBalance(auth.userId, chargeLabel, taskId, requestedApiModel);
               if (!deduction.success) {
                 const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -570,7 +722,9 @@ export async function POST(req: NextRequest) {
               try {
                 prompt = buildSceneGroupPrompt({
                   garmentDescription,
-                  garmentCategories: Array.isArray(sceneGroupGarmentCategories) ? sceneGroupGarmentCategories : undefined,
+                  garmentCategories: currentGarmentCategories,
+                  sceneGroupMode,
+                  productLabel: currentProductLabel,
                   hasAnchor: !!anchorImage,
                   hasReplacementAccessory,
                   customPrompt: safeCustomPrompt,
@@ -578,7 +732,7 @@ export async function POST(req: NextRequest) {
                 const shotStart = Date.now();
                 result = await generateBackendImage({
                   prompt,
-                  productImages,
+                  productImages: currentProductImages,
                   sceneRefImages: [baseRef],
                   accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
                   anchorImage,
@@ -588,7 +742,7 @@ export async function POST(req: NextRequest) {
                 shotLatency = Date.now() - shotStart;
               } catch (innerErr) {
                 const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-                await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 异常退款`, taskId);
+                await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 异常退款`, taskId);
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
                   promptText: prompt || '(throw before prompt built)',
@@ -617,7 +771,7 @@ export async function POST(req: NextRequest) {
 
               if (result.success && result.data) {
                 if (clientClosed) {
-                  await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 客户端断开退款`, taskId);
+                  await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 客户端断开退款`, taskId);
                   failedCount++;
                   break;
                 }
@@ -626,7 +780,7 @@ export async function POST(req: NextRequest) {
                 push('result', { shotIndex: refSeq, imageData: result.data, current: i + 1, total });
               } else {
                 failedCount++;
-                await refundBalance(auth.userId, PRICING.pricePerCallFen, `组图换装 #${refSeq} 失败退款`, taskId);
+                await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 失败退款`, taskId);
                 push('error', {
                   shotIndex: refSeq, current: i + 1, total,
                   message: `${result.error ?? '生成失败（未知原因）'}（已自动退款）`,
