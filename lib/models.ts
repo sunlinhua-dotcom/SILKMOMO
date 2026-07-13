@@ -295,6 +295,7 @@ export const PRODUCT_OUTPUT_SIZES: OutputSizeConfig[] = [
   { id: 'material', label: '材质区大图', sublabel: '独立站材质展示', width: 1600, height: 2000, aspectRatio: '3:4' },
   { id: 'meta_square', label: 'Meta/INS 方图', sublabel: '1:1', width: 1080, height: 1080, aspectRatio: '1:1' },
   { id: 'ins_vertical', label: 'INS 竖版', sublabel: '4:5', width: 1080, height: 1350, aspectRatio: '3:4' },
+  { id: 'ins_3_4', label: 'INS 3:4', sublabel: '1080×1440', width: 1080, height: 1440, aspectRatio: '3:4' },
   { id: 'custom', label: '自定义尺寸', sublabel: '输入任意宽×高', width: 0, height: 0, aspectRatio: '3:4' }
 ];
 
@@ -304,6 +305,7 @@ export const SCENE_OUTPUT_SIZES: OutputSizeConfig[] = [
   { id: 'stories', label: 'Meta/INS Stories·Reels', sublabel: '9:16', width: 1080, height: 1920, aspectRatio: '9:16' },
   { id: 'meta_feed', label: 'Meta 横版广告', sublabel: '1.91:1', width: 1200, height: 628, aspectRatio: '16:9' },
   { id: 'ins_vertical', label: 'INS Feed 竖版', sublabel: '4:5', width: 1080, height: 1350, aspectRatio: '3:4' },
+  { id: 'ins_3_4', label: 'INS 3:4', sublabel: '1080×1440', width: 1080, height: 1440, aspectRatio: '3:4' },
   { id: 'google_rect', label: 'Google Display 矩形', sublabel: '300×250', width: 300, height: 250, aspectRatio: '4:3' },
   { id: 'google_banner', label: 'Google Display 横幅', sublabel: '728×90', width: 728, height: 90, aspectRatio: '16:9' },
   { id: 'custom', label: '自定义尺寸', sublabel: '输入任意宽×高', width: 0, height: 0, aspectRatio: '3:4' }
