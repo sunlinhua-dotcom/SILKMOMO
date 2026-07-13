@@ -110,6 +110,18 @@ export function getRandomWaitingMessage(): string {
 // 已废弃，全部生图走 POST /api/generate/stream（SSE 流式接口）
 
 /**
+ * 脸 / 皮肤真实感指令（反「AI 完美磨皮脸」）。
+ * 图像模型默认出对称、无毛孔、磨皮的「AI 美人脸」；不显式要求真实质感就会太假。
+ * 复用于肖像卡（route.ts）与产品/场景/换装三个构造器，让生成的模特看着像被真实拍下的活人。
+ */
+export const FACE_REALISM_DIRECTIVE = `FACE, SKIN & LIGHT REALISM (critical — the image must look like a REAL photograph of a REAL person taken on a real camera, NOT an AI/CGI or retouched beauty render):
+- Skin: real, lived-in texture — visible pores, fine lines, faint freckles or a small beauty mark, subtle under-eye shadows, natural slight redness and uneven tone, tiny surface details. Real specular micro-highlights on the skin, never a smooth uniform matte or airbrushed glow.
+- Face: natural and non-idealized, with gentle real asymmetry — a believable, relatable, approachable real person, NOT a flawless, perfectly symmetrical, magazine-retouched model face. Minimal or no visible makeup.
+- Absolutely NO airbrushing, NO skin-smoothing / beauty filter, NO waxy or porcelain plastic CGI skin, NO over-retouching, NO glossy "AI-perfect" face, NO heavy digital color grading.
+- Lighting: MATCH THE ENVIRONMENT. If a scene, background, or reference image is provided, replicate ITS lighting on the person — same direction, softness/hardness, color temperature, contrast, and mood — so they look genuinely lit by that same environment and never pasted-in or mismatched. Only when no lighting reference exists, default to soft natural directional daylight. In every case keep it realistic: soft shadows and natural highlight roll-off that reveal the skin's real texture and the true three-dimensional form of the face. AVOID flat frontal glamour/beauty lighting, AVOID overexposed blown-out highlights, AVOID an evenly-lit HDR look that erases pores and shadow.
+- Overall it must read as an authentic, unretouched, natural-light editorial photograph — the imperfect, real-person beauty of a film-shot lookbook, not a rendered ideal.`;
+
+/**
  * 为产品图模块的单个镜次构建完整的 Prompt
  * 结构：镜次设置 → 模特外貌 → 体型/肤色（独立节点）→ 服装焦点 → 背景 → 摄影风格
  */
@@ -147,7 +159,7 @@ export function buildProductShotPrompt(options: ShotGenerateOptions): string {
 
   // 6. 背景（产品图模块：杜绝纯白底，营造自然真实氛围）
   const bgPrompt = (options.bgRefImages && options.bgRefImages.length > 0)
-    ? `Background: Use the exact background style and color tone from the provided background reference images. DO NOT use a pure white studio background. Create a warm, cozy, minimal real-life domestic or lifestyle setting (like a soft architectural corner, a blurred cozy bedroom, or sunlit textured wall). Use natural soft lighting, warm morning light, and real-world gentle shadows.`
+    ? `Background: Use the exact background style and color tone from the provided background reference images. DO NOT use a pure white studio background. Read the lighting from those background reference images and light the model to MATCH it — same light direction, softness, color temperature, and shadow character — so the model looks naturally shot in that environment, never pasted-in or lit differently from the background. Real-world gentle shadows.`
     : `Background: DO NOT use a pure white studio background. Create a warm, cozy, minimal real-life domestic or lifestyle setting (like a soft architectural corner, a blurred cozy bedroom, or sunlit textured wall). Use natural soft lighting, warm morning light, and real-world gentle shadows.`;
 
   // 7. 摄影风格（高级生活方式特写，保留原图滤镜氛围）
@@ -198,6 +210,8 @@ ${bodyPrompt}
 
 ${skinPrompt}
 
+${FACE_REALISM_DIRECTIVE}
+
 ${garmentFocus}
 
 ${bgPrompt}
@@ -244,7 +258,7 @@ export function buildSceneShotPrompt(options: SceneGenerateOptions): string {
   const garmentFocus = `${sceneGarmentDesc} ${sceneFabricNote}`;
 
   // 5. 场景（由场景参考图完全驱动）
-  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, and background elements from those images. Recreate a similar scene atmosphere for this shot — DO NOT invent a scene or use preset locations.`;
+  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, and background elements from those images. Light the model to MATCH the scene's lighting exactly — same light direction, softness, color temperature, and shadow character — so the person is naturally integrated into the scene and never lit differently from it. Recreate a similar scene atmosphere for this shot — DO NOT invent a scene or use preset locations.`;
 
   // 6. 模特状态（场景图：根据环境解析，主打活人感不摆拍）
   const modelMood = `Model mood and posture: First, analyze the scene setting. Then, make the model adopt the most natural and relaxed pose that perfectly fits into that environment. Exhibit a candid, raw, and authentic human presence ("活人感", "不摆拍"). Avoid stiff commercial catalog looks entirely. Hair can be slightly messy but elegant.`;
@@ -294,6 +308,8 @@ ${modelAppearance}
 ${bodyPrompt}
 
 ${skinPrompt}
+
+${FACE_REALISM_DIRECTIVE}
 
 ${garmentFocus}
 
@@ -378,6 +394,8 @@ ${garment}
 ${newModel}
 
 ${accessory}
+
+${FACE_REALISM_DIRECTIVE}
 
 ${rules}${userAddon}
   `.trim();
