@@ -12,7 +12,7 @@
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
-import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt } from '@/lib/api';
+import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
@@ -176,9 +176,11 @@ ${skinLine}
 
 Image requirements:
 - Half-body portrait, front-facing, neutral to slight warm smile.
-- Plain light neutral background, clean studio lighting.
-- Natural face, realistic hairstyle, no text, no logo, no watermark.
+- Plain light neutral background, soft natural lighting that reveals real skin texture (avoid flat glamour lighting that erases pores).
+- Realistic hairstyle, no text, no logo, no watermark.
 - The output should be a clear identity reference for one consistent new model.
+
+${FACE_REALISM_DIRECTIVE}
 `.trim();
 }
 
