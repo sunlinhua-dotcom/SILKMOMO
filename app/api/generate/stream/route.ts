@@ -631,9 +631,12 @@ export async function POST(req: NextRequest) {
             // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
             // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
-            let anchorImage: ImageInput | undefined =
+            const requestHasSceneGroupAnchor = !!(
               sceneGroupAnchor && typeof sceneGroupAnchor.data === 'string'
-                && sceneGroupAnchor.data && sceneGroupAnchor.data.length <= MAX_IMAGE_BASE64_LENGTH
+              && sceneGroupAnchor.data && sceneGroupAnchor.data.length <= MAX_IMAGE_BASE64_LENGTH
+            );
+            let anchorImage: ImageInput | undefined =
+              requestHasSceneGroupAnchor && sceneGroupAnchor
                 ? { data: sceneGroupAnchor.data, mimeType: sceneGroupAnchor.mimeType || 'image/png' }
                 : undefined;
 
@@ -751,6 +754,7 @@ export async function POST(req: NextRequest) {
                   productLabel: currentProductLabel,
                   hasAnchor: !!anchorImage,
                   hasReplacementAccessory,
+                  isRegeneration: requestHasSceneGroupAnchor,
                   customPrompt: safeCustomPrompt,
                 });
                 const shotStart = Date.now();
