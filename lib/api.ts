@@ -68,6 +68,7 @@ export interface SceneGroupGenerateOptions {
   productLabel?: string;              // products 模式下当前产品组名称（用于 prompt 点名）
   hasAnchor?: boolean;                // 是否附了「首张成功图」作为新模特身份锚（保证 N 张同一新人）
   hasReplacementAccessory?: boolean;  // 用户是否上传了替换附件（否则保留原图附件）
+  isRegeneration?: boolean;           // 单张重做/补齐：需要贴合已通过组图，不重新发散
   customPrompt?: string;              // 用户对该次生成的额外要求
 }
 
@@ -115,11 +116,13 @@ export function getRandomWaitingMessage(): string {
  * 复用于肖像卡（route.ts）与产品/场景/换装三个构造器，让生成的模特看着像被真实拍下的活人。
  */
 export const FACE_REALISM_DIRECTIVE = `FACE, SKIN & LIGHT REALISM (critical — the image must look like a REAL photograph of a REAL person taken on a real camera, NOT an AI/CGI or retouched beauty render):
-- Skin: real, lived-in texture — visible pores, fine lines, faint freckles or a small beauty mark, subtle under-eye shadows, natural slight redness and uneven tone, tiny surface details. Real specular micro-highlights on the skin, never a smooth uniform matte or airbrushed glow.
-- Face: natural and non-idealized, with gentle real asymmetry — a believable, relatable, approachable real person, NOT a flawless, perfectly symmetrical, magazine-retouched model face. Minimal or no visible makeup.
-- Absolutely NO airbrushing, NO skin-smoothing / beauty filter, NO waxy or porcelain plastic CGI skin, NO over-retouching, NO glossy "AI-perfect" face, NO heavy digital color grading.
-- Lighting: MATCH THE ENVIRONMENT. If a scene, background, or reference image is provided, replicate ITS lighting on the person — same direction, softness/hardness, color temperature, contrast, and mood — so they look genuinely lit by that same environment and never pasted-in or mismatched. Only when no lighting reference exists, default to soft natural directional daylight. In every case keep it realistic: soft shadows and natural highlight roll-off that reveal the skin's real texture and the true three-dimensional form of the face. AVOID flat frontal glamour/beauty lighting, AVOID overexposed blown-out highlights, AVOID an evenly-lit HDR look that erases pores and shadow.
-- Overall it must read as an authentic, unretouched, natural-light editorial photograph — the imperfect, real-person beauty of a film-shot lookbook, not a rendered ideal.`;
+- Skin: natural film-photograph texture with visible pores, fine texture, tiny blemishes, subtle under-eye shadows, slight uneven tone, and normal skin sheen. Preserve these details; do not invent a porcelain, wax, plastic, or uniformly matte surface.
+- Face: believable fashion-model features with small real asymmetries. Keep the requested expression, makeup language, hair styling, and age feeling from the relevant reference; do not beautify into a fixed flawless face or a generic AI model face.
+- Retouching limits: no airbrushing, no beauty filter, no skin-smoothing, no over-sharpened HDR, no glossy CGI highlights, no heavy digital color grading. Use a film look with subtle analog grain and natural micro-contrast.
+- Lighting: reference first. If any scene, background, anchor, or style reference is provided, match that reference's light direction, softness/hardness, color temperature, contrast, shadow density, filter, and mood. Do not create a new studio lighting setup or glamour light unless the reference itself uses it. Only when no lighting reference exists, use soft natural directional daylight.
+- Overall: authentic editorial lookbook photography with real skin texture and restrained film color, not a polished render, synthetic beauty ad, or over-retouched studio portrait.`;
+
+const SAFE_CROPPED_COMPOSITION_DIRECTIVE = `Cropped composition safety: If the reference or shot calls for a face-outside-frame crop, describe and render it as a standard e-commerce crop: frame cropped at the neck/shoulders or with the head naturally outside the frame. Keep normal human anatomy and garment fit; never interpret it as a "headless" or "no head" body concept.`;
 
 /**
  * 为产品图模块的单个镜次构建完整的 Prompt
@@ -148,8 +151,8 @@ export function buildProductShotPrompt(options: ShotGenerateOptions): string {
 
   // 5. 服装聚焦（动态化：如果有 AI 分析结果则使用精确描述）
   const garmentDesc = options.garmentDescription
-    ? `Garment (AI-analyzed): ${options.garmentDescription}. Extract and reproduce ALL details from the product reference images faithfully — fabric pattern, color hue, print motifs, neckline, sleeve style, and construction must be pixel-identical.`
-    : `Garment: Extract all clothing details (style, cut, fabric drape, color, neckline, sleeves, hem) precisely from the product reference images. Reproduce the garment faithfully on the model.`;
+    ? `Garment (AI-analyzed): ${options.garmentDescription}. The product reference image(s) are the ONLY source for garment style, cut, silhouette, proportion, neckline, sleeve style, hem, fabric, color hue, pattern/print motifs, seams, closures, and construction. Reproduce these details faithfully.`
+    : `Garment: The product reference image(s) are the ONLY source for clothing style, cut, silhouette, fabric drape, color, neckline, sleeves, hem, seams, and construction. Extract and reproduce them faithfully on the model.`;
   const fabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
     ? `Fabric quality: Premium silk — show the characteristic lustre, smooth drape, and refined texture.`
     : options.garmentDescription
@@ -159,24 +162,26 @@ export function buildProductShotPrompt(options: ShotGenerateOptions): string {
 
   // 6. 背景（产品图模块：杜绝纯白底，营造自然真实氛围）
   const bgPrompt = (options.bgRefImages && options.bgRefImages.length > 0)
-    ? `Background: Use the exact background style and color tone from the provided background reference images. DO NOT use a pure white studio background. Read the lighting from those background reference images and light the model to MATCH it — same light direction, softness, color temperature, and shadow character — so the model looks naturally shot in that environment, never pasted-in or lit differently from the background. Real-world gentle shadows.`
+    ? `Background: Use the exact background style and color tone from the provided background reference images. DO NOT use a pure white studio background. Read the lighting, filter, and atmosphere from those background reference images and light the model to MATCH them - same light direction, softness, color temperature, contrast, and shadow character - so the model looks naturally shot in that environment, never pasted-in or lit differently from the background. Real-world gentle shadows.`
     : `Background: DO NOT use a pure white studio background. Create a warm, cozy, minimal real-life domestic or lifestyle setting (like a soft architectural corner, a blurred cozy bedroom, or sunlit textured wall). Use natural soft lighting, warm morning light, and real-world gentle shadows.`;
 
   // 7. 摄影风格（高级生活方式特写，保留原图滤镜氛围）
-  const photography = `Photography style: High-end editorial lifestyle photography. Critically analyze and RETAIN the exact overall vibe, lighting, aesthetics, and filter from the reference image. Film-inspired warmth (Kodak Portra 400 feel), soft natural light, subtle analog grain. Focus faithfully on fabric's authentic texture, drape, and skin-friendly softness.`;
+  const photography = `Photography style: High-end editorial lifestyle photography. Critically analyze and RETAIN the exact overall vibe, lighting, aesthetics, color filter, and photographic language from the relevant reference image(s). Film-inspired warmth, soft natural light when no reference light is present, subtle analog grain. Focus faithfully on fabric's authentic texture, drape, and skin-friendly softness.`;
 
   // 8. 防护指令（提高一次成功率）
   const safetyRules = `
 CRITICAL RULES (follow strictly):
 - Do NOT render any text, watermarks, logos, or letters on the image.
 - Do NOT add accessories, jewelry, or items not shown in the reference images.
-- Keep EXACTLY the same garment design as the product reference — do not modify neckline, hem length, sleeve style, pattern, or color. The fabric pattern, print, color hue, and construction details must be pixel-identical to the reference.
+- Keep EXACTLY the same garment design as the product reference - do not modify silhouette, proportion, neckline, hem length, sleeve style, pattern, color, seams, closures, or construction.
+- Any clothing visible in model, background, or lifestyle reference images is NOT a garment design reference. It may only inform styling energy, wearing manner, pose, composition, lighting, expression, makeup, and photographic language.
 - Produce a single, clean, photorealistic image. No collage, split-screen, or multiple views.
 - The output must look like a real photograph, not an illustration or 3D render.
+${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
 
 MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
-- If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME model identity: same face, same hairstyle, same hair color, same facial features, same skin complexion, same makeup style. The model must look like the SAME PERSON across all shots.
-- Only the pose, camera angle, and framing should change between shots — the model's identity must remain absolutely identical.
+- If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME fictional model identity: same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling. The model must look like the SAME PERSON across all shots.
+- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.
   `.trim();
 
   // 9. 用户额外要求（仅当提供时追加，且不能覆盖 safetyRules / 服装一致性）
@@ -248,8 +253,8 @@ export function buildSceneShotPrompt(options: SceneGenerateOptions): string {
 
   // 4. 服装（动态化）
   const sceneGarmentDesc = options.garmentDescription
-    ? `Garment (AI-analyzed): ${options.garmentDescription}. Faithfully reproduce ALL details from the product reference images — fabric pattern, color, and construction must be identical.`
-    : `Garment: Extract all clothing details from the product reference images and faithfully reproduce them on the model.`;
+    ? `Garment (AI-analyzed): ${options.garmentDescription}. The product reference image(s) are the ONLY source for garment style, cut, silhouette, proportion, fabric pattern, color, and construction. Faithfully reproduce ALL product details on the model.`
+    : `Garment: The product reference image(s) are the ONLY source for clothing style, cut, silhouette, fabric, color, seams, and construction. Extract all clothing details from them and faithfully reproduce them on the model.`;
   const sceneFabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
     ? `Show premium silk quality — its natural lustre and fluid drape.`
     : options.garmentDescription
@@ -258,26 +263,28 @@ export function buildSceneShotPrompt(options: SceneGenerateOptions): string {
   const garmentFocus = `${sceneGarmentDesc} ${sceneFabricNote}`;
 
   // 5. 场景（由场景参考图完全驱动）
-  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, and background elements from those images. Light the model to MATCH the scene's lighting exactly — same light direction, softness, color temperature, and shadow character — so the person is naturally integrated into the scene and never lit differently from it. Recreate a similar scene atmosphere for this shot — DO NOT invent a scene or use preset locations.`;
+  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, filter, atmosphere, and background elements from those images. Light the model to MATCH the scene's lighting exactly - same light direction, softness, color temperature, contrast, and shadow character - so the person is naturally integrated into the scene and never lit differently from it. Recreate a similar scene atmosphere for this shot - DO NOT invent a scene or use preset locations.`;
 
   // 6. 模特状态（场景图：根据环境解析，主打活人感不摆拍）
   const modelMood = `Model mood and posture: First, analyze the scene setting. Then, make the model adopt the most natural and relaxed pose that perfectly fits into that environment. Exhibit a candid, raw, and authentic human presence ("活人感", "不摆拍"). Avoid stiff commercial catalog looks entirely. Hair can be slightly messy but elegant.`;
 
   // 7. 摄影风格（整体氛围保留）
-  const photography = `Photography style: Lifestyle and editorial fashion photography. Analyze the reference to retain the exact atmosphere, camera angle, and composition. Preserve everything except the product. Film-inspired warmth with 35mm analog feel (like Kodak Portra 400). Soft natural lighting, subtle grain, cinematic and deeply emotionally evocative.`;
+  const photography = `Photography style: Lifestyle and editorial fashion photography. Analyze the scene reference to retain its exact atmosphere, camera angle, composition, light, filter, expression, makeup language, and overall photographic language. Preserve everything except the product garment. Film-inspired 35mm analog feel, subtle grain, natural contrast, and restrained color.`;
 
   // 8. 防护指令
   const safetyRules = `
 CRITICAL RULES (follow strictly):
 - Do NOT render any text, watermarks, logos, or letters on the image.
 - Do NOT add accessories or items not shown in the reference images.
-- Keep the EXACT garment design from product reference — do not alter colors, patterns, print motifs, or construction. The fabric pattern and color hue must be pixel-identical to the reference.
+- Keep the EXACT garment design from product reference - do not alter silhouette, proportion, colors, patterns, print motifs, seams, closures, or construction.
+- Clothing visible in scene/model/background references is NOT a product design source. Those references only provide pose, composition, lighting, scene, expression, makeup, styling energy, and photographic language.
 - Produce a single, clean, photorealistic image. No collage or multi-panel.
 - The output must look like a real analog photograph, not digital art.
+${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
 
 MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
-- If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME model identity: same face, same hairstyle, same hair color, same facial features, same skin complexion, same makeup style. The model must look like the SAME PERSON across all shots.
-- Only the pose, camera angle, and framing should change between shots — the model's identity must remain absolutely identical.
+- If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME fictional model identity: same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling. The model must look like the SAME PERSON across all shots.
+- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.
   `.trim();
 
   // 用户额外要求
@@ -337,18 +344,32 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
     garmentDescription,
     hasAnchor = false,
     hasReplacementAccessory = false,
+    isRegeneration = false,
     sceneGroupMode = 'swap',
     productLabel,
   } = options;
 
+  const priorityRules = `PRIORITY ORDER FOR THIS GROUP IMAGE (resolve every conflict in this order):
+1. Product fidelity first: the user's product reference image(s) define the garment silhouette, cut, tailoring, proportions, neckline, collar, sleeves, hem, seams, closures, print/pattern, color, fabric texture, and drape. These product details override any clothing visible in the scene-base/lookbook reference.
+2. Group model consistency second: ${hasAnchor
+  ? 'an Anchor Reference Image is provided; precisely match that same fictional model identity across this image and the set.'
+  : 'no anchor is provided; create one new fictional model identity and lock it for the group instead of copying a real reference person.'}
+3. Reference lighting/filter/atmosphere third: strictly follow the scene-base image's lighting direction, shadow softness, color temperature, color grade, filter, atmosphere, scene, and overall photographic language.
+4. Reference expression/makeup/styling fourth: keep the scene-base person's expression, mood, makeup language, hairstyle styling, pose, and body attitude, while changing only facial identity as required.
+5. Group continuity fifth: treat outputs as one set. Keep model identity, output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group.`;
+
+  const regenerationRule = isRegeneration
+    ? `REGENERATION / FILL-IN RULE: This image is replacing or filling one image inside an already approved group. Match the approved group anchored by the provided anchor/result image and the existing references. Do not redesign the model, do not change the product interpretation, do not invent a new filter or lighting style, and do not explore a new creative direction.`
+    : '';
+
   // 底图冻结指令：这是组图的核心——除服装与人物外，其余一切都必须与底图完全一致
-  const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. You MUST preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
-- The scene, background, environment, props, furniture, and their exact positions.
-- The lighting direction, color grade, overall atmosphere, filter, and film-grain of the base image.
-- The camera angle, framing, crop, and composition.
-- The model's exact body POSE, gesture, hand/leg position, head orientation, and where they stand in the frame.
-- Preserve the base person's expression and mood exactly; only the facial identity/features may change.
-Do NOT re-stage, re-pose, re-frame, or re-light. The result must look like the SAME photo with only the garment and the person's identity swapped.`;
+  const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. The scene-base is a reference ONLY for pose, composition, crop, lighting, scene, expression, makeup, styling language, and overall photography language. Preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
+- The scene, background, environment, props, furniture, accessories, and their exact positions.
+- The lighting direction, color grade, overall atmosphere, filter, and film grain of the base image.
+- The camera angle, framing, crop, and composition. ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
+- The model's exact body pose, gesture, hand/leg position, head orientation if visible, and where they stand in the frame.
+- Preserve the base person's expression, mood, makeup language, and hair styling; only the facial identity/features may change.
+Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result must look like the SAME photo with only the product garment and the person's identity swapped.`;
 
   // 服装替换（可能是多件：上衣 + 裤子…按品类点明，只换这些件，其余保持底图）
   const cats = (options.garmentCategories || [])
@@ -360,14 +381,14 @@ Do NOT re-stage, re-pose, re-frame, or re-light. The result must look like the S
       ? `Replace the clothing worn in the base image with this product group${productLabel ? ` ("${productLabel}")` : ''} shown in the "product" reference image(s).`
       : `Replace the clothing worn in the base image with the user's product garment shown in the "product" reference image(s).`;
   const garment = garmentDescription
-    ? `REPLACE #1 — Garment: ${piecesPhrase} The new garment is: ${garmentDescription}. Reproduce ALL of its details faithfully — fabric, color hue, pattern/print motifs, neckline, sleeves, length, and construction must match the product reference exactly. Fit it naturally onto the model in the SAME pose.`
-    : `REPLACE #1 — Garment: ${piecesPhrase} Reproduce every detail of the product garment faithfully (fabric, color, pattern, neckline, sleeves, length, construction) and fit it naturally onto the model in the SAME pose.`;
+    ? `REPLACE #1 - Garment: ${piecesPhrase} The new garment is: ${garmentDescription}. The scene-base model's original clothing only indicates wearing method, body contact, layering position, and natural drape direction. Its silhouette, cut, tailoring, collar/neckline, sleeves, length, construction, seams, closures, color, print, pattern, and fabric details are NOT references. Reproduce ALL product-reference garment details faithfully and fit them naturally onto the model in the SAME pose.`
+    : `REPLACE #1 - Garment: ${piecesPhrase} The scene-base model's original clothing only indicates wearing method, body contact, layering position, and natural drape direction. Its silhouette, cut, tailoring, collar/neckline, sleeves, length, construction, seams, closures, color, print, pattern, and fabric details are NOT references. Reproduce every product-reference garment detail faithfully and fit it naturally onto the model in the SAME pose.`;
 
   // 人物替换为全新匿名模特（规避侵权）
-  const productIdentityRule = `Any person visible in the "product" reference image(s) is NOT an identity reference. Completely ignore their face, hairstyle, facial features, age, expression, and identity. Use product images ONLY for garment fabric, color, pattern, silhouette, and construction.`;
+  const productIdentityRule = `Any person visible in the "product" reference image(s) is NOT an identity reference. Completely ignore their face, hairstyle, facial features, age, expression, and identity. Use product images ONLY for garment fabric, color, pattern, silhouette, cut, tailoring, and construction.`;
   const newModel = hasAnchor
-    ? `REPLACE #2 — Person: Replace the person with the SAME brand-new model shown in the "anchor" reference image — identical face, hairstyle, and features as the anchor, so this image and the rest of the set clearly depict ONE consistent new person. The anchor is the ONLY identity reference. ${productIdentityRule} This new model must look CLEARLY DIFFERENT from the person in the scene-base image and from any person appearing in the product reference image(s). Do NOT copy the scene-base person's facial identity or any product-reference person's facial identity. Keep the anchor person's identity, but the POSE, body position, expression, mood, and scene must follow the scene-base image, NOT the anchor.`
-    : `REPLACE #2 — Person: Replace the person with a COMPLETELY NEW, anonymous, fictional model. Generate a fresh face and identity that looks CLEARLY DIFFERENT from the person in the scene-base image and from any person appearing in the product reference image(s). ${productIdentityRule} Do NOT reproduce or resemble the base person's facial identity or any product-reference person's facial identity. Keep the SAME pose, body position, skin-tone range, build, expression, and mood as the base image; only swap facial identity/features.`;
+    ? `REPLACE #2 - Person: Replace the person with the SAME fictional model shown in the "anchor" reference image. Precisely match the anchor model's face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling, so this image and the rest of the set clearly depict ONE consistent fictional person. The anchor is the ONLY identity reference. ${productIdentityRule} This model must remain clearly different from the real person in the scene-base image and from any person appearing in the product reference image(s). Keep the anchor identity, but the pose, body position, expression, mood, makeup language, hair styling, lighting, scene, crop, and photography must follow the scene-base image, NOT the anchor.`
+    : `REPLACE #2 - Person: Replace the person with a new anonymous fictional model, with moderately changed facial features so the output does not replicate the scene-base person's real identity. Do not make a fixed generic face; create a fashion-appropriate fictional model and keep the same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling locked for this group. ${productIdentityRule} Do NOT reproduce or resemble the base person's facial identity or any product-reference person's facial identity. Keep the same pose, body position, skin-tone range, build, expression, mood, makeup language, hair styling, lighting, crop, and scene as the base image; only swap facial identity/features.`;
 
   // 附件处理
   const accessory = hasReplacementAccessory
@@ -379,14 +400,19 @@ CRITICAL RULES (follow strictly):
 - Output exactly ONE photorealistic image. No collage, split-screen, grid, or multiple views.
 - Do NOT render any text, watermark, logo, or letters.
 - Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change.
-- Product reference images are garment references ONLY — ignore any person, face, hairstyle, or identity visible in them.
-- The result must look like a real photograph, not an illustration or 3D render.`.trim();
+- Product reference images are garment references ONLY - ignore any person, face, hairstyle, or identity visible in them.
+- Scene-base/lookbook clothing is not a garment design reference; it only shows how clothing sits on the body in that pose.
+- The result must look like a real film photograph, not an illustration, 3D render, beauty-filter image, or synthetic AI fashion render.`.trim();
 
   const userAddon = options.customPrompt
     ? `\n\nUser adjustment request (apply on top of the above, but never violate the CRITICAL RULES, the scene/pose freeze, or garment fidelity): ${options.customPrompt}`
     : '';
 
   return `
+${priorityRules}
+
+${regenerationRule}
+
 ${freeze}
 
 ${garment}
