@@ -45,6 +45,21 @@ function getSceneGroupMode(project: Project | null | undefined): 'swap' | 'produ
   return project?.sceneGroupMode === 'products' ? 'products' : 'swap';
 }
 
+// ═══ SSE 停滞看门狗 ═══
+// 服务端不可能让页面无限等待：单张最长 280s（lib/image-backends OPENAI_TIMEOUT_MS）后必报错退款，
+// 且每 25s 发一次 keep-alive。但客户端读流时只是 await reader.read()——连接若在中途静默失效
+// （服务端照常报错关流，字节却送不到浏览器），read() 永不返回，进度条就一直转。
+// 线上实测出现过「已耗时 1301s 仍在生成镜次 #1」，即此。两道看门狗把无限等待收敛成可重试的错误：
+//   ① 静默检测：keep-alive 每 25s 一次，超过 STALL_BYTES_MS 一个字节都没有 → 连接已断。
+//   ② 兜底检测：字节还在来（服务端活着）但迟迟没有实质事件 → 服务端卡死在某个无超时的调用上。
+//      阈值必须大于服务端单张最坏耗时（GPT：280s 超时 + 3s + 280s 重试；Gemini：120s×2 + 3s），
+//      否则会误伤正常的慢请求。
+const STALL_BYTES_MS = 70_000;
+const STALL_EVENT_MS: Record<ImageEngine, number> = {
+  openai: 600_000,
+  gemini: 320_000,
+};
+
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
   const grouped = new Map<number, ImageItem[]>();
   for (const img of images) {
@@ -404,6 +419,21 @@ export default function TaskDetailPage() {
     let lastFatalError: string | null = null;
     let wasCancelled = false;
 
+    // —— SSE 停滞看门狗（见文件顶部 STALL_* 注释）——
+    // stalledOut 让 catch 能把「看门狗主动 abort」和「用户点取消」区分开：
+    // 两者都抛 AbortError，但前者是失败、后者不是。
+    let stalledOut: 'bytes' | 'event' | null = null;
+    let lastByteAt = Date.now();
+    let lastEventAt = Date.now();
+    const stallEventLimit = STALL_EVENT_MS[newEngine];
+    const stallTimer = setInterval(() => {
+      if (ac.signal.aborted) return;
+      const now = Date.now();
+      if (now - lastByteAt > STALL_BYTES_MS) stalledOut = 'bytes';
+      else if (now - lastEventAt > stallEventLimit) stalledOut = 'event';
+      if (stalledOut) ac.abort();
+    }, 5_000);
+
     try {
       // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
       const effectiveModelId = newModelId || freshProject.modelId || '';
@@ -523,6 +553,9 @@ export default function TaskDetailPage() {
           break;
         }
 
+        // 收到任何字节（含 25s 一次的 keep-alive 注释行）= 连接还活着
+        lastByteAt = Date.now();
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
@@ -535,6 +568,9 @@ export default function TaskDetailPage() {
             currentEventType = ''; // 消费后重置，防止下一个 data 行误匹配
             let payload: Record<string, unknown>;
             try { payload = JSON.parse(line.slice(6)); } catch { continue; }
+
+            // 实质事件（非 keep-alive）= 服务端确实在推进
+            lastEventAt = Date.now();
 
             console.log(`[SSE] 事件: ${eventType}`, eventType === 'result' ? '(有图片数据)' : payload);
 
@@ -708,7 +744,7 @@ export default function TaskDetailPage() {
 
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
-      if ((err as Error).name === 'AbortError') {
+      if ((err as Error).name === 'AbortError' && !stalledOut) {
         // 用户主动取消 ≠ 失败：不能把任务标成 failed + "生成失败（catch）"。
         // 最终状态在 finally 的备份还原之后按实际产出决定（见 wasCancelled 分支）。
         wasCancelled = true;
@@ -717,7 +753,11 @@ export default function TaskDetailPage() {
       } else {
         // 已成功生成的图保留：项目状态由实际产出决定
         const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        const msg = err instanceof Error ? `${err.message} (${err.name})` : '未知错误';
+        const msg = stalledOut
+          ? (stalledOut === 'bytes'
+              ? `与服务器的连接已中断（${Math.round(STALL_BYTES_MS / 1000)}s 未收到任何数据），已停止等待。已扣费的镜次服务端超时后会自动退款，请点「重试这张」再试。`
+              : `等待服务端响应超时（${Math.round(stallEventLimit / 1000)}s 内无任何进度），已停止等待。已扣费的镜次服务端超时后会自动退款，请点「重试这张」再试。`)
+          : (err instanceof Error ? `${err.message} (${err.name})` : '未知错误');
         console.error('[生图前端] 错误详情:', msg);
         setErrorMessage(msg);
         lastFatalError = msg;
@@ -727,6 +767,7 @@ export default function TaskDetailPage() {
         setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }
     } finally {
+      clearInterval(stallTimer);
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setSecondsLeft(0);
       setGenerating(false);
