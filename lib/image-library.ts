@@ -180,6 +180,7 @@ export interface FlowSnapshot {
   // 引擎 / SKU / 尺寸 / 场景模式 —— 不存这些字段的话
   // "用相同参数重新生成"会沿用页面当前残留值，与快照承诺不符
   engine?: 'gemini' | 'openai';
+  generationQuality?: 'low' | 'medium' | 'high';
   skuType?: 'outfit' | 'top' | 'bottom';
   sceneHasModel?: boolean;
   outputSize?: string;          // product/scene 模块各自的尺寸 id

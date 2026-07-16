@@ -2,13 +2,15 @@
  * 图像生成双通道 backend
  *
  * 默认走 Gemini 3.1 Flash Image（lifestyle 调性强，多图参考支持稳定）。
- * 通过 IMAGE_BACKEND=openai 切换到 gpt-image-2-all（apiyi 自定义路由名，
+ * 通过 IMAGE_BACKEND=openai 切换到 GPT 图像通道（302.AI /v1/images/edits，
  * 面料 micro 质感渲染极佳，但 lifestyle 背景指令偏弱）。
  *
- * 默认两个 backend 共用 GEMINI_API_KEY（apiyi 内部按模型名路由）。
- * 可选：设 OPENAI_IMAGE_API_KEY 给 GPT 图像通道配独立令牌（独立计费/额度）；
- * 此时 GPT 模型默认用 gpt-image-2（该令牌支持的模型），可被 OPENAI_IMAGE_MODEL 覆盖。
+ * Gemini 默认走 GEMINI_BASE_URL / GEMINI_API_KEY。
+ * GPT 图像通道默认走 302.AI 官转，可用 OPENAI_IMAGE_API_KEY 配独立令牌；
+ * 模型默认用 gpt-image-2（独立令牌）或 gpt-image-2-all（兼容旧共享令牌），可被 OPENAI_IMAGE_MODEL 覆盖。
  */
+
+import { normalizeGenerationQuality, type GenerationQuality } from './billing-constants';
 
 export interface ImageInput {
   data: string;     // base64
@@ -24,6 +26,7 @@ export interface BackendInput {
   accessoryImages?: ImageInput[];
   anchorImage?: ImageInput;
   aspectRatio: '1:1' | '3:4' | '4:3' | '9:16' | '16:9';
+  quality?: GenerationQuality;
   // 组图（换装）模式：把 sceneRefImages 当作可编辑底图，放在参考图队首（GPT edit 的
   // image[] 首图 = 主底图），并在 Gemini parts 里前置，指令要求「保留底图、只换服装+人物」。
   sceneAsEditBase?: boolean;
@@ -61,11 +64,23 @@ const API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_IMAGE_API_KEY || API_KEY;
 const HAS_DEDICATED_OPENAI_KEY = !!process.env.OPENAI_IMAGE_API_KEY;
 
+// GPT 图像通道 base 跟着 key 走：配了独立令牌（OPENAI_IMAGE_API_KEY，即 302.AI 的 key）
+// 默认打 302.AI 官转；没配独立令牌则回退 apiyi 共享通道，避免拿 apiyi key 打 302 全 401。
+// OPENAI_IMAGE_BASE_URL 可显式覆盖。Gemini 继续走 GEMINI_BASE_URL，不受影响。
+const OPENAI_BASE =
+  process.env.OPENAI_IMAGE_BASE_URL ||
+  (HAS_DEDICATED_OPENAI_KEY ? 'https://api.302.ai' : APIYI_BASE);
+
 const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
 // 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
 // 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
 const OPENAI_MODEL =
   process.env.OPENAI_IMAGE_MODEL || (HAS_DEDICATED_OPENAI_KEY ? 'gpt-image-2' : 'gpt-image-2-all');
+
+// 计费归因用：调用方（route.ts）不要再自己硬编码模型名，否则这里一改就对不上账。
+export function resolveApiModel(backend: ImageBackend): string {
+  return backend === 'openai' ? OPENAI_MODEL : GEMINI_MODEL;
+}
 
 const MAX_RETRIES = 1;
 
@@ -304,7 +319,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
   formData.append('model', OPENAI_MODEL);
   formData.append('prompt', taggedPrompt);
   formData.append('size', mapAspectToOpenAISize(input.aspectRatio));
-  formData.append('quality', 'high');
+  formData.append('quality', normalizeGenerationQuality(input.quality));
   formData.append('n', '1');
 
   limited.forEach((r, i) => {
@@ -316,7 +331,7 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
 
   let response: Response;
   try {
-    response = await fetch(`${APIYI_BASE}/v1/images/edits`, {
+    response = await fetch(`${OPENAI_BASE}/v1/images/edits`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: formData,

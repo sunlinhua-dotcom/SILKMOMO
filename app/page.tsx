@@ -7,6 +7,7 @@ import { SkinToneSelector } from '@/components/SkinToneSelector';
 import { ModelSelector } from '@/components/ModelSelector';
 import { ModelQuickPicker } from '@/components/ModelQuickPicker';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
+import { GPTQualitySelector } from '@/components/GPTQualitySelector';
 import { ProductShotModule } from '@/components/ProductShotModule';
 import { SceneShotModule } from '@/components/SceneShotModule';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
@@ -15,6 +16,11 @@ import { BatchOutputMatrix } from '@/components/BatchOutputMatrix';
 import { AIChatSidebar, AIChatBottomBar } from '@/components/AIChatBox';
 import { TimeMachine } from '@/components/TimeMachine';
 import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE, getDefaultShots } from '@/lib/models';
+import {
+  getGenerationCostFen,
+  RECHARGE_PACKAGES,
+  type GenerationQuality,
+} from '@/lib/billing-constants';
 import { RecentProjectsStrip, RecentProjectsCompact } from '@/components/RecentProjectsStrip';
 import { Wand2, ArrowRight, History, Camera, Trees, Sparkles, ChevronDown, Upload, Zap, Settings2, X } from 'lucide-react';
 import { Logo } from '@/components/Logo';
@@ -46,6 +52,7 @@ export default function HomePage() {
   const [selectedBodyType, setSelectedBodyType] = useState<'slim' | 'standard' | 'curvy'>(DEFAULT_BODY_TYPE.id);
   const [selectedSkinTone, setSelectedSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
   const [selectedEngine, setSelectedEngine] = useState<ImageEngine>('gemini');
+  const [selectedQuality, setSelectedQuality] = useState<GenerationQuality>('medium');
 
   // 配件
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -167,11 +174,12 @@ export default function HomePage() {
 
   // ── 扣费计算与预警 ──
   // 注意：currentUser 未加载完前默认"余额不足"，避免在余额未知时让用户点击直接打到 /api/generate/stream
-  const totalCostFen = activeModule === 'product' ? selectedShots.length * 65 : 65;
+  const unitCostFen = getGenerationCostFen(selectedEngine, selectedQuality);
+  const totalCostFen = activeModule === 'product' ? selectedShots.length * unitCostFen : unitCostFen;
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
-  const quickCostFen = getDefaultShots(skuType).length * 65;
+  const quickCostFen = getDefaultShots(skuType).length * unitCostFen;
   const isQuickBalanceSufficient = currentUser ? currentUser.balanceFen >= quickCostFen : false;
   const quickDiffYuan = currentUser ? ((quickCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
@@ -194,6 +202,7 @@ export default function HomePage() {
         bodyType: selectedBodyType,
         skinTone: selectedSkinTone,
         engine: selectedEngine,
+        generationQuality: selectedEngine === 'openai' ? selectedQuality : undefined,
         skuType: activeModule === 'product' ? skuType : undefined,
         selectedShots: activeModule === 'product' ? JSON.stringify(effectiveShots) : undefined,
         outputSize: activeModule === 'product' ? productOutputSize : undefined,
@@ -244,6 +253,7 @@ export default function HomePage() {
           skinTone: selectedSkinTone,
           modelId: selectedModelId || undefined,
           engine: selectedEngine,
+          generationQuality: selectedEngine === 'openai' ? selectedQuality : undefined,
           skuType: activeModule === 'product' ? skuType : undefined,
           sceneHasModel: activeModule === 'scene' ? sceneHasModel : undefined,
           outputSize: activeModule === 'product' ? productOutputSize : sceneOutputSize,
@@ -288,6 +298,9 @@ export default function HomePage() {
     // 引擎 / SKU / 尺寸 / 场景模式：旧快照没有这些字段时跳过（保持当前值）
     if (snapshot.engine) {
       selectEngine(snapshot.engine);
+    }
+    if (snapshot.generationQuality) {
+      setSelectedQuality(snapshot.generationQuality);
     }
     if (snapshot.skuType) {
       setSkuType(snapshot.skuType);
@@ -575,11 +588,20 @@ export default function HomePage() {
 
                 {/* 生图引擎快选 — 展开高级后用 Step 3 的完整 EngineSelector，避免重复 */}
                 {!advancedShown && (
-                  <EngineSelector
-                    selected={selectedEngine}
-                    onSelect={selectEngine}
-                    variant="compact"
-                  />
+                  <div className="space-y-4">
+                    <EngineSelector
+                      selected={selectedEngine}
+                      onSelect={selectEngine}
+                      variant="compact"
+                    />
+                    {selectedEngine === 'openai' && (
+                      <GPTQualitySelector
+                        value={selectedQuality}
+                        onChange={setSelectedQuality}
+                        variant="compact"
+                      />
+                    )}
+                  </div>
                 )}
 
                 {/* 快速生成按钮 — 产品图模式；展开高级后改用 Step 3 底部的「生成」按钮（按自定义镜次） */}
@@ -603,7 +625,7 @@ export default function HomePage() {
                         {isQuickBalanceSufficient ? (
                           <>
                             <Zap className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
-                            <span>快速生成 {getDefaultShots(skuType).length} 张产品图</span>
+                            <span>快速生成 {getDefaultShots(skuType).length} 张产品图（¥{(quickCostFen / 100).toFixed(2)}）</span>
                             <ArrowRight className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
                           </>
                         ) : (
@@ -717,6 +739,13 @@ export default function HomePage() {
                   onSelect={selectEngine}
                   variant="full"
                 />
+                {selectedEngine === 'openai' && (
+                  <GPTQualitySelector
+                    value={selectedQuality}
+                    onChange={setSelectedQuality}
+                    variant="full"
+                  />
+                )}
 
                 {/* 模特预设（5 张完整卡片，含肤色/发型细节） */}
                 <ModelSelector
@@ -830,7 +859,8 @@ export default function HomePage() {
                     const totalProjects = models.length * bodies.length * skins.length * sizes.length;
                     const imagesPerProject = activeModule === 'product' ? selectedShots.length : 1;
                     const totalImages = totalProjects * imagesPerProject;
-                    const totalCostFen = totalImages * 65;
+                    const batchUnitCostFen = getGenerationCostFen(selectedEngine, selectedQuality);
+                    const totalCostFen = totalImages * batchUnitCostFen;
                     const totalCostYuan = (totalCostFen / 100).toFixed(2);
 
                     // 上限保护
@@ -892,6 +922,7 @@ export default function HomePage() {
                           bodyType: combo.bodyType as 'slim' | 'standard' | 'curvy',
                           skinTone: combo.skinTone as 'light' | 'medium' | 'deep',
                           engine: selectedEngine,
+                          generationQuality: selectedEngine === 'openai' ? selectedQuality : undefined,
                           skuType: activeModule === 'product' ? skuType : undefined,
                           selectedShots: activeModule === 'product' ? JSON.stringify(selectedShots) : undefined,
                           outputSize: activeModule === 'product' ? combo.outputSize : undefined,
@@ -967,8 +998,8 @@ export default function HomePage() {
                                   ? '请至少选择 1 个镜次'
                                   : '开始生成'
                               : activeModule === 'product'
-                                ? `生成 ${selectedShots.length} 张产品图`
-                                : '生成场景图'
+                                ? `生成 ${selectedShots.length} 张产品图（¥${(totalCostFen / 100).toFixed(2)}）`
+                                : `生成场景图（¥${(totalCostFen / 100).toFixed(2)}）`
                             }
                           </span>
                           {canGenerate && <ArrowRight className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />}
@@ -1032,7 +1063,7 @@ export default function HomePage() {
                 {isQuickBalanceSufficient ? (
                   <>
                     <Zap className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
-                    <span>快速生成 {getDefaultShots(skuType).length} 张</span>
+                    <span>快速生成 {getDefaultShots(skuType).length} 张（¥{(quickCostFen / 100).toFixed(2)}）</span>
                   </>
                 ) : (
                   <>
@@ -1085,7 +1116,7 @@ export default function HomePage() {
                   ¥{currentUser ? (currentUser.balanceFen / 100).toFixed(2) : '0.00'}
                 </p>
                 <p className="text-[10px] text-[var(--color-text-muted)]">
-                  生图单价：¥0.65/次 (基于高定算力及 Token 真实扣除)
+                  当前生图单价：¥{(unitCostFen / 100).toFixed(2)}/张
                 </p>
               </div>
 
@@ -1093,16 +1124,11 @@ export default function HomePage() {
               <div className="space-y-3">
                 <h4 className="text-xs font-semibold tracking-widest uppercase text-[var(--color-text-secondary)]">官方特惠套餐</h4>
                 <div className="grid grid-cols-2 gap-2.5">
-                  {[
-                    { yuan: 150, times: 230 },
-                    { yuan: 300, times: 460 },
-                    { yuan: 750, times: 1153 },
-                    { yuan: 1500, times: 2307 }
-                  ].map(pkg => (
-                    <div key={pkg.yuan} className="p-3 border border-[var(--color-border-light)] rounded-xl text-center space-y-1 bg-[var(--color-background)]/30 hover:border-[var(--color-accent)] transition-colors">
+                  {RECHARGE_PACKAGES.map(pkg => (
+                    <div key={pkg.id} className="p-3 border border-[var(--color-border-light)] rounded-xl text-center space-y-1 bg-[var(--color-background)]/30 hover:border-[var(--color-accent)] transition-colors">
                       <div className="text-xs text-[var(--color-text-muted)]">充值包</div>
-                      <div className="text-base font-bold text-[var(--color-text)] tabular-nums">¥{pkg.yuan}</div>
-                      <div className="text-[10px] text-[var(--color-accent)] font-medium">约 {pkg.times} 次生成</div>
+                      <div className="text-base font-bold text-[var(--color-text)] tabular-nums">{pkg.label}</div>
+                      <div className="text-[10px] text-[var(--color-accent)] font-medium">{pkg.description}</div>
                     </div>
                   ))}
                 </div>

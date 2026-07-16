@@ -10,6 +10,14 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
 
+const PG_POOL_TIMEOUTS = {
+  connectionTimeoutMillis: 10_000,
+  idleTimeoutMillis: 30_000,
+  statement_timeout: 30_000,
+  query_timeout: 35_000,
+  keepAlive: true,
+} as const;
+
 function getDatabaseUrl(): string | undefined {
   return (
     process.env.DATABASE_URL ||
@@ -49,7 +57,7 @@ function createPrismaClient(): PrismaClient {
   const { Pool } = require('pg');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { PrismaPg } = require('@prisma/adapter-pg');
-  const pool = new Pool({ connectionString });
+  const pool = new Pool({ connectionString, ...PG_POOL_TIMEOUTS });
   const adapter = new PrismaPg(pool);
   console.log('[Prisma] 使用 PostgreSQL');
   return new PrismaClient({ adapter });

@@ -8,20 +8,19 @@ import { UserNav } from '@/components/UserNav';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { ImageUploader } from '@/components/ImageUploader';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
+import { GPTQualitySelector } from '@/components/GPTQualitySelector';
 import {
   LookbookGarmentSlots,
   type GroupAnalysisState,
   MAX_TOTAL_GARMENTS,
 } from '@/components/LookbookGarmentSlots';
 import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE, SCENE_OUTPUT_SIZES } from '@/lib/models';
-import { PRICING } from '@/lib/billing-constants';
+import { getGenerationCostFen, type GenerationQuality } from '@/lib/billing-constants';
 import type { CompressedImage } from '@/lib/image-compressor';
 import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib/db';
 
 // 后端 sceneRefImages 硬上限 20（stream/route.ts validateImageInputs）
 const LOOKBOOK_MAX = 20;
-// 单价引用计费常量，避免与后端扣费单价漂移（后端逐张扣 PRICING.pricePerCallFen）
-const PRICE_PER_IMAGE_FEN = PRICING.pricePerCallFen;
 const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
 
@@ -138,6 +137,7 @@ export default function LookbookStudio() {
   const [productGroups, setProductGroups] = useState<ProductGroupDraft[]>([createProductGroup()]);
   // 组图默认走 GPT 图像编辑：只有 edit 路径能冻结原场景+姿势，Gemini 会重绘
   const [selectedEngine, setSelectedEngine] = useState<ImageEngine>('openai');
+  const [selectedQuality, setSelectedQuality] = useState<GenerationQuality>('medium');
   const [sceneOutputSize, setSceneOutputSize] = useState('hero_desktop');
   const [sceneCustomW, setSceneCustomW] = useState(1080);
   const [sceneCustomH, setSceneCustomH] = useState(1350);
@@ -225,10 +225,11 @@ export default function LookbookStudio() {
     validProductGroups.length <= PRODUCT_GROUP_MAX &&
     validProductGroups.every(group => group.images.length >= 1 && group.images.length <= PRODUCT_GROUP_IMAGE_MAX);
   const targetCount = mode === 'products' ? validProductGroups.length : lookbookImages.length;
+  const pricePerImageFen = getGenerationCostFen(selectedEngine, selectedQuality);
   const canGenerate = mode === 'products'
     ? singleSceneOk && productGroupsOk
     : lookbookOk && garmentsOk;
-  const totalCostFen = Math.max(1, targetCount) * PRICE_PER_IMAGE_FEN;
+  const totalCostFen = Math.max(1, targetCount) * pricePerImageFen;
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
@@ -253,6 +254,7 @@ export default function LookbookStudio() {
         bodyType: DEFAULT_BODY_TYPE.id,
         skinTone: DEFAULT_SKIN_TONE.id,
         engine: selectedEngine,
+        generationQuality: selectedEngine === 'openai' ? selectedQuality : undefined,
         sceneOutputSize,
         sceneHasModel: true,
         sceneGroup: true,
@@ -524,6 +526,11 @@ export default function LookbookStudio() {
           <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">生图引擎</h3>
           <p className="text-xs text-[var(--color-text-muted)] mb-3">默认 GPT 图像编辑（能冻结原场景与姿势，较慢）；Gemini 更快但不保证冻结。</p>
           <EngineSelector selected={selectedEngine} onSelect={setSelectedEngine} variant="compact" />
+          {selectedEngine === 'openai' && (
+            <div className="mt-4">
+              <GPTQualitySelector value={selectedQuality} onChange={setSelectedQuality} variant="compact" />
+            </div>
+          )}
         </div>
 
         {/* 项目名（选填） */}

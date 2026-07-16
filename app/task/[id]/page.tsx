@@ -10,6 +10,14 @@ import { FailureHistoryPanel } from '@/components/FailureHistoryPanel';
 import { ImageUploader } from '@/components/ImageUploader';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
+import { GPTQualitySelector } from '@/components/GPTQualitySelector';
+import {
+  getGenerationCostFen,
+  getGenerationQualityEtaSeconds,
+  getGenerationQualityLabel,
+  normalizeGenerationQuality,
+  type GenerationQuality,
+} from '@/lib/billing-constants';
 import {
   MODELS, BODY_TYPES, SKIN_TONES,
   PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES,
@@ -121,6 +129,7 @@ export default function TaskDetailPage() {
   const [newBodyType, setNewBodyType] = useState<'slim' | 'standard' | 'curvy'>(DEFAULT_BODY_TYPE.id);
   const [newSkinTone, setNewSkinTone] = useState<'light' | 'medium' | 'deep'>(DEFAULT_SKIN_TONE.id);
   const [newEngine, setNewEngine] = useState<ImageEngine>('gemini');
+  const [newQuality, setNewQuality] = useState<GenerationQuality>('medium');
   const [newStyleImages, setNewStyleImages] = useState<CompressedImage[]>([]);
 
   // --- 输入图片放大预览 ---
@@ -181,6 +190,7 @@ export default function TaskDetailPage() {
       setNewBodyType(task.bodyType || DEFAULT_BODY_TYPE.id);
       setNewSkinTone(task.skinTone || DEFAULT_SKIN_TONE.id);
       setNewEngine(task.engine === 'openai' ? 'openai' : 'gemini');
+      setNewQuality(normalizeGenerationQuality(task.generationQuality));
       // 恢复持久化的错误信息（刷新页面后仍可看到原因）：
       // failed 的失败原因，以及 completed 但中途有镜次失败/余额不足的提示
       if ((task.status === 'failed' || task.status === 'completed') && task.lastError) {
@@ -387,8 +397,8 @@ export default function TaskDetailPage() {
 
     // —— 初始化预估剩余时间(按引擎区分:GPT Image 2 实测 ~150-235s/张,Gemini ~20-35s/张;
     //     之前不分引擎统一按 15s/张 估算,GPT 会出现"预计剩余 17 秒"实跑 4 分钟的误导)——
-    const etaFirstShotSec = newEngine === 'openai' ? 180 : 25;
-    const etaPerShotSec = newEngine === 'openai' ? 180 : 15;
+    const etaFirstShotSec = newEngine === 'openai' ? getGenerationQualityEtaSeconds(newQuality) : 25;
+    const etaPerShotSec = newEngine === 'openai' ? getGenerationQualityEtaSeconds(newQuality) : 15;
     const groupEtaCount = Math.max(1, groupTotal);
     const initialSeconds = moduleType === 'scene'
       ? (isGroup
@@ -438,16 +448,19 @@ export default function TaskDetailPage() {
       // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
       const effectiveModelId = newModelId || freshProject.modelId || '';
       const effectiveEngine: 'gemini' | 'openai' = newEngine;
+      const effectiveQuality = normalizeGenerationQuality(newQuality);
       const effectiveBodyType = newBodyType || freshProject.bodyType || DEFAULT_BODY_TYPE.id;
       const effectiveSkinTone = newSkinTone || freshProject.skinTone || DEFAULT_SKIN_TONE.id;
       const modelChanged = effectiveModelId !== (freshProject.modelId || '');
       const engineChanged = effectiveEngine !== (freshProject.engine || 'gemini');
+      const qualityChanged = effectiveQuality !== normalizeGenerationQuality(freshProject.generationQuality);
       const bodyTypeChanged = effectiveBodyType !== (freshProject.bodyType || DEFAULT_BODY_TYPE.id);
       const skinToneChanged = effectiveSkinTone !== (freshProject.skinTone || DEFAULT_SKIN_TONE.id);
-      if (modelChanged || engineChanged || bodyTypeChanged || skinToneChanged) {
+      if (modelChanged || engineChanged || qualityChanged || bodyTypeChanged || skinToneChanged) {
         await db.projects.update(taskId, {
           modelId: effectiveModelId || undefined,
           engine: effectiveEngine,
+          generationQuality: effectiveQuality,
           bodyType: effectiveBodyType,
           skinTone: effectiveSkinTone,
           updatedAt: new Date(),
@@ -456,6 +469,7 @@ export default function TaskDetailPage() {
           ...prev,
           modelId: effectiveModelId || undefined,
           engine: effectiveEngine,
+          generationQuality: effectiveQuality,
           bodyType: effectiveBodyType,
           skinTone: effectiveSkinTone,
         } : null);
@@ -510,6 +524,7 @@ export default function TaskDetailPage() {
           bodyType: effectiveBodyType,
           skinTone: effectiveSkinTone,
           engine: effectiveEngine,
+          quality: effectiveEngine === 'openai' ? effectiveQuality : undefined,
           anchorImage: moduleType === 'product' ? anchorForChunk : undefined,
           selectedShotIndexes: moduleType === 'product' ? chunkShots : selectedShotIndexes,
           outputSize: freshProject.outputSize,
@@ -881,6 +896,7 @@ export default function TaskDetailPage() {
         bodyType: newBodyType,
         skinTone: newSkinTone,
         engine: newEngine,
+        generationQuality: normalizeGenerationQuality(newQuality),
         status: 'pending',
         updatedAt: new Date(),
       });
@@ -1130,12 +1146,20 @@ export default function TaskDetailPage() {
 
   const currentEngineId: ImageEngine = project.engine === 'openai' ? 'openai' : 'gemini';
   const currentEngineName = ENGINES.find(e => e.id === currentEngineId)?.name ?? 'Gemini Flash Image';
+  const currentQuality = normalizeGenerationQuality(project.generationQuality);
+  const currentQualityLabel = getGenerationQualityLabel(currentQuality);
+  const pendingUnitCostFen = getGenerationCostFen(newEngine, newQuality);
 
   const paramChips = (
     <div className="flex flex-wrap gap-2">
       <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
         引擎: {currentEngineName}
       </span>
+      {currentEngineId === 'openai' && (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          画质: {currentQualityLabel}
+        </span>
+      )}
       {project.modelId && (
         <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
           模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
@@ -1308,6 +1332,13 @@ export default function TaskDetailPage() {
                   onSelect={setNewEngine}
                   variant="full"
                 />
+                {newEngine === 'openai' && (
+                  <GPTQualitySelector
+                    value={newQuality}
+                    onChange={setNewQuality}
+                    variant="full"
+                  />
+                )}
               </div>
 
               {/* 模特选择 */}
@@ -1601,6 +1632,13 @@ export default function TaskDetailPage() {
                 onSelect={setNewEngine}
                 variant="full"
               />
+              {newEngine === 'openai' && (
+                <GPTQualitySelector
+                  value={newQuality}
+                  onChange={setNewQuality}
+                  variant="full"
+                />
+              )}
               <ModelSelector
                 selectedModel={newModelId}
                 onSelect={setNewModelId}
@@ -1637,7 +1675,7 @@ export default function TaskDetailPage() {
 
             <p className="text-xs text-[var(--color-text-muted)] mt-4">
               {moduleType === 'product' && getShotCount() > 1
-                ? `💡 先试 1 张确认效果（$0.045），满意后再生成剩余 ${getShotCount() - 1} 张`
+                ? `先试 1 张确认效果（¥${(pendingUnitCostFen / 100).toFixed(2)}），满意后再生成剩余 ${getShotCount() - 1} 张`
                 : '预计需要 1-2 分钟，请保持页面开启'
               }
             </p>

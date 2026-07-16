@@ -11,10 +11,16 @@
 
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { checkBalance, deductBalance, refundBalance, PRICING } from '@/lib/billing';
+import { checkBalance, deductBalance, refundBalance } from '@/lib/billing';
+import {
+  getGenerationCostFen,
+  getGenerationQualityLabel,
+  normalizeGenerationQuality,
+  type GenerationQuality,
+} from '@/lib/billing-constants';
 import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
-import { generateImage as generateBackendImage, normalizeBackend } from '@/lib/image-backends';
+import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 
@@ -63,6 +69,7 @@ interface GenerateStreamRequest {
   sceneGroupGarmentCategories?: string[]; // 用户上传替换的主品品类（top/pants/dress…），点明换哪几件
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
+  quality?: GenerationQuality | string; // GPT 图像质量：low / medium / high（Gemini 忽略）
   // 客户端分块生成时,把首块「有模特」镜次的产出回传作为锚点,
   // 让后续分块的镜次仍复用同一个模特身份(跨请求保持模特一致性)。
   anchorImage?: ImageInput;
@@ -238,11 +245,16 @@ export async function POST(req: NextRequest) {
     sceneGroupGarmentCategories,
     customPrompt,
     engine: rawEngine,
+    quality: rawQuality,
     anchorImage: clientAnchorImage,
   } = body;
 
   const engine = normalizeBackend(rawEngine);
-  const requestedApiModel = engine === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview';
+  const quality = normalizeGenerationQuality(rawQuality);
+  const costFen = getGenerationCostFen(engine, quality);
+  const qualityLabel = engine === 'openai' ? getGenerationQualityLabel(quality) : null;
+  const chargeDescription = (label: string) => qualityLabel ? `${label}(${qualityLabel})` : label;
+  const requestedApiModel = resolveApiModel(engine);
   const sceneGroupMode: 'swap' | 'products' = rawSceneGroupMode === 'products' ? 'products' : 'swap';
   const productImages = Array.isArray(rawProductImages) ? rawProductImages : [];
 
@@ -395,7 +407,8 @@ export async function POST(req: NextRequest) {
             });
 
             // 余额检查 + 扣费
-            const balance = await checkBalance(auth.userId);
+            const chargeLabel = chargeDescription(`生成镜次 #${shot.index}`);
+            const balance = await checkBalance(auth.userId, costFen);
             if (!balance.sufficient) {
               const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
               push('error', {
@@ -417,7 +430,7 @@ export async function POST(req: NextRequest) {
               break;
             }
 
-            const deduction = await deductBalance(auth.userId, `生成镜次 #${shot.index}`, taskId, requestedApiModel);
+            const deduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
             if (!deduction.success) {
               const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
               push('error', {
@@ -467,11 +480,12 @@ export async function POST(req: NextRequest) {
                 // anchor 的指令是"使用完全相同的模特"，与 "Do NOT include any human figure" 直接打架
                 anchorImage: shot.hasModel ? anchorImage : undefined,
                 aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                ...(engine === 'openai' ? { quality } : {}),
               }, engine);
               shotLatency = Date.now() - shotStart;
             } catch (innerErr) {
               const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-              await refundBalance(auth.userId, PRICING.pricePerCallFen, `生成镜次 #${shot.index} 异常退款`, taskId);
+              await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
               recordGeneration({
                 userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
                 promptText: prompt || '(throw before prompt built)',
@@ -492,7 +506,7 @@ export async function POST(req: NextRequest) {
               continue;
             }
             // 用后端返回的真实模型名归因（独立令牌时 GPT 可能是 gpt-image-2 而非 gpt-image-2-all）
-            const resultApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
+            const resultApiModel = result.model || resolveApiModel(result.backend);
 
             // 持久化生成记录到 Postgres（无论成败）—— 只记一条，反映最终交付结果。
             // 出图成功但客户端已断开属于「没交付」，记为失败（disconnect），否则同一镜次会
@@ -520,11 +534,10 @@ export async function POST(req: NextRequest) {
               // 关键：生成成功但客户端已断开 → push 会被吞，IndexedDB 也写不进去 → 用户付了钱拿不到图。
               // 主动退款（记录已在上面记为 disconnect 失败，这里不再重复记）。
               if (clientClosed) {
-                await refundBalance(auth.userId, PRICING.pricePerCallFen, `生成镜次 #${shot.index} 客户端断开退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
                 failedCount++;
                 break;
               }
-              successCount++;
               // 锚定首张"有模特"的成功图（无模特的面料特写不能当模特身份锚点）
               if (!anchorImage && shot.hasModel) {
                 anchorImage = { data: result.data, mimeType: 'image/png' };
@@ -535,12 +548,21 @@ export async function POST(req: NextRequest) {
                 current: i + 1,
                 total,
               });
+              // 上面的闸门只挡住"推流前就已知的断开"。若断连是由 push 内 enqueue 抛错
+              // 才暴露的（心跳 25s 一次，req.signal 未必先到），这里是唯一的感知时机——
+              // 漏掉就会扣了钱、图没送到、还不退款。successCount 也必须等复查通过再加。
+              if (clientClosed) {
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
+                failedCount++;
+                break;
+              }
+              successCount++;
             } else {
               failedCount++;
               await refundBalance(
                 auth.userId,
-                PRICING.pricePerCallFen,
-                `生成镜次 #${shot.index} 失败退款`,
+                costFen,
+                `${chargeLabel} 失败退款`,
                 taskId,
               );
               push('error', {
@@ -686,7 +708,7 @@ export async function POST(req: NextRequest) {
                   : `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
               });
 
-              const balance = await checkBalance(auth.userId);
+              const balance = await checkBalance(auth.userId, costFen);
               if (!balance.sufficient) {
                 const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -701,8 +723,8 @@ export async function POST(req: NextRequest) {
                 break;
               }
 
-              const chargeLabel = sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`;
-              const deduction = await deductBalance(auth.userId, chargeLabel, taskId, requestedApiModel);
+              const chargeLabel = chargeDescription(sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`);
+              const deduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
               if (!deduction.success) {
                 const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -740,11 +762,12 @@ export async function POST(req: NextRequest) {
                   anchorImage,
                   sceneAsEditBase: true,
                   aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                  ...(engine === 'openai' ? { quality } : {}),
                 }, engine);
                 shotLatency = Date.now() - shotStart;
               } catch (innerErr) {
                 const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-                await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 异常退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
                   promptText: prompt || '(throw before prompt built)',
@@ -757,7 +780,7 @@ export async function POST(req: NextRequest) {
                 continue; // 组图每张独立，某张异常不整批中止
               }
 
-              const resultApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
+              const resultApiModel = result.model || resolveApiModel(result.backend);
               const deliveredButDisconnected = result.success && !!result.data && clientClosed;
               recordGeneration({
                 userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
@@ -773,16 +796,22 @@ export async function POST(req: NextRequest) {
 
               if (result.success && result.data) {
                 if (clientClosed) {
-                  await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 客户端断开退款`, taskId);
+                  await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
+                  failedCount++;
+                  break;
+                }
+                if (!anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
+                push('result', { shotIndex: refSeq, imageData: result.data, current: i + 1, total });
+                // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
+                if (clientClosed) {
+                  await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
                   failedCount++;
                   break;
                 }
                 successCount++;
-                if (!anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
-                push('result', { shotIndex: refSeq, imageData: result.data, current: i + 1, total });
               } else {
                 failedCount++;
-                await refundBalance(auth.userId, PRICING.pricePerCallFen, `${chargeLabel} 失败退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 失败退款`, taskId);
                 push('error', {
                   shotIndex: refSeq, current: i + 1, total,
                   message: `${result.error ?? '生成失败（未知原因）'}（已自动退款）`,
@@ -805,7 +834,8 @@ export async function POST(req: NextRequest) {
           push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
 
           // 余额 + 扣费
-          const balance = await checkBalance(auth.userId);
+          const chargeLabel = chargeDescription('场景图生成');
+          const balance = await checkBalance(auth.userId, costFen);
           if (!balance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}）`;
             push('error', {
@@ -827,7 +857,7 @@ export async function POST(req: NextRequest) {
             return;
           }
 
-          const sceneDeduction = await deductBalance(auth.userId, '场景图生成', taskId, requestedApiModel);
+          const sceneDeduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
           if (!sceneDeduction.success) {
             const errMsg = `扣费失败: ${sceneDeduction.error || '未知错误'}`;
             push('error', {
@@ -878,11 +908,12 @@ export async function POST(req: NextRequest) {
               sceneRefImages,
               accessoryImages,
               aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+              ...(engine === 'openai' ? { quality } : {}),
             }, engine);
             sceneShotLatency = Date.now() - sceneShotStart;
           } catch (innerErr) {
             const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-            await refundBalance(auth.userId, PRICING.pricePerCallFen, '场景图异常退款', taskId);
+            await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
             recordGeneration({
               userId: auth.userId, taskId, module: 'scene',
               promptText: prompt || '(throw before prompt built)',
@@ -895,7 +926,7 @@ export async function POST(req: NextRequest) {
             controller.close();
             return;
           }
-          const sceneApiModel = result.model || (result.backend === 'openai' ? 'gpt-image-2-all' : 'gemini-3.1-flash-image-preview');
+          const sceneApiModel = result.model || resolveApiModel(result.backend);
 
           // 持久化生成记录到 Postgres —— 只记一条，反映最终交付结果（理由同产品图分支）
           const sceneDeliveredButDisconnected = result.success && !!result.data && clientClosed;
@@ -919,18 +950,24 @@ export async function POST(req: NextRequest) {
           if (result.success && result.data) {
             // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款（记录已在上面记为 disconnect 失败）。
             if (clientClosed) {
-              await refundBalance(auth.userId, PRICING.pricePerCallFen, '场景图客户端断开退款', taskId);
+              await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
               failedCount = 1;
             } else {
-              successCount = 1;
               push('result', { shotIndex: 0, imageData: result.data, current: 1, total: 1 });
+              // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
+              if (clientClosed) {
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
+                failedCount = 1;
+              } else {
+                successCount = 1;
+              }
             }
           } else {
             failedCount = 1;
             await refundBalance(
               auth.userId,
-              PRICING.pricePerCallFen,
-              '场景图生成失败退款',
+              costFen,
+              `${chargeLabel} 失败退款`,
               taskId,
             );
             push('error', {

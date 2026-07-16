@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, Wallet, TrendingDown, Clock, Package, Sparkles } from 'lucide-react';
 import { Logo } from '@/components/Logo';
-import { PRICING, RECHARGE_PACKAGES } from '@/lib/billing-constants';
+import { GPT_IMAGE_QUALITY_OPTIONS, PRICING, RECHARGE_PACKAGES } from '@/lib/billing-constants';
 
 interface UserInfo {
   id: string;
@@ -57,6 +57,7 @@ export default function BillingPage() {
 
   const formatFen = (fen: number) => `¥${(Math.abs(fen) / 100).toFixed(2)}`;
   const formatDate = (d: string) => new Date(d).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const gptStandardPriceFen = GPT_IMAGE_QUALITY_OPTIONS.find(option => option.id === 'medium')?.priceFen ?? 120;
 
   if (loading) {
     return (
@@ -93,7 +94,9 @@ export default function BillingPage() {
               {user ? formatFen(user.balanceFen) : '¥0.00'}
             </p>
             <p className="text-sm text-white/50">
-              约可生成 <span className="tabular-nums">{user ? Math.floor(user.balanceFen / PRICING.pricePerCallFen) : 0}</span> 张图片
+              Gemini 约 <span className="tabular-nums">{user ? Math.floor(user.balanceFen / PRICING.pricePerCallFen) : 0}</span> 张
+              <span className="mx-1 text-white/30">/</span>
+              GPT 标准约 <span className="tabular-nums">{user ? Math.floor(user.balanceFen / gptStandardPriceFen) : 0}</span> 张
             </p>
           </div>
         </div>
@@ -116,6 +119,26 @@ export default function BillingPage() {
                 </div>
               </div>
               <span className="text-lg font-bold text-[var(--color-accent)] tabular-nums">¥{PRICING.pricePerCallYuan}<span className="text-xs font-normal text-[var(--color-text-muted)] ml-1">/张</span></span>
+            </div>
+            <div className="flex items-start justify-between gap-4 py-2 border-b border-[var(--color-border-light)]">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-blue-50 flex items-center justify-center">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-500" aria-hidden="true" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-[var(--color-text)]">GPT Image 2</p>
+                  <p className="text-[10px] text-[var(--color-text-muted)]">302.AI 官转通道 · 按画质档位计费</p>
+                </div>
+              </div>
+              <div className="text-right space-y-1">
+                {GPT_IMAGE_QUALITY_OPTIONS.map(option => (
+                  <p key={option.id} className="text-xs text-[var(--color-text-secondary)] whitespace-nowrap">
+                    <span>{option.label}</span>
+                    <span className="font-bold text-blue-600 tabular-nums ml-2">¥{(option.priceFen / 100).toFixed(2)}</span>
+                    <span className="text-[10px] text-[var(--color-text-muted)] ml-1">/张 · {option.etaLabel}</span>
+                  </p>
+                ))}
+              </div>
             </div>
             <div className="flex items-center justify-between py-2">
               <div className="flex items-center gap-2">
