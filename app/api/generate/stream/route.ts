@@ -11,6 +11,7 @@
 
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
+import { rateLimit } from '@/lib/rate-limit';
 import { checkBalance, deductBalance, refundBalance } from '@/lib/billing';
 import {
   getGenerationCostFen,
@@ -25,6 +26,15 @@ import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
+
+// ═══ 限流阈值 ═══
+// 按用户限流（本 route 已鉴权；按 IP 会误伤同一出口 NAT 后的多个用户）。
+// 阈值下界由客户端分块决定：CHUNK_SIZE=3，一次「生成」最多发 ceil(20/3)=7 个连续 POST
+// （组图 sceneRefImages 上限 20 张），产品图最多 ceil(10/3)=4 个。
+// 取 20/分钟 —— 容得下一次满额分块 + 紧接着一次整轮重试（上游全挂时 7 个块会快速失败并被重试），
+// 同时把「循环 POST」从无上限压到每分钟 20 次。
+const GEN_RATE_MAX = 20;
+const GEN_RATE_WINDOW_MS = 60 * 1000;
 
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
@@ -211,6 +221,23 @@ export async function POST(req: NextRequest) {
   const auth = await getCurrentUser();
   if (!auth) {
     return new Response(JSON.stringify({ error: '未登录' }), { status: 401 });
+  }
+
+  // 限流必须在 req.json() 之前：请求体含多张 base64 参考图，可达数十 MB，
+  // 解析完再拒等于该付的内存/CPU 一分没省。此处拒绝时流还没开，
+  // 因此能和上面的 401 / 下面的 400 一样返回普通 JSON，而不是 SSE 事件。
+  const genLimit = rateLimit(`generate-stream:user:${auth.userId}`, GEN_RATE_MAX, GEN_RATE_WINDOW_MS);
+  if (!genLimit.allowed) {
+    return new Response(
+      JSON.stringify({ error: `生成请求过于频繁，请 ${genLimit.retryAfterSec} 秒后再试` }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': String(genLimit.retryAfterSec),
+        },
+      }
+    );
   }
 
   let body: GenerateStreamRequest;
