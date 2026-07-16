@@ -26,6 +26,7 @@ export interface Project {
   bodyType?: BodyType;           // 体型：slim / standard / curvy
   skinTone?: SkinTone;           // 肤色：light / medium / deep
   engine?: 'gemini' | 'openai';  // 生图引擎：gemini / openai (gpt-image-2-all)
+  generationQuality?: 'low' | 'medium' | 'high'; // GPT 画质：Gemini 忽略
 
   // 产品图模块专属
   skuType?: SkuType;             // SKU 类型：套装 / 单件上装 / 单件下装

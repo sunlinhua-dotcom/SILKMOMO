@@ -4,29 +4,36 @@
  */
 import prisma from './prisma';
 export { PRICING, RECHARGE_PACKAGES } from './billing-constants'
-import { PRICING } from './billing-constants';
+
+function assertValidCostFen(costFen: number): number {
+  if (!Number.isInteger(costFen) || costFen <= 0) {
+    throw new Error('扣费金额非法');
+  }
+  return costFen;
+}
 
 // ═══ 检查余额 ═══
-export async function checkBalance(userId: string): Promise<{ sufficient: boolean; balanceFen: number; requiredFen: number }> {
+export async function checkBalance(userId: string, costFen: number): Promise<{ sufficient: boolean; balanceFen: number; requiredFen: number }> {
+  const cost = assertValidCostFen(costFen);
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) return { sufficient: false, balanceFen: 0, requiredFen: PRICING.pricePerCallFen };
+  if (!user) return { sufficient: false, balanceFen: 0, requiredFen: cost };
   return {
-    sufficient: user.balanceFen >= PRICING.pricePerCallFen,
+    sufficient: user.balanceFen >= cost,
     balanceFen: user.balanceFen,
-    requiredFen: PRICING.pricePerCallFen,
+    requiredFen: cost,
   };
 }
 
 // ═══ 扣费（原子操作，防止竞态条件）═══
 export async function deductBalance(
   userId: string,
+  costFen: number,
   description: string,
   projectId?: number,
   apiModel: string = 'gemini-3.1-flash-image-preview'
 ): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
-  const cost = PRICING.pricePerCallFen;
-
   try {
+    const cost = assertValidCostFen(costFen);
     const result = await prisma.$transaction(async (tx) => {
       // 1+2. 原子条件扣费：余额不足时 where 不命中任何行。
       // 不能先 findUnique 再 update —— 普通 SELECT 不加行锁，

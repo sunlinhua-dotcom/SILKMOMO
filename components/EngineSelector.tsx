@@ -23,9 +23,9 @@ export const ENGINES: Array<{
         {
             id: 'openai',
             name: 'GPT Image 2',
-            sub: 'gpt-image-2-all',
+            sub: 'gpt-image-2',
             desc: '面料 macro / 极致缎面光泽 / 详情页面料展示',
-            speed: '约 3 分钟/张',
+            speed: '约 35-150 秒/张',
             icon: Zap,
         },
     ];

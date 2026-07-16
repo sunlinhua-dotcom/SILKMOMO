@@ -30,11 +30,58 @@ export const PRICING = {
   },
 } as const;
 
+export type GenerationBackend = 'gemini' | 'openai';
+export type GenerationQuality = 'low' | 'medium' | 'high';
+
+export const DEFAULT_GPT_IMAGE_QUALITY: GenerationQuality = 'medium';
+
+export const GPT_IMAGE_QUALITY_OPTIONS: Array<{
+  id: GenerationQuality;
+  label: string;
+  priceFen: number;
+  etaSeconds: number;
+  etaLabel: string;
+}> = [
+  { id: 'low', label: '草稿', priceFen: 40, etaSeconds: 35, etaLabel: '约35秒' },
+  { id: 'medium', label: '标准', priceFen: 120, etaSeconds: 90, etaLabel: '约90秒' },
+  { id: 'high', label: '高清', priceFen: 350, etaSeconds: 150, etaLabel: '约150秒' },
+];
+
+export const GPT_IMAGE_PRICES_FEN: Record<GenerationQuality, number> = {
+  low: 40,
+  medium: 120,
+  high: 350,
+};
+
+export function normalizeGenerationQuality(quality: unknown): GenerationQuality {
+  return quality === 'low' || quality === 'medium' || quality === 'high'
+    ? quality
+    : DEFAULT_GPT_IMAGE_QUALITY;
+}
+
+export function getGenerationQualityLabel(quality: unknown): string {
+  const normalized = normalizeGenerationQuality(quality);
+  return GPT_IMAGE_QUALITY_OPTIONS.find(option => option.id === normalized)?.label ?? '标准';
+}
+
+export function getGenerationQualityEtaSeconds(quality: unknown): number {
+  const normalized = normalizeGenerationQuality(quality);
+  return GPT_IMAGE_QUALITY_OPTIONS.find(option => option.id === normalized)?.etaSeconds ?? 90;
+}
+
+export function getGenerationCostFen(backend: GenerationBackend | string | null | undefined, quality?: unknown): number {
+  const normalizedBackend = backend === 'openai' || backend === 'gpt' || backend === 'gpt-image'
+    ? 'openai'
+    : 'gemini';
+  if (normalizedBackend !== 'openai') return PRICING.pricePerCallFen;
+  return GPT_IMAGE_PRICES_FEN[normalizeGenerationQuality(quality)];
+}
+
 // ═══ 充值套餐 ═══
 // 一次"完整生成"按 5 张计；次数从当前单价推导，避免调价后文案虚标
 const FULL_GENERATION_FEN = PRICING.pricePerCallFen * 5;
 const packDescription = (amountFen: number) =>
-  `约 ${Math.floor(amountFen / FULL_GENERATION_FEN)} 次完整生成`;
+  `按 Gemini 约 ${Math.floor(amountFen / FULL_GENERATION_FEN)} 次完整生成`;
 
 export const RECHARGE_PACKAGES = [
   { id: 'pack_150', name: '起步包', amountFen: 15000, label: '¥150', bonus: 0, description: packDescription(15000) },
