@@ -217,34 +217,34 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
 
   // 组图模式：底图（场景参考图）必须排在最前，作为「要保留并编辑的底图」
   if (input.sceneAsEditBase && input.sceneRefImages?.length) {
-    parts.push({ text: '\n\nScene-Base Image (tagged "scene-base" — PRESERVE its scene, lighting, framing, and the model pose EXACTLY; only swap garment and person):' });
+    parts.push({ text: '\n\nScene-Base Image (tagged "scene-base" - use ONLY for pose, composition, crop, lighting, scene, expression, makeup, styling language, and photographic language; preserve those exactly. Its original clothing is NOT a garment design reference; only swap product garment and person identity):' });
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
     if (input.anchorImage) {
-      parts.push({ text: '\n\nAnchor Reference Image (the ONLY identity reference for the new model):' });
+      parts.push({ text: '\n\nAnchor Reference Image (the ONLY identity reference for the same fictional model in this set):' });
       parts.push({ inline_data: { mime_type: input.anchorImage.mimeType, data: input.anchorImage.data } });
     }
   }
 
   if (input.modelRefImages?.length) {
-    parts.push({ text: '\n\nModel Reference Images (match hairstyle, makeup, mood, age):' });
+    parts.push({ text: '\n\nModel Reference Images (style reference for hairstyle, makeup, mood, age feeling, and expression; not a garment reference and not an identity reference unless explicitly anchored):' });
     input.modelRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
-  parts.push({ text: '\n\nProduct Reference Images (garment reference ONLY — extract fabric, color, pattern, silhouette; ignore any person/face):' });
+  parts.push({ text: '\n\nProduct Reference Images (garment reference ONLY - extract style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures, and construction; ignore any person/face/pose/identity):' });
   input.productImages.forEach(img =>
     parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
   );
   if (input.bgRefImages?.length) {
-    parts.push({ text: '\n\nBackground Reference Images (use these tones and atmosphere):' });
+    parts.push({ text: '\n\nBackground Reference Images (use tones, filter, atmosphere, and lighting only; ignore any clothing or person as product/identity references):' });
     input.bgRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
   if (!input.sceneAsEditBase && input.sceneRefImages?.length) {
-    parts.push({ text: '\n\nScene Reference Images (recreate the spatial structure and lighting):' });
+    parts.push({ text: '\n\nScene Reference Images (use spatial structure, pose/composition if relevant, lighting, filter, expression, makeup, and photographic language; clothing in these images is NOT a product design reference):' });
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
@@ -256,7 +256,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
     );
   }
   if (!input.sceneAsEditBase && input.anchorImage) {
-    parts.push({ text: '\n\nAnchor Reference Image (CRITICAL — use the EXACT same model identity):' });
+    parts.push({ text: '\n\nAnchor Reference Image (CRITICAL - use the EXACT same fictional model identity for this set):' });
     parts.push({ inline_data: { mime_type: input.anchorImage.mimeType, data: input.anchorImage.data } });
   }
   return parts;
@@ -303,9 +303,17 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   const roleText = (tag: string) => {
     switch (tag) {
       case 'product':
-        return 'product (garment reference ONLY — ignore any person/face in it)';
+        return 'product (garment reference ONLY: style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures; ignore person/face/pose/identity)';
       case 'anchor':
-        return 'anchor (the ONLY identity reference for the new model)';
+        return 'anchor (the ONLY identity reference for the same fictional model in this set)';
+      case 'scene-base':
+        return 'scene-base (pose/composition/crop/lighting/scene/expression/makeup/photographic language ONLY; original clothing is not a garment design reference)';
+      case 'model':
+        return 'model (hairstyle/makeup/mood/age feeling/expression style only; not garment or identity reference unless explicitly anchored)';
+      case 'bg':
+        return 'background (tones/filter/atmosphere/lighting only; ignore clothing/person)';
+      case 'scene':
+        return 'scene (spatial structure, lighting, filter, pose/composition, expression/makeup, photographic language; clothing is not product design)';
       default:
         return tag;
     }
