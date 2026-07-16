@@ -372,6 +372,29 @@ export async function POST(req: NextRequest) {
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
 
+          const preflightBalance = await checkBalance(auth.userId, costFen);
+          if (!preflightBalance.sufficient) {
+            const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
+            const firstShot = shotConfigs[0];
+            push('error', {
+              shotIndex: firstShot?.index ?? 0,
+              current: 1,
+              total,
+              message: errMsg,
+              fatal: true,
+            });
+            recordGeneration({
+              userId: auth.userId, taskId, module: 'product', shotIndex: firstShot?.index ?? 0,
+              promptText: '(skipped: balance insufficient)',
+              modelId, bodyType, skinTone, aspectRatio,
+              apiModel: requestedApiModel,
+              success: false, apiLatencyMs: 0, errorMessage: errMsg,
+            }).catch(err => console.error('[recordGeneration]', err));
+            push('done', { successCount: 0, failedCount: total, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
+            controller.close();
+            return;
+          }
+
           // AI 服装分析（可选，失败不阻塞）
           let garmentDescription: string | undefined;
           push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
@@ -627,6 +650,23 @@ export async function POST(req: NextRequest) {
             }
             const total = targetIndexes.length;
 
+            const preflightBalance = await checkBalance(auth.userId, costFen);
+            if (!preflightBalance.sufficient) {
+              const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
+              const firstTarget = targetIndexes[0] ?? 0;
+              push('error', { shotIndex: firstTarget, current: 1, total, message: errMsg, fatal: true });
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'scene', shotIndex: firstTarget,
+                promptText: '(skipped: balance insufficient)',
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: requestedApiModel,
+                success: false, apiLatencyMs: 0, errorMessage: errMsg,
+              }).catch(err => console.error('[recordGeneration]', err));
+              push('done', { successCount: 0, failedCount: total, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
+              controller.close();
+              return;
+            }
+
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
             // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
@@ -825,6 +865,28 @@ export async function POST(req: NextRequest) {
               }
             }
           } else {
+          const preflightBalance = await checkBalance(auth.userId, costFen);
+          if (!preflightBalance.sufficient) {
+            const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}）`;
+            push('error', {
+              shotIndex: 0,
+              current: 1,
+              total: 1,
+              message: errMsg,
+              fatal: true,
+            });
+            recordGeneration({
+              userId: auth.userId, taskId, module: 'scene',
+              promptText: '(skipped: balance insufficient)',
+              modelId, bodyType, skinTone, aspectRatio,
+              apiModel: requestedApiModel,
+              success: false, apiLatencyMs: 0, errorMessage: errMsg,
+            }).catch(err => console.error('[recordGeneration]', err));
+            push('done', { successCount: 0, failedCount: 1, totalSeconds: 0 });
+            controller.close();
+            return;
+          }
+
           // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
           // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
           let garmentDescription: string | undefined;
