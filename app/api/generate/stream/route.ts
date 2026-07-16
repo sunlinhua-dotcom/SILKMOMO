@@ -356,6 +356,25 @@ export async function POST(req: NextRequest) {
       let successCount = 0;
       let failedCount = 0;
 
+      // 上游成本闸门：余额连一张都不够时，任何上游调用（服装分析 / 组图身份锚肖像卡）
+      // 都不该发生 —— 否则 0 余额账号可以循环 POST 白嫖上游 API 成本。
+      // 只读预检，不扣费：各分支原有的 checkBalance + deductBalance 仍是唯一的原子扣费闸门，
+      // 这里绝不能替代它们（预检到扣费之间有 await，替代即 TOCTOU 双花）。
+      // 按单张 costFen 而非 costFen*total 校验，保留「余额只够前几张」的部分生成行为。
+      const preflightInsufficient = async (total: number): Promise<boolean> => {
+        const preflight = await checkBalance(auth.userId, costFen);
+        if (preflight.sufficient) return false;
+        const errMsg = `余额不足（当前 ¥${(preflight.balanceFen / 100).toFixed(2)}）`;
+        push('error', { shotIndex: 0, current: 1, total, message: errMsg, fatal: true });
+        push('done', {
+          successCount: 0,
+          failedCount: total,
+          totalSeconds: Math.round((Date.now() - startTime) / 1000),
+        });
+        controller.close();
+        return true;
+      };
+
       try {
         // 解析配置
         const modelConfig = modelId ? MODELS.find(m => m.id === modelId) : undefined;
@@ -371,6 +390,8 @@ export async function POST(req: NextRequest) {
           const aspectRatio = outputSize === 'custom' && customAspectRatio
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
+
+          if (await preflightInsufficient(total)) return;
 
           // AI 服装分析（可选，失败不阻塞）
           let garmentDescription: string | undefined;
@@ -627,6 +648,8 @@ export async function POST(req: NextRequest) {
             }
             const total = targetIndexes.length;
 
+            if (await preflightInsufficient(total)) return;
+
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
             // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
@@ -821,6 +844,8 @@ export async function POST(req: NextRequest) {
               }
             }
           } else {
+          if (await preflightInsufficient(1)) return;
+
           // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
           // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
           let garmentDescription: string | undefined;
