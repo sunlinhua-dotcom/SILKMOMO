@@ -546,7 +546,15 @@ export default function TaskDetailPage() {
         throw new Error('登录已过期，请重新登录后再试');
       }
       if (!response.ok || !response.body) {
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        // 开流之前被拒（余额不足 402 / 入参非法 400 …）：路由回的是 { error } JSON。
+        // 直接把原文糊进红框，用户读到的是带引号大括号的 JSON 信封；取出 error 才是给人看的话。
+        const raw = await response.text();
+        let friendly = '';
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.error === 'string') friendly = parsed.error;
+        } catch { /* 非 JSON（网关 HTML 等）：退回原文，别把诊断信息吃掉 */ }
+        throw new Error(friendly || `HTTP ${response.status}: ${raw}`);
       }
       // 兜底：若被中间层重定向到登录页（HTML 200），不能当成空 SSE 流静默吞掉
       const sseContentType = response.headers.get('content-type') || '';
@@ -777,7 +785,12 @@ export default function TaskDetailPage() {
         setErrorMessage(msg);
         lastFatalError = msg;
         setGenerationPhase('error');
-        const persistedError = finalStatus === 'failed' ? (lastFatalError || '生成失败（catch）') : undefined;
+        // 部分成功也要持久化原因，理由同上面的定稿分支：否则任务显示"已完成"而原因在 UI 任何地方看不到。
+        // 分块生成里这条最常见——首块出图、次块开流前就被 402 挡下（余额不足），异常直接落到这里，
+        // 走不到上面那个定稿分支；置 undefined 的话刷新后就只剩"已完成 3/6"而没有任何解释。
+        const persistedError = finalStatus === 'failed'
+          ? (lastFatalError || '生成失败（catch）')
+          : (lastFatalError ?? undefined);
         await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
         setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }

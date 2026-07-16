@@ -321,6 +321,32 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ═══ 余额预检（开流之前）═══
+  // 开流之后才查余额的话，零余额用户每次 POST 都会白烧平台一次上游：三个分支的
+  // 服装分析（analyzeProductImage，Flash Lite）都排在各自的逐张扣费之前，组图分支还会
+  // 先生成一张不计费的模特肖像卡（整价 Gemini 出图）。这些钱平台自己吃，用户一分不付。
+  // costFen 由 engine + quality 定，整条请求恒定，所以按首张的价格拦一道即可。
+  // 逐张/逐组的 checkBalance 一律保留 —— 预检只保证第一张付得起，后续每张仍各自校验。
+  let preflight: Awaited<ReturnType<typeof checkBalance>>;
+  try {
+    preflight = await checkBalance(auth.userId, costFen);
+  } catch (err) {
+    // 预检自己挂了（DB 不可用等）。不能假装余额充足放行去烧上游，直接失败关闭。
+    // 原先这个异常会由流内的 checkBalance 抛出并被外层 catch 兜成 SSE error；
+    // 现在提前到开流前，就得在这里自己收口，否则会漏成 Next.js 的 500 HTML。
+    const msg = err instanceof Error ? err.message : '余额校验失败';
+    console.error('[stream] 余额预检失败', { userId: auth.userId, error: msg });
+    return new Response(JSON.stringify({ error: `余额校验失败：${msg}` }), { status: 503 });
+  }
+  if (!preflight.sufficient) {
+    return new Response(
+      JSON.stringify({
+        error: `余额不足（当前 ¥${(preflight.balanceFen / 100).toFixed(2)}，本次需 ¥${(preflight.requiredFen / 100).toFixed(2)}）`,
+      }),
+      { status: 402 },
+    );
+  }
+
   // ═══ SSE 流式响应 ═══
   // 客户端断开检测：req.signal 在请求被中断时触发 aborted
   // 配合 enqueue 抛错检测构成双重保险
@@ -372,7 +398,9 @@ export async function POST(req: NextRequest) {
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
 
-          // AI 服装分析（可选，失败不阻塞）
+          // AI 服装分析（可选，失败不阻塞）。整批共用一份，所以排在逐镜次循环之前。
+          // 它是真花钱的上游调用（平台自付），挡它的是开流前的余额预检 ——
+          // 循环里的 checkBalance 是逐镜次语义（每张各扣各的），不能提到这里来代劳。
           let garmentDescription: string | undefined;
           push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
           try {
@@ -682,6 +710,25 @@ export async function POST(req: NextRequest) {
                 : (Array.isArray(sceneGroupGarmentCategories) ? sceneGroupGarmentCategories : undefined);
               const baseRef = sceneGroupMode === 'products' ? sceneRefImages[0] : sceneRefImages[refSeq - 1];
 
+              // 余额检查排在本组的服装分析之前：products 模式每组都要重新分析一次，
+              // 而 analyzeProductImage 是真花钱的上游调用（平台自付）。跑到某一组余额见底时
+              // 先分析再报余额不足，等于每组白烧一次。开流前的预检只保证第一组付得起。
+              const balance = await checkBalance(auth.userId, costFen);
+              if (!balance.sufficient) {
+                const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
+                push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                  promptText: '(skipped: balance insufficient)',
+                  modelId, bodyType, skinTone, aspectRatio,
+                  apiModel: requestedApiModel,
+                  success: false, apiLatencyMs: 0, errorMessage: errMsg,
+                }).catch(err => console.error('[recordGeneration]', err));
+                failedCount += total - i;
+                break;
+              }
+
+              // 分析仍排在扣费之前：分析上游挂起/失败时钱还没扣，不会有「已扣费却卡在分析阶段」的悬置窗口
               let garmentDescription = sharedGarmentDescription;
               if (sceneGroupMode === 'products') {
                 push('status', {
@@ -707,21 +754,6 @@ export async function POST(req: NextRequest) {
                   ? `正在生成第 ${i + 1}/${total} 张同景换品（产品组 #${refSeq}）...`
                   : `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
               });
-
-              const balance = await checkBalance(auth.userId, costFen);
-              if (!balance.sufficient) {
-                const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
-                push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
-                recordGeneration({
-                  userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
-                  promptText: '(skipped: balance insufficient)',
-                  modelId, bodyType, skinTone, aspectRatio,
-                  apiModel: requestedApiModel,
-                  success: false, apiLatencyMs: 0, errorMessage: errMsg,
-                }).catch(err => console.error('[recordGeneration]', err));
-                failedCount += total - i;
-                break;
-              }
 
               const chargeLabel = chargeDescription(sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`);
               const deduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
@@ -821,19 +853,11 @@ export async function POST(req: NextRequest) {
               }
             }
           } else {
-          // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
+          // 顺序：查余额 → 分析 → 扣费。
+          // 查余额在分析之前：analyzeProductImage 是真花钱的上游调用（平台自付），
+          // 余额不足时先分析再报错就是白烧一次（开流前已预检一道，这里兜住预检之后余额被并发请求花掉的窗口）。
+          // 扣费仍在分析之后：分析上游挂起/失败时钱还没扣，
           // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
-          let garmentDescription: string | undefined;
-          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
-          try {
-            const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
-            if (analysis.description) garmentDescription = analysis.description;
-          } catch { /* skip */ }
-
-          push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
-
-          // 余额 + 扣费
           const chargeLabel = chargeDescription('场景图生成');
           const balance = await checkBalance(auth.userId, costFen);
           if (!balance.sufficient) {
@@ -856,6 +880,16 @@ export async function POST(req: NextRequest) {
             controller.close();
             return;
           }
+
+          let garmentDescription: string | undefined;
+          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+          try {
+            const { analyzeProductImage } = await import('@/lib/ai-assistant');
+            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+            if (analysis.description) garmentDescription = analysis.description;
+          } catch { /* skip */ }
+
+          push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
 
           const sceneDeduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
           if (!sceneDeduction.success) {
