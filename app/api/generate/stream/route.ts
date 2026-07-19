@@ -23,6 +23,7 @@ import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
+import { normalizeGeneratedImage } from '@/lib/postprocess';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -371,6 +372,8 @@ export async function POST(req: NextRequest) {
           const aspectRatio = outputSize === 'custom' && customAspectRatio
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
+          const declaredWidth = outputSize === 'custom' ? customWidth : outputSizeConfig.width;
+          const declaredHeight = outputSize === 'custom' ? customHeight : outputSizeConfig.height;
 
           const preflightBalance = await checkBalance(auth.userId, costFen);
           if (!preflightBalance.sufficient) {
@@ -477,6 +480,8 @@ export async function POST(req: NextRequest) {
             // —— 从这里起，钱已扣；任何失败 / 异常 / 客户端断开都必须退款 ——
             // 用本地 try/catch 兜住 buildProductShotPrompt + generateBackendImage 的未捕获异常。
             let result: Awaited<ReturnType<typeof generateBackendImage>> | null = null;
+            let resultWidth = 0;
+            let resultHeight = 0;
             let shotLatency = 0;
             let prompt = '';
             try {
@@ -506,6 +511,12 @@ export async function POST(req: NextRequest) {
                 ...(engine === 'openai' ? { quality } : {}),
               }, engine);
               shotLatency = Date.now() - shotStart;
+              if (result.success && result.data) {
+                const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
+                result = { ...result, data: normalized.b64 };
+                resultWidth = normalized.width;
+                resultHeight = normalized.height;
+              }
             } catch (innerErr) {
               const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
               await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
@@ -568,6 +579,8 @@ export async function POST(req: NextRequest) {
               push('result', {
                 shotIndex: shot.index,
                 imageData: result.data,
+                width: resultWidth,
+                height: resultHeight,
                 current: i + 1,
                 total,
               });
@@ -628,6 +641,8 @@ export async function POST(req: NextRequest) {
           const aspectRatio = sceneOutputSize === 'custom' && customAspectRatio
             ? customAspectRatio
             : outputSizeConfig.aspectRatio;
+          const declaredWidth = sceneOutputSize === 'custom' ? customWidth : outputSizeConfig.width;
+          const declaredHeight = sceneOutputSize === 'custom' ? customHeight : outputSizeConfig.height;
 
           if (sceneGroup) {
             // ═══════════════════════════════════════════════════════════
@@ -784,6 +799,8 @@ export async function POST(req: NextRequest) {
 
               // —— 钱已扣：任何失败/异常/断开都必须退款 ——
               let result: Awaited<ReturnType<typeof generateBackendImage>> | null = null;
+              let resultWidth = 0;
+              let resultHeight = 0;
               let shotLatency = 0;
               let prompt = '';
               try {
@@ -809,6 +826,12 @@ export async function POST(req: NextRequest) {
                   ...(engine === 'openai' ? { quality } : {}),
                 }, engine);
                 shotLatency = Date.now() - shotStart;
+                if (result.success && result.data) {
+                  const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
+                  result = { ...result, data: normalized.b64 };
+                  resultWidth = normalized.width;
+                  resultHeight = normalized.height;
+                }
               } catch (innerErr) {
                 const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
                 await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
@@ -845,7 +868,14 @@ export async function POST(req: NextRequest) {
                   break;
                 }
                 if (!anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
-                push('result', { shotIndex: refSeq, imageData: result.data, current: i + 1, total });
+                push('result', {
+                  shotIndex: refSeq,
+                  imageData: result.data,
+                  width: resultWidth,
+                  height: resultHeight,
+                  current: i + 1,
+                  total,
+                });
                 // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
                 if (clientClosed) {
                   await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
@@ -952,6 +982,8 @@ export async function POST(req: NextRequest) {
           // 钱已扣 — 任何 prompt 构建或后端调用异常都必须退款
           let prompt = '';
           let result: Awaited<ReturnType<typeof generateBackendImage>>;
+          let resultWidth = 0;
+          let resultHeight = 0;
           let sceneShotLatency = 0;
           try {
             prompt = buildSceneShotPrompt({
@@ -977,6 +1009,12 @@ export async function POST(req: NextRequest) {
               ...(engine === 'openai' ? { quality } : {}),
             }, engine);
             sceneShotLatency = Date.now() - sceneShotStart;
+            if (result.success && result.data) {
+              const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
+              result = { ...result, data: normalized.b64 };
+              resultWidth = normalized.width;
+              resultHeight = normalized.height;
+            }
           } catch (innerErr) {
             const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
             await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
@@ -1019,7 +1057,14 @@ export async function POST(req: NextRequest) {
               await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
               failedCount = 1;
             } else {
-              push('result', { shotIndex: 0, imageData: result.data, current: 1, total: 1 });
+              push('result', {
+                shotIndex: 0,
+                imageData: result.data,
+                width: resultWidth,
+                height: resultHeight,
+                current: 1,
+                total: 1,
+              });
               // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
               if (clientClosed) {
                 await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);

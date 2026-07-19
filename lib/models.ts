@@ -281,6 +281,8 @@ export const PRODUCT_SHOTS: ShotConfig[] = [
 ];
 
 // ===== 尺寸配置 =====
+// width/height 是对外声明的交付尺寸，由生成后处理尽量强制；
+// aspectRatio 只是给 Gemini / GPT 粗粒度尺寸枚举的生成提示。
 export interface OutputSizeConfig {
   id: string;
   label: string;

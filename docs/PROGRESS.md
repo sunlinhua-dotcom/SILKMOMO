@@ -4,6 +4,11 @@
 
 ## 时间线
 
+### 2026-07-19
+- **出图尺寸「诚实化」后处理**：新增 `lib/postprocess.ts`，用 Sharp 对生成成功的 PNG 按预设声明尺寸做居中裁切与受限缩放。宽高比偏差 >2% 才裁切，裁切损失 >25% 整张原样保护，放大仅允许 ≤1.35×；任何后处理异常 fail-open，不影响已扣费的成功出图。产品镜次、单张场景、sceneGroup swap/products 三条成功路径已接线，后续 anchor 使用规范化后图像；不计费肖像卡不处理。SSE `result` 仅新增 `width/height`，原字段不变。
+  - **资金边界**：三条路径的 `deductBalance` 成功到 inner try 之间均无 `await`；normalize 只在上游 `result.success && result.data` 之后、原 inner try 内执行，扣费/退款分支未变。
+  - **验证**：15 个产品/场景预设矩阵通过，含 `ins_3_4 1024×1536 → 1080×1440`、`ins_vertical → 1080×1350`、`google_banner 16:9 输入因 >25% 面积损失原样保留`、非法 base64 fail-open；`tsc/build/lint` 通过（lint 0 error、12 条既有 `<img>` warning）。本地 4605 真实端到端：最终依赖状态下 Gemini 28s，额外 GPT low 49s，两者落盘 PNG 与 SSE payload 均为 `1080×1440`。
+
 ### 2026-07-07
 - **「组图·换装」换脸稳定性修复 + 同景换品模式落地**：针对真人穿拍产品图会把产品图模特脸带入新模特的问题，完成 P0/P1/P2 全链路修复。Prompt 明确产品图中的任何人物都不是身份参考，只保留服装面料/颜色/图案/版型；GPT edit 参考图顺序改为 `scene-base → anchor → product → accessory`，anchor role 明确为唯一身份参考。sceneGroup 首批生成前新增不计费 Gemini 肖像卡 anchor bootstrap，并通过 SSE `anchor` 事件写入 IndexedDB `type='anchor'`；失败静默回退首张成功图作锚。任务页扩展 sceneGroup+OpenAI ≤3 分块并跨块传 anchor。`/lookbook` 新增模式切换：「换装 · N景1品」保留现有流程，「同景换品 · 1景N品」支持单张场景图 + 最多 8 个产品组（每组 1-4 张 + 可选组名），写入 `sceneGroupMode='products'` 与 `groupIndex`，任务页按产品组序号重做/补齐。`analyzeLookbookGroup` 增加真人穿拍检测并在主品上传区提示补充平铺/白底图更稳。
   - **资金与存储约束**：不新增付费点；肖像卡和服装分析仍在扣费前；sceneGroup `swap/products` 两种模式共用逐张 `checkBalance→deductBalance→inner try→成功/失败/断连` 骨架，`deductBalance` 成功后到 inner try 之间无 `await`。Dexie 不 bump 版本，`SilkMomoDB`、`silkmomo_*`、`silkmomo_token` 均未改名。
