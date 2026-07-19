@@ -11,6 +11,7 @@
  */
 
 import { normalizeGenerationQuality, type GenerationQuality } from './billing-constants';
+import { normalizeReferenceImage } from './reference-image-normalizer';
 
 export interface ImageInput {
   data: string;     // base64
@@ -117,9 +118,33 @@ export async function generateImage(
   if (!requiredKey) {
     return { success: false, error: 'API Key 未配置', backend };
   }
+  const normalizedInput = await normalizeBackendReferenceImages(input);
   return backend === 'openai'
-    ? generateWithOpenAI(input)
-    : generateWithGemini(input);
+    ? generateWithOpenAI(normalizedInput)
+    : generateWithGemini(normalizedInput);
+}
+
+async function normalizeImageList(images: ImageInput[] | undefined, label: string): Promise<ImageInput[] | undefined> {
+  if (!images) return undefined;
+  const normalized: ImageInput[] = [];
+  for (let i = 0; i < images.length; i += 1) {
+    normalized.push(await normalizeReferenceImage(images[i], `${label}[${i}]`));
+  }
+  return normalized;
+}
+
+async function normalizeBackendReferenceImages(input: BackendInput): Promise<BackendInput> {
+  return {
+    ...input,
+    productImages: (await normalizeImageList(input.productImages, 'product')) ?? [],
+    modelRefImages: await normalizeImageList(input.modelRefImages, 'model'),
+    bgRefImages: await normalizeImageList(input.bgRefImages, 'background'),
+    sceneRefImages: await normalizeImageList(input.sceneRefImages, input.sceneAsEditBase ? 'scene-base' : 'scene'),
+    accessoryImages: await normalizeImageList(input.accessoryImages, 'accessory'),
+    anchorImage: input.anchorImage
+      ? await normalizeReferenceImage(input.anchorImage, 'anchor')
+      : undefined,
+  };
 }
 
 // ═══════════════════════════════════════════════

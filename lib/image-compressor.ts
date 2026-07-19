@@ -1,16 +1,17 @@
 /**
  * 图片压缩工具 — 优化版
- * 1. 优先输出 WebP 格式（体积比 JPEG 小 25-35%）
- * 2. 渐进式质量降低确保在目标大小内
+ * 1. 透明图保留 PNG；不透明图使用 JPEG
+ * 2. 先渐进式降低 JPEG 质量，仍超标则继续降低分辨率
  * 3. 使用 createImageBitmap 替代 new Image（更快、不阻塞主线程）
  * 4. 小图直接通过不压缩
  */
 
 const MAX_DIMENSION = 1920;   // 最大边长（AI生成不需要超高清原图）
 const TARGET_SIZE_KB = 800;   // 目标文件大小 800KB
-const MAX_SIZE_KB = 1500;     // 绝对上限 1.5MB
+export const MAX_COMPRESSED_IMAGE_BYTES = TARGET_SIZE_KB * 1024;
 const INITIAL_QUALITY = 0.82;
 const MIN_QUALITY = 0.45;
+const JPEG_QUALITIES = [INITIAL_QUALITY, 0.74, 0.66, 0.58, 0.50, MIN_QUALITY] as const;
 const SKIP_COMPRESS_KB = 200; // 小于 200KB 直接跳过压缩
 
 export interface CompressedImage {
@@ -23,21 +24,79 @@ export interface CompressedImage {
   originalSize: number;       // 记录原始大小，方便调试
 }
 
-/**
- * 检测浏览器是否支持 WebP 编码
- */
-let _webpSupported: boolean | null = null;
-function supportsWebP(): boolean {
-  if (_webpSupported !== null) return _webpSupported;
-  try {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1;
-    canvas.height = 1;
-    _webpSupported = canvas.toDataURL('image/webp').startsWith('data:image/webp');
-  } catch {
-    _webpSupported = false;
+function dataUrlByteLength(dataUrl: string): number {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.floor(base64.length * 3 / 4) - padding;
+}
+
+function canvasHasTransparency(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas context unavailable');
+
+  // 分条读取，避免一次为 1920px 图分配整张额外 RGBA 缓冲区。
+  const STRIP_HEIGHT = 128;
+  for (let y = 0; y < canvas.height; y += STRIP_HEIGHT) {
+    const height = Math.min(STRIP_HEIGHT, canvas.height - y);
+    const pixels = ctx.getImageData(0, y, canvas.width, height).data;
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] < 255) return true;
+    }
   }
-  return _webpSupported;
+  return false;
+}
+
+function resizeCanvas(source: HTMLCanvasElement, width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas context unavailable');
+  ctx.drawImage(source, 0, 0, width, height);
+  return canvas;
+}
+
+function nextDimensions(width: number, height: number, currentBytes: number): { width: number; height: number } {
+  const estimatedScale = Math.sqrt(MAX_COMPRESSED_IMAGE_BYTES / currentBytes) * 0.95;
+  const scale = Math.min(0.85, estimatedScale);
+  const nextWidth = Math.max(1, Math.min(width - (width > 1 ? 1 : 0), Math.floor(width * scale)));
+  const nextHeight = Math.max(1, Math.min(height - (height > 1 ? 1 : 0), Math.floor(height * scale)));
+  return { width: nextWidth, height: nextHeight };
+}
+
+function encodeCanvasWithinLimit(initialCanvas: HTMLCanvasElement): {
+  dataUrl: string;
+  mimeType: 'image/png' | 'image/jpeg';
+  size: number;
+  width: number;
+  height: number;
+} {
+  const preserveTransparency = canvasHasTransparency(initialCanvas);
+  const mimeType = preserveTransparency ? 'image/png' : 'image/jpeg';
+  let canvas = initialCanvas;
+
+  while (true) {
+    let dataUrl = canvas.toDataURL(mimeType, preserveTransparency ? undefined : JPEG_QUALITIES[0]);
+    let size = dataUrlByteLength(dataUrl);
+
+    if (!preserveTransparency) {
+      for (const quality of JPEG_QUALITIES.slice(1)) {
+        if (size <= MAX_COMPRESSED_IMAGE_BYTES) break;
+        dataUrl = canvas.toDataURL(mimeType, quality);
+        size = dataUrlByteLength(dataUrl);
+      }
+    }
+
+    if (size <= MAX_COMPRESSED_IMAGE_BYTES) {
+      return { dataUrl, mimeType, size, width: canvas.width, height: canvas.height };
+    }
+
+    if (canvas.width === 1 && canvas.height === 1) {
+      throw new Error('无法将图片压缩到 800KiB 安全上限');
+    }
+    const dimensions = nextDimensions(canvas.width, canvas.height, size);
+    canvas = resizeCanvas(canvas, dimensions.width, dimensions.height);
+  }
 }
 
 export async function compressImage(file: File): Promise<CompressedImage> {
@@ -107,35 +166,16 @@ export async function compressImage(file: File): Promise<CompressedImage> {
   ctx.drawImage(bitmap, 0, 0, width, height);
   bitmap.close(); // 释放内存
 
-  // 选择输出格式：优先 WebP
-  const outputMime = supportsWebP() ? 'image/webp' : 'image/jpeg';
-
-  // 渐进式质量压缩
-  let quality = INITIAL_QUALITY;
-  let dataUrl = canvas.toDataURL(outputMime, quality);
-  let estimatedSize = Math.round(dataUrl.length * 0.75); // base64 → bytes
-
-  while (estimatedSize > TARGET_SIZE_KB * 1024 && quality > MIN_QUALITY) {
-    quality -= 0.08;
-    dataUrl = canvas.toDataURL(outputMime, quality);
-    estimatedSize = Math.round(dataUrl.length * 0.75);
-  }
-
-  // 如果还是太大，最终尝试
-  if (estimatedSize > MAX_SIZE_KB * 1024) {
-    dataUrl = canvas.toDataURL(outputMime, MIN_QUALITY);
-    estimatedSize = Math.round(dataUrl.length * 0.75);
-  }
-
-  const base64 = dataUrl.split(',')[1];
+  const encoded = encodeCanvasWithinLimit(canvas);
+  const base64 = encoded.dataUrl.split(',')[1];
 
   return {
-    dataUrl,
+    dataUrl: encoded.dataUrl,
     base64,
-    mimeType: outputMime,
-    size: estimatedSize,
-    width,
-    height,
+    mimeType: encoded.mimeType,
+    size: encoded.size,
+    width: encoded.width,
+    height: encoded.height,
     originalSize,
   };
 }
@@ -165,24 +205,15 @@ function compressImageLegacy(file: File): Promise<CompressedImage> {
 
         ctx.drawImage(img, 0, 0, width, height);
 
-        const outputMime = supportsWebP() ? 'image/webp' : 'image/jpeg';
-        let quality = INITIAL_QUALITY;
-        let dataUrl = canvas.toDataURL(outputMime, quality);
-        let estimatedSize = Math.round(dataUrl.length * 0.75);
-
-        while (estimatedSize > TARGET_SIZE_KB * 1024 && quality > MIN_QUALITY) {
-          quality -= 0.08;
-          dataUrl = canvas.toDataURL(outputMime, quality);
-          estimatedSize = Math.round(dataUrl.length * 0.75);
-        }
+        const encoded = encodeCanvasWithinLimit(canvas);
 
         resolve({
-          dataUrl,
-          base64: dataUrl.split(',')[1],
-          mimeType: outputMime,
-          size: estimatedSize,
-          width,
-          height,
+          dataUrl: encoded.dataUrl,
+          base64: encoded.dataUrl.split(',')[1],
+          mimeType: encoded.mimeType,
+          size: encoded.size,
+          width: encoded.width,
+          height: encoded.height,
           originalSize: file.size,
         });
       };
