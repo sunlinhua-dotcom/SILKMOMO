@@ -1,7 +1,7 @@
 'use client';
 
 import { Upload, X, Sparkles, FolderOpen, ImageIcon } from 'lucide-react';
-import { compressImage, type CompressedImage } from '@/lib/image-compressor';
+import { compressImage, MAX_COMPRESSED_IMAGE_BYTES, type CompressedImage } from '@/lib/image-compressor';
 import { addToLibrary, getLibraryImages } from '@/lib/image-library';
 import { ImageLibraryPicker } from './ImageLibraryPicker';
 import { useState, useRef, useEffect } from 'react';
@@ -75,6 +75,9 @@ export function ImageUploader({
       const compressed = await Promise.all(
         filesToProcess.map(file => compressImage(file))
       );
+      if (compressed.some(image => image.size > MAX_COMPRESSED_IMAGE_BYTES)) {
+        throw new Error('图片压缩后仍超过 800KiB 安全上限');
+      }
       const newImages = [...images, ...compressed];
       onImagesChange(newImages);
 
