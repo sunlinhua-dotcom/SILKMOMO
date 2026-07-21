@@ -53,6 +53,45 @@ function getSceneGroupMode(project: Project | null | undefined): 'swap' | 'produ
   return project?.sceneGroupMode === 'products' ? 'products' : 'swap';
 }
 
+function sortImagesByPrimaryKey(images: ImageItem[]): ImageItem[] {
+  return [...images].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+}
+
+function isConnectionLayerError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const raw = `${error.name} ${error.message}`;
+  return error.name === 'TypeError'
+    || error.name === 'AbortError'
+    || /network|failed to fetch|fetch failed|load failed|networkerror|internet connection|connection/i.test(raw);
+}
+
+function buildGenerationContinuationText(remainingCount: number): string {
+  return remainingCount > 0
+    ? `点下方“生成剩余 ${remainingCount} 张”继续。`
+    : '请稍后重试。';
+}
+
+function buildFriendlyConnectionErrorMessage(successCount: number, remainingCount: number): string {
+  const savedText = successCount > 0 ? '已生成的图片已保存，' : '';
+  return `连接中断：${savedText}未完成的部分不会白扣费（失败自动退款）。${buildGenerationContinuationText(remainingCount)}`;
+}
+
+function buildFriendlyUnexpectedErrorMessage(successCount: number, remainingCount: number): string {
+  const savedText = successCount > 0 ? '已生成的图片已保存，' : '';
+  return `生成中断：${savedText}未完成的部分不会白扣费（失败自动退款）。${buildGenerationContinuationText(remainingCount)}`;
+}
+
+function getKnownUserFacingErrorMessage(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  return /登录已过期|请重新登录|服务响应异常/.test(error.message) ? error.message : null;
+}
+
+function getDisplayErrorMessage(message: string, successCount: number, remainingCount: number): string {
+  return /TypeError|AbortError|Failed to fetch|fetch failed|Load failed|NetworkError|network|connection/i.test(message)
+    ? buildFriendlyConnectionErrorMessage(successCount, remainingCount)
+    : message;
+}
+
 // ═══ SSE 停滞看门狗 ═══
 // 服务端不可能让页面无限等待：单张最长 280s（lib/image-backends OPENAI_TIMEOUT_MS）后必报错退款，
 // 且每 25s 发一次 keep-alive。但客户端读流时只是 await reader.read()——连接若在中途静默失效
@@ -179,10 +218,10 @@ export default function TaskDetailPage() {
       setProject(task);
       setImages(imagesWithBackups);
       setInputImages({
-        products: allImages.filter(img => img.type === 'product'),
+        products: sortImagesByPrimaryKey(allImages.filter(img => img.type === 'product')),
         modelRefs: allImages.filter(img => img.type === 'model_ref'),
         bgRefs: allImages.filter(img => img.type === 'bg_ref'),
-        sceneRefs: allImages.filter(img => img.type === 'scene_ref'),
+        sceneRefs: sortImagesByPrimaryKey(allImages.filter(img => img.type === 'scene_ref')),
         accessories: allImages.filter(img => img.type === 'accessory'),
       });
       // 同步当前参数到调整面板
@@ -322,10 +361,10 @@ export default function TaskDetailPage() {
     }
     const allImgs = await db.images.where('projectId').equals(taskId).toArray();
     const freshInputs = {
-      products: allImgs.filter(i => i.type === 'product'),
+      products: sortImagesByPrimaryKey(allImgs.filter(i => i.type === 'product')),
       modelRefs: allImgs.filter(i => i.type === 'model_ref'),
       bgRefs: allImgs.filter(i => i.type === 'bg_ref'),
-      sceneRefs: allImgs.filter(i => i.type === 'scene_ref'),
+      sceneRefs: sortImagesByPrimaryKey(allImgs.filter(i => i.type === 'scene_ref')),
       accessories: allImgs.filter(i => i.type === 'accessory'),
     };
     if (freshInputs.products.length === 0) {
@@ -428,6 +467,7 @@ export default function TaskDetailPage() {
     let successCount = 0;
     let lastFatalError: string | null = null;
     let wasCancelled = false;
+    const grandTotal = isGroup ? groupTotal : (moduleType === 'product' ? selectedShotIndexes.length : 1);
 
     // —— SSE 停滞看门狗（见文件顶部 STALL_* 注释）——
     // stalledOut 让 catch 能把「看门狗主动 abort」和「用户点取消」区分开：
@@ -482,21 +522,22 @@ export default function TaskDetailPage() {
 
       // ── 分块生成 ──
       // GPT(openai)每张 ~3 分钟,多张串在一个 SSE 请求里会撞路由预算/网关连接时长上限。
-      // 产品图与 sceneGroup + openai 都切成每块 ≤3 张的连续请求；Gemini 仍单请求。
-      const CHUNK_SIZE = 3;
+      // 产品图仍每块 ≤3 张；sceneGroup 每块 1 张,但本函数会在 for 循环里自动接续下一块。
+      const PRODUCT_CHUNK_SIZE = 3;
+      const SCENE_GROUP_CHUNK_SIZE = 1;
       const targetIndexesForChunking = isGroup ? (groupTargetIndexes || []) : selectedShotIndexes;
+      const chunkSize = isGroup ? SCENE_GROUP_CHUNK_SIZE : PRODUCT_CHUNK_SIZE;
       const shouldChunk =
         effectiveEngine === 'openai' &&
-        ((moduleType === 'product' && selectedShotIndexes.length > CHUNK_SIZE) ||
-          (isGroup && targetIndexesForChunking.length > CHUNK_SIZE));
+        ((moduleType === 'product' && selectedShotIndexes.length > PRODUCT_CHUNK_SIZE) ||
+          (isGroup && targetIndexesForChunking.length > SCENE_GROUP_CHUNK_SIZE));
       const genChunks: number[][] =
         shouldChunk
-          ? Array.from({ length: Math.ceil(targetIndexesForChunking.length / CHUNK_SIZE) },
-              (_, i) => targetIndexesForChunking.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + CHUNK_SIZE))
+          ? Array.from({ length: Math.ceil(targetIndexesForChunking.length / chunkSize) },
+              (_, i) => targetIndexesForChunking.slice(i * chunkSize, i * chunkSize + chunkSize))
           : [targetIndexesForChunking];
       let anchorForChunk: { data: string; mimeType: string } | undefined;
       let groupAnchorForChunk: { data: string; mimeType: string } | undefined = groupAnchor;
-      const grandTotal = isGroup ? targetIndexesForChunking.length : (moduleType === 'product' ? selectedShotIndexes.length : 1);
       let doneSoFar = 0; // 已完成(成功或失败)的镜次数,用于跨块累计进度显示
       let fatalStop = false; // 某块出现 fatal(余额不足/扣费失败)→ 不再向后续块发请求
 
@@ -768,16 +809,17 @@ export default function TaskDetailPage() {
       } else {
         // 已成功生成的图保留：项目状态由实际产出决定
         const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        const msg = stalledOut
-          ? (stalledOut === 'bytes'
-              ? `与服务器的连接已中断（${Math.round(STALL_BYTES_MS / 1000)}s 未收到任何数据），已停止等待。已扣费的镜次服务端超时后会自动退款，请点「重试这张」再试。`
-              : `等待服务端响应超时（${Math.round(stallEventLimit / 1000)}s 内无任何进度），已停止等待。已扣费的镜次服务端超时后会自动退款，请点「重试这张」再试。`)
-          : (err instanceof Error ? `${err.message} (${err.name})` : '未知错误');
-        console.error('[生图前端] 错误详情:', msg);
+        const remainingCount = Math.max(0, grandTotal - successCount);
+        const knownMessage = getKnownUserFacingErrorMessage(err);
+        const msg = knownMessage
+          ?? (stalledOut || isConnectionLayerError(err)
+            ? buildFriendlyConnectionErrorMessage(successCount, remainingCount)
+            : buildFriendlyUnexpectedErrorMessage(successCount, remainingCount));
+        console.error('[生图前端] 原始错误详情:', err);
         setErrorMessage(msg);
         lastFatalError = msg;
         setGenerationPhase('error');
-        const persistedError = finalStatus === 'failed' ? (lastFatalError || '生成失败（catch）') : undefined;
+        const persistedError = finalStatus === 'failed' || remainingCount > 0 ? (lastFatalError || '生成失败') : undefined;
         await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
         setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }
@@ -1110,6 +1152,10 @@ export default function TaskDetailPage() {
   }
 
   const moduleType = project.moduleType || 'product';
+  const remainingErrorCount = Math.max(0, getShotCount() - images.length);
+  const displayErrorMessage = errorMessage
+    ? getDisplayErrorMessage(errorMessage, images.length, remainingErrorCount)
+    : null;
 
   // 已生成图片数追上目标数 = 等待 SSE done 事件收尾的窗口期
   const isFinishingUp = liveImages.length >= progress.total && progress.total > 0;
@@ -1739,12 +1785,12 @@ export default function TaskDetailPage() {
           <div ref={resultsRef}>
             {/* 部分成功提示：任务"已完成"但中途有镜次失败 / 余额不足。
                 不渲染的话余额不足等 fatal 信息在已完成任务上完全不可见 */}
-            {!generating && project.status === 'completed' && errorMessage && (
+            {!generating && project.status === 'completed' && displayErrorMessage && (
               <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
                   {/* 仅展示错误信息;"生成剩余"入口已由上方持久化条件的面板统一提供,此处不再重复按钮 */}
-                  <p className="text-sm text-amber-700 break-all flex-1">{errorMessage}</p>
+                  <p className="text-sm text-amber-700 break-words flex-1">{displayErrorMessage}</p>
                 </div>
               </div>
             )}
@@ -1808,12 +1854,12 @@ export default function TaskDetailPage() {
             <h2 className="text-xl font-semibold mb-2">生成失败</h2>
 
             {/* 优先展示具体错误信息 */}
-            {errorMessage ? (
+            {displayErrorMessage ? (
               <div className="max-w-lg mx-auto mb-6">
                 <div className="p-4 bg-red-50 rounded-2xl border border-red-100">
                   <div className="flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                    <p className="text-sm text-red-700 text-left break-all">{errorMessage}</p>
+                    <p className="text-sm text-red-700 text-left break-words">{displayErrorMessage}</p>
                   </div>
                 </div>
               </div>

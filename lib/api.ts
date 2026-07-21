@@ -350,11 +350,11 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
   } = options;
 
   const priorityRules = `PRIORITY ORDER FOR THIS GROUP IMAGE (resolve every conflict in this order):
-1. Product fidelity first: the user's product reference image(s) define the garment silhouette, cut, tailoring, proportions, neckline, collar, sleeves, hem, seams, closures, print/pattern, color, fabric texture, and drape. These product details override any clothing visible in the scene-base/lookbook reference.
+1. Product fidelity first: the user's product reference image(s) define the garment silhouette, cut, tailoring, proportions, neckline, collar, sleeves, hem, seams, closures, print/pattern, color, fabric texture, and drape. These product details override any clothing visible in the scene-base/lookbook reference. Product reference images are garment-only references; they provide NO background, wall, floor, lighting, color grade, filter, props, or scene context.
 2. Group model consistency second: ${hasAnchor
   ? 'an Anchor Reference Image is provided; precisely match that same fictional model identity across this image and the set.'
   : 'no anchor is provided; create one new fictional model identity and lock it for the group instead of copying a real reference person.'}
-3. Reference lighting/filter/atmosphere third: strictly follow the scene-base image's lighting direction, shadow softness, color temperature, color grade, filter, atmosphere, scene, and overall photographic language.
+3. Reference lighting/filter/atmosphere third: the scene-base image is the ONLY authority for lighting direction, shadow softness, color temperature, color grade, filter, atmosphere, scene, background, environment, and overall photographic language; preserve these pixel-faithfully.
 4. Reference expression/makeup/styling fourth: keep the scene-base person's expression, mood, makeup language, hairstyle styling, pose, and body attitude, while changing only facial identity as required.
 5. Group continuity fifth: treat outputs as one set. Keep model identity, output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group.`;
 
@@ -363,12 +363,13 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
     : '';
 
   // 底图冻结指令：这是组图的核心——除服装与人物外，其余一切都必须与底图完全一致
-  const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. The scene-base is a reference ONLY for pose, composition, crop, lighting, scene, expression, makeup, styling language, and overall photography language. Preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
+  const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. The scene-base is the single source of truth for pose, composition, crop, lighting, scene, background, environment, color grade, filter, atmosphere, expression, makeup, styling language, and overall photography language. Preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
 - The scene, background, environment, props, furniture, accessories, and their exact positions.
 - The lighting direction, color grade, overall atmosphere, filter, and film grain of the base image.
 - The camera angle, framing, crop, and composition. ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
 - The model's exact body pose, gesture, hand/leg position, head orientation if visible, and where they stand in the frame.
 - Preserve the base person's expression, mood, makeup language, and hair styling; only the facial identity/features may change.
+Product reference images are garment-only inputs. Completely ignore every product-reference background, wall, floor, studio setup, outdoor/indoor scene, prop, lighting direction, shadow, color tone, color filter, and atmosphere. None of those product-reference non-garment elements may appear in the output.
 Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result must look like the SAME photo with only the product garment and the person's identity swapped.`;
 
   // 服装替换（可能是多件：上衣 + 裤子…按品类点明，只换这些件，其余保持底图）
@@ -400,7 +401,8 @@ CRITICAL RULES (follow strictly):
 - Output exactly ONE photorealistic image. No collage, split-screen, grid, or multiple views.
 - Do NOT render any text, watermark, logo, or letters.
 - Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change.
-- Product reference images are garment references ONLY - ignore any person, face, hairstyle, or identity visible in them.
+- Product reference images are garment references ONLY - ignore any person, face, hairstyle, identity, background, wall, floor, lighting, color tone, filter, prop, or scene element visible in them.
+- The scene-base image is the sole authority for scene, background, lighting, filter, color grade, and atmosphere; preserve them pixel-faithfully.
 - Scene-base/lookbook clothing is not a garment design reference; it only shows how clothing sits on the body in that pose.
 - The result must look like a real film photograph, not an illustration, 3D render, beauty-filter image, or synthetic AI fashion render.`.trim();
 
