@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
@@ -9,11 +9,7 @@ import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { ImageUploader } from '@/components/ImageUploader';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 import { GPTQualitySelector } from '@/components/GPTQualitySelector';
-import {
-  LookbookGarmentSlots,
-  type GroupAnalysisState,
-  MAX_TOTAL_GARMENTS,
-} from '@/components/LookbookGarmentSlots';
+import { MAX_TOTAL_GARMENTS } from '@/components/LookbookGarmentSlots';
 import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE, SCENE_OUTPUT_SIZES } from '@/lib/models';
 import { getGenerationCostFen, type GenerationQuality } from '@/lib/billing-constants';
 import type { CompressedImage } from '@/lib/image-compressor';
@@ -128,9 +124,6 @@ export default function LookbookStudio() {
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
-  const [groupAnalysis, setGroupAnalysis] = useState<GroupAnalysisState>({
-    loading: false, done: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false,
-  });
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
   const [singleSceneImages, setSingleSceneImages] = useState<CompressedImage[]>([]);
@@ -145,6 +138,8 @@ export default function LookbookStudio() {
   const [isGenerating, setIsGenerating] = useState(false);
 
   const groupGarmentImages = Object.values(groupGarments).flat();
+  const productReferenceImages = groupGarments.other || [];
+  const sceneUploadEnabled = productReferenceImages.length > 0;
   const validProductGroups = productGroups.filter(g => g.images.length > 0);
   const handleGroupGarmentChange = (category: string, imgs: CompressedImage[]) => {
     setGroupGarments(prev => ({ ...prev, [category]: imgs }));
@@ -157,63 +152,6 @@ export default function LookbookStudio() {
   };
   const removeProductGroup = (id: string) => {
     setProductGroups(prev => prev.length <= 1 ? prev : prev.filter(group => group.id !== id));
-  };
-
-  // ── 自动识别（防抖 + 指纹去重 + 竞态守卫） ──
-  const seqRef = useRef(0);
-  const lastSigRef = useRef('');
-  const sigOf = (imgs: CompressedImage[]) =>
-    `${imgs.length}:${imgs[0]?.base64.length || 0}:${imgs[imgs.length - 1]?.base64.length || 0}`;
-
-  const runAnalysis = useCallback(async (images: CompressedImage[]) => {
-    if (images.length === 0) return;
-    const seq = ++seqRef.current;
-    setGroupAnalysis(prev => ({ ...prev, loading: true, error: undefined }));
-    try {
-      const res = await fetch('/api/ai/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images: images.map(img => ({ data: img.base64, mimeType: img.mimeType })) }),
-      });
-      if (seq !== seqRef.current) return;
-      if (!res.ok) {
-        setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, garmentsWornByPerson: false, error: 'AI 识别暂时不可用，可直接在下方通用槽上传服装' }));
-        return; // 失败不烧指纹：同一组图还能自动重试一次
-      }
-      const data = await res.json();
-      if (seq !== seqRef.current) return;
-      // 只在成功落地后写指纹（失败/竞态不写），使失败后同一 lookbook 仍能被自动重试
-      lastSigRef.current = sigOf(images);
-      setGroupAnalysis({
-        loading: false, done: true,
-        primaryCategories: Array.isArray(data.primaryCategories) ? data.primaryCategories : [],
-        accessories: Array.isArray(data.accessories) ? data.accessories : [],
-        garmentsWornByPerson: data.garmentsWornByPerson === true,
-      });
-    } catch {
-      if (seq !== seqRef.current) return;
-      setGroupAnalysis(prev => ({ ...prev, loading: false, done: true, garmentsWornByPerson: false, error: '识别失败，可点「重新识别」或直接在下方通用槽上传' }));
-    }
-  }, []);
-
-  const reanalyze = () => { lastSigRef.current = ''; runAnalysis(lookbookImages); };
-
-  // lookbook 变化 → 防抖自动识别（指纹不变则跳过，避免重复扣费）
-  useEffect(() => {
-    if (lookbookImages.length === 0) return;
-    if (sigOf(lookbookImages) === lastSigRef.current) return;
-    const t = setTimeout(() => { runAnalysis(lookbookImages); }, 1200);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lookbookImages]);
-
-  // lookbook 变化让在途识别响应失效（防 stale 覆盖）
-  const onLookbookChange = (imgs: CompressedImage[]) => {
-    setLookbookImages(imgs);
-    seqRef.current++;
-    setGroupAnalysis(prev => (prev.done || prev.loading)
-      ? { loading: false, done: false, primaryCategories: [], accessories: [], garmentsWornByPerson: false }
-      : prev);
   };
 
   // ── 校验 + 成本 ──
@@ -232,8 +170,6 @@ export default function LookbookStudio() {
   const totalCostFen = Math.max(1, targetCount) * pricePerImageFen;
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
-
-  const detectedCount = groupAnalysis.primaryCategories.length + groupAnalysis.accessories.length;
 
   // ── 生成：写同一 SilkMomoDB 再跳 /task/[id]（复用已建好的组图 SSE 内核） ──
   const handleGenerate = async () => {
@@ -353,7 +289,7 @@ export default function LookbookStudio() {
         <div className="text-center pt-2">
           <h1 className="font-serif text-2xl sm:text-3xl text-[var(--color-primary)] tracking-wide">上传你的一组照片，我们识别并换装</h1>
           <p className="text-xs sm:text-sm text-[var(--color-text-muted)] mt-2 leading-relaxed max-w-xl mx-auto">
-            上传几张就出几张；每张冻结原场景与姿势，只把服装换成你上传的款、并换成同一个全新模特。
+            先上传产品参考图，再上传场景主图；每张场景主图各出 1 张，只把衣服换成你的产品。
           </p>
         </div>
 
@@ -379,44 +315,120 @@ export default function LookbookStudio() {
 
         {mode === 'swap' ? (
           <>
-            {/* ① 整组 lookbook */}
+            {/* ① 产品参考图 */}
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-[var(--color-text)]">① 整组 lookbook</h3>
-                {lookbookImages.length > 0 && (
-                  <span className="text-xs text-[var(--color-accent)] font-medium">已传 {lookbookImages.length} 张 → 出 {lookbookImages.length} 张</span>
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--color-text)]">① 上传产品参考图</h3>
+                  <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
+                    仅用于识别服装细节，其背景/滤镜不会出现在成图中。
+                  </p>
+                </div>
+                {productReferenceImages.length > 0 && (
+                  <span className="shrink-0 text-xs text-[var(--color-accent)] font-medium tabular-nums">
+                    {productReferenceImages.length}/{MAX_TOTAL_GARMENTS} 张
+                  </span>
                 )}
               </div>
               <ImageUploader
-                title="lookbook 参考图"
-                description={`上传整组场景主图（最多 ${LOOKBOOK_MAX} 张，上传几张最后就出几张）。系统会自动识别其中的服装与附件。`}
+                title="产品参考图"
+                description="仅用于识别服装细节，其背景/滤镜不会出现在成图中"
                 required
-                maxFiles={LOOKBOOK_MAX}
-                images={lookbookImages}
-                onImagesChange={onLookbookChange}
+                maxFiles={MAX_TOTAL_GARMENTS}
+                images={productReferenceImages}
+                onImagesChange={(imgs) => handleGroupGarmentChange('other', imgs)}
                 variant="gold"
               />
-              {lookbookImages.length > LOOKBOOK_MAX && (
-                <p className="mt-2 text-xs text-amber-600">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
+              {groupGarmentImages.length === 0 && (
+                <p className="mt-2 text-xs text-amber-600">请至少上传一张产品参考图。</p>
+              )}
+              {groupGarmentImages.length > MAX_TOTAL_GARMENTS && (
+                <p className="mt-2 text-xs text-amber-600">产品参考图最多 {MAX_TOTAL_GARMENTS} 张，请减少后再生成。</p>
               )}
             </div>
 
-            {/* ②③④⑤⑥ 识别 + 品类槽 + 附件 + 模特 + 尺寸 */}
-            <LookbookGarmentSlots
-              lookbookCount={lookbookImages.length}
-              groupAnalysis={groupAnalysis}
-              onReanalyze={reanalyze}
-              groupGarments={groupGarments}
-              onGroupGarmentChange={handleGroupGarmentChange}
-              accessoryImages={accessoryImages}
-              onAccessoryImagesChange={setAccessoryImages}
-              outputSize={sceneOutputSize}
-              onOutputSizeChange={setSceneOutputSize}
-              customWidth={sceneCustomW}
-              customHeight={sceneCustomH}
-              onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
-              garmentsWornByPerson={groupAnalysis.garmentsWornByPerson === true}
-            />
+            {/* ② 场景主图 */}
+            <div
+              className={`bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border transition-opacity ${
+                sceneUploadEnabled
+                  ? 'border-[rgba(201,168,108,0.2)]'
+                  : 'border-[var(--color-border-light)] opacity-60'
+              }`}
+              aria-disabled={!sceneUploadEnabled}
+            >
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-[var(--color-text)]">② 上传场景主图</h3>
+                  <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
+                    每张场景主图各出 1 张图，保留场景照的模特姿势、构图与氛围，只把衣服换成你的产品。
+                  </p>
+                </div>
+                {lookbookImages.length > 0 && (
+                  <span className="shrink-0 text-xs text-[var(--color-accent)] font-medium tabular-nums">
+                    已传 {lookbookImages.length} 张
+                  </span>
+                )}
+              </div>
+              {sceneUploadEnabled ? (
+                <>
+                  <ImageUploader
+                    title="场景主图"
+                    description={`每张场景主图各出 1 张图，最多 ${LOOKBOOK_MAX} 张`}
+                    required
+                    maxFiles={LOOKBOOK_MAX}
+                    images={lookbookImages}
+                    onImagesChange={setLookbookImages}
+                    variant="gold"
+                  />
+                  {lookbookImages.length > 0 && (
+                    <p className="mt-3 text-xs font-medium text-[var(--color-accent)]">
+                      共将生成 {lookbookImages.length} 张（= 场景主图数量）
+                    </p>
+                  )}
+                  {lookbookImages.length > LOOKBOOK_MAX && (
+                    <p className="mt-2 text-xs text-amber-600">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
+                  )}
+                </>
+              ) : (
+                <div className="rounded-xl border border-dashed border-[var(--color-border-light)] bg-[var(--color-background)]/60 px-4 py-6 text-center">
+                  <p className="text-xs text-[var(--color-text-muted)]">先完成第 1 步上传产品参考图，再上传场景主图。</p>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">③ 替换附件（选填）</h3>
+              <p className="text-xs text-[var(--color-text-muted)] mb-3">
+                留空则保留场景主图里原有的包、首饰、鞋帽等附件；上传则替换。
+              </p>
+              <ImageUploader
+                title="附件参考图"
+                description="上传要替换的附件（包 / 首饰 / 项链等，最多 6 张）"
+                maxFiles={6}
+                images={accessoryImages}
+                onImagesChange={setAccessoryImages}
+                variant="gold"
+              />
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">④ 模特</h3>
+              <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+                每张都换成<span className="text-[var(--color-accent)] font-medium">同一个全新模特</span>，并保持场景照的姿势、构图与氛围。
+              </p>
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">⑤ 输出尺寸</h3>
+              <OutputSizeSelector
+                value={sceneOutputSize}
+                onChange={setSceneOutputSize}
+                customWidth={sceneCustomW}
+                customHeight={sceneCustomH}
+                onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
+                radioName="swapOutputSize"
+              />
+            </div>
           </>
         ) : (
           <>
@@ -548,8 +560,10 @@ export default function LookbookStudio() {
           <p className="text-xs text-[var(--color-text-muted)] text-center mb-2">
             {mode === 'swap' ? (
               <>
-                {groupAnalysis.done && detectedCount > 0 ? `识别到 ${detectedCount} 件 · ` : ''}
-                已上传 {Object.keys(groupGarments).filter(k => (groupGarments[k]?.length || 0) > 0).length} 类主品 · 将生成 {lookbookImages.length} 张
+                已上传 {groupGarmentImages.length} 张产品参考图
+                {lookbookImages.length > 0
+                  ? ` · 共将生成 ${lookbookImages.length} 张（= 场景主图数量）`
+                  : ' · 上传场景主图后显示出图数'}
               </>
             ) : (
               <>已上传 {validProductGroups.length} 个产品组 · 将生成 {validProductGroups.length} 张</>
@@ -595,10 +609,10 @@ export default function LookbookStudio() {
                   : validProductGroups.length === 0
                     ? '至少添加 1 个产品组'
                     : '每个产品组需上传 1-4 张产品图'
-                : lookbookImages.length === 0
-                  ? '先上传 lookbook'
-                  : groupGarmentImages.length === 0
-                    ? '至少上传一件要换上的服装'
+                : groupGarmentImages.length === 0
+                  ? '先上传产品参考图'
+                  : lookbookImages.length === 0
+                    ? '再上传场景主图'
                     : lookbookImages.length > LOOKBOOK_MAX
                       ? `lookbook 最多 ${LOOKBOOK_MAX} 张`
                       : `主品图合计最多 ${MAX_TOTAL_GARMENTS} 张`}
