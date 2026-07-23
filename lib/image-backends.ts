@@ -242,7 +242,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
 
   // 组图模式：底图（场景参考图）必须排在最前，作为「要保留并编辑的底图」
   if (input.sceneAsEditBase && input.sceneRefImages?.length) {
-    parts.push({ text: '\n\nScene-Base Image (tagged "scene-base" - use ONLY for pose, composition, crop, lighting, scene, expression, makeup, styling language, and photographic language; preserve those exactly. Its original clothing is NOT a garment design reference; only swap product garment and person identity):' });
+    parts.push({ text: '\n\nScene-Base Image (tagged "scene-base" - use ONLY for pose, composition, crop, lighting, scene, expression, makeup, styling language, and photographic language; preserve those exactly, including every accessory worn by the person (headwear, sunglasses, jewelry, bag) and any face occlusion it causes, and the person\'s exact exposure/lighting. Its original clothing is NOT a garment design reference; only swap product garment and person identity):' });
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
@@ -332,7 +332,7 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
       case 'anchor':
         return 'anchor (the ONLY identity reference for the same fictional model in this set)';
       case 'scene-base':
-        return 'scene-base (pose/composition/crop/lighting/scene/expression/makeup/photographic language ONLY; original clothing is not a garment design reference)';
+        return 'scene-base (pose/composition/crop/lighting/scene/expression/makeup/photographic language ONLY; preserve those exactly, including every accessory worn by the person (headwear, sunglasses, jewelry, bag) and any face occlusion it causes, and the person\'s exact exposure/lighting; original clothing is not a garment design reference)';
       case 'model':
         return 'model (hairstyle/makeup/mood/age feeling/expression style only; not garment or identity reference unless explicitly anchored)';
       case 'bg':
