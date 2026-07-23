@@ -65,6 +65,7 @@ interface GenerateStreamRequest {
   sceneHasModel?: boolean;
   sceneGroup?: boolean;               // 场景图·组图（换装）模式：N 张 lookbook → N 张换装图
   sceneGroupMode?: 'swap' | 'products'; // swap=N景1品；products=1景N品
+  modelIdentityMode?: string;         // fresh=全新模特；follow_scene=贴近场景模特
   sceneGroupTargetIndexes?: number[]; // 组图只生成指定参考图序号（1-based；用于单张重做/补齐），不传=全部
   sceneGroupAnchor?: ImageInput;      // 重做/补齐时带上已有一张结果图作「新模特身份锚」，保证与全组同一新人
   sceneGroupGarmentCategories?: string[]; // 用户上传替换的主品品类（top/pants/dress…），点明换哪几件
@@ -241,6 +242,7 @@ export async function POST(req: NextRequest) {
     sceneHasModel,
     sceneGroup,
     sceneGroupMode: rawSceneGroupMode,
+    modelIdentityMode: rawModelIdentityMode,
     sceneGroupTargetIndexes,
     sceneGroupAnchor,
     sceneGroupGarmentCategories,
@@ -257,6 +259,7 @@ export async function POST(req: NextRequest) {
   const chargeDescription = (label: string) => qualityLabel ? `${label}(${qualityLabel})` : label;
   const requestedApiModel = resolveApiModel(engine);
   const sceneGroupMode: 'swap' | 'products' = rawSceneGroupMode === 'products' ? 'products' : 'swap';
+  const modelIdentityMode: 'fresh' | 'follow_scene' = rawModelIdentityMode === 'follow_scene' ? 'follow_scene' : 'fresh';
   const productImages = Array.isArray(rawProductImages) ? rawProductImages : [];
 
   // 截断防止滥用（DoS / token 浪费）
@@ -683,10 +686,11 @@ export async function POST(req: NextRequest) {
             }
 
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
+            const shouldUseSceneGroupAnchor = modelIdentityMode === 'fresh';
             // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
             // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
-            const requestHasSceneGroupAnchor = !!(
+            const requestHasSceneGroupAnchor = shouldUseSceneGroupAnchor && !!(
               sceneGroupAnchor && typeof sceneGroupAnchor.data === 'string'
               && sceneGroupAnchor.data && sceneGroupAnchor.data.length <= MAX_IMAGE_BASE64_LENGTH
             );
@@ -706,7 +710,7 @@ export async function POST(req: NextRequest) {
               } catch { /* skip */ }
             }
 
-            if (!anchorImage && !clientClosed) {
+            if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
@@ -808,8 +812,9 @@ export async function POST(req: NextRequest) {
                   garmentDescription,
                   garmentCategories: currentGarmentCategories,
                   sceneGroupMode,
+                  modelIdentityMode,
                   productLabel: currentProductLabel,
-                  hasAnchor: !!anchorImage,
+                  hasAnchor: shouldUseSceneGroupAnchor && !!anchorImage,
                   hasReplacementAccessory,
                   isRegeneration: requestHasSceneGroupAnchor,
                   customPrompt: safeCustomPrompt,
@@ -820,7 +825,7 @@ export async function POST(req: NextRequest) {
                   productImages: currentProductImages,
                   sceneRefImages: [baseRef],
                   accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
-                  anchorImage,
+                  anchorImage: shouldUseSceneGroupAnchor ? anchorImage : undefined,
                   sceneAsEditBase: true,
                   aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
                   ...(engine === 'openai' ? { quality } : {}),
@@ -867,7 +872,7 @@ export async function POST(req: NextRequest) {
                   failedCount++;
                   break;
                 }
-                if (!anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
+                if (shouldUseSceneGroupAnchor && !anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
                 push('result', {
                   shotIndex: refSeq,
                   imageData: result.data,
