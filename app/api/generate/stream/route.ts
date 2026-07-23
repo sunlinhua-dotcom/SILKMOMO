@@ -18,12 +18,13 @@ import {
   normalizeGenerationQuality,
   type GenerationQuality,
 } from '@/lib/billing-constants';
-import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
+import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, buildFaceSwapPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage } from '@/lib/postprocess';
+import { createFaceEditMask, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -193,13 +194,17 @@ ${FACE_REALISM_DIRECTIVE}
 `.trim();
 }
 
-function buildDerivedAnchorPortraitPrompt(): string {
+function buildDerivedAnchorPortraitPrompt(skinToneNote?: string): string {
+  const skinToneLine = skinToneNote
+    ? `Required anchor skin tone for this portrait: ${skinToneNote}. Render the fictional face with this exact tan depth and warm/cool undertone so it cannot pull downstream edits paler or pinker. This remains ONLY a face-identity anchor; hair, body, pose, styling, lighting, and scene are still not references.`
+    : 'This portrait defines ONLY a new face identity for downstream scene edits. It is NOT a skin-tone reference, NOT a hairstyle reference, NOT a body reference, and NOT a styling reference; those will be taken from each scene-base image later.';
+
   return `
 Create ONE photorealistic fictional American-Asian / Eurasian mixed fashion model facial-identity portrait card.
 
 This is an infrastructure facial identity anchor for a fashion generation set. The person must be entirely fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
 
-This portrait defines ONLY a new face identity for downstream scene edits. It is NOT a skin-tone reference, NOT a hairstyle reference, NOT a body reference, and NOT a styling reference; those will be taken from each scene-base image later.
+${skinToneLine}
 
 Face direction:
 - A refined mixed European-Asian / Asian-American fictional fashion model face.
@@ -710,6 +715,7 @@ export async function POST(req: NextRequest) {
 
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
             const shouldUseSceneGroupAnchor = modelIdentityMode === 'fresh' || modelIdentityMode === 'follow_scene';
+            const useFollowSceneTwoPass = modelIdentityMode === 'follow_scene' && engine === 'openai';
             // 新模特身份锚：fresh 锁完整新人身份；follow_scene 锁派生脸部身份（肤色/发型/体型仍随场景底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
             // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
@@ -733,12 +739,22 @@ export async function POST(req: NextRequest) {
               } catch { /* skip */ }
             }
 
+            let derivedAnchorSkinTone: string | undefined;
+            if (modelIdentityMode === 'follow_scene' && shouldUseSceneGroupAnchor && !anchorImage && sceneRefImages[0] && !clientClosed) {
+              push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
+              try {
+                const { analyzeFaceRegionAndSkin } = await import('@/lib/ai-assistant');
+                const skinAnalysis = await analyzeFaceRegionAndSkin(sceneRefImages[0].data, sceneRefImages[0].mimeType);
+                if (skinAnalysis?.skinTone) derivedAnchorSkinTone = skinAnalysis.skinTone;
+              } catch { /* skip: anchor prompt falls back to current behavior */ }
+            }
+
             if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
                 const anchorPrompt = modelIdentityMode === 'follow_scene'
-                  ? buildDerivedAnchorPortraitPrompt()
+                  ? buildDerivedAnchorPortraitPrompt(derivedAnchorSkinTone)
                   : buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig);
                 const anchorResult = await generateBackendImage({
                   prompt: anchorPrompt,
@@ -834,28 +850,87 @@ export async function POST(req: NextRequest) {
               let shotLatency = 0;
               let prompt = '';
               try {
+                const twoPassActive = useFollowSceneTwoPass && !!anchorImage;
+                if (useFollowSceneTwoPass && !twoPassActive) {
+                  console.log(`[sceneGroup] 派生锚缺失，回退单步换脸 #${refSeq}`);
+                }
                 prompt = buildSceneGroupPrompt({
                   garmentDescription,
                   garmentCategories: currentGarmentCategories,
                   sceneGroupMode,
                   modelIdentityMode,
                   productLabel: currentProductLabel,
-                  hasAnchor: shouldUseSceneGroupAnchor && !!anchorImage,
+                  identityPass: twoPassActive ? 'garment-only' : 'combined',
+                  hasAnchor: !twoPassActive && shouldUseSceneGroupAnchor && !!anchorImage,
                   hasReplacementAccessory,
                   isRegeneration: requestHasSceneGroupAnchor,
                   customPrompt: safeCustomPrompt,
                 });
                 const shotStart = Date.now();
-                result = await generateBackendImage({
+                const pass1Result = await generateBackendImage({
                   prompt,
                   productImages: currentProductImages,
                   sceneRefImages: [baseRef],
                   accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
-                  anchorImage: shouldUseSceneGroupAnchor ? anchorImage : undefined,
+                  anchorImage: !twoPassActive && shouldUseSceneGroupAnchor ? anchorImage : undefined,
                   sceneAsEditBase: true,
                   aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
                   ...(engine === 'openai' ? { quality } : {}),
                 }, engine);
+                result = pass1Result;
+
+                if (twoPassActive && pass1Result.success && pass1Result.data) {
+                  push('status', {
+                    phase: 'generating',
+                    current: i + 1,
+                    total,
+                    shotIndex: refSeq,
+                    message: '正在替换模特面容...',
+                  });
+
+                  try {
+                    const normalizedPass1 = await normalizeImageForFacePass({
+                      data: pass1Result.data,
+                      mimeType: 'image/png',
+                    });
+                    const { analyzeFaceRegionAndSkin } = await import('@/lib/ai-assistant');
+                    const faceAnalysis = await analyzeFaceRegionAndSkin(normalizedPass1.data, normalizedPass1.mimeType);
+                    const faceSkipLog = {
+                      visibility: faceAnalysis?.visibility ?? 'null',
+                      box: faceAnalysis?.visibleFaceBox2d,
+                    };
+
+                    if (!isUsableFaceRegion(faceAnalysis)) {
+                      console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
+                    } else {
+                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d);
+                      const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone);
+                      const pass2Result = await generateBackendImage({
+                        prompt: faceSwapPrompt,
+                        productImages: [],
+                        sceneRefImages: [{
+                          data: normalizedPass1.data,
+                          mimeType: normalizedPass1.mimeType,
+                          skipNormalization: true,
+                        }],
+                        anchorImage,
+                        maskImage,
+                        sceneAsEditBase: true,
+                        aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                        quality,
+                      }, engine);
+
+                      if (pass2Result.success && pass2Result.data) {
+                        result = pass2Result;
+                        prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
+                      } else {
+                        console.log('[sceneGroup] Pass2 换脸失败，交付 Pass1 结果:', pass2Result.error);
+                      }
+                    }
+                  } catch (pass2Err) {
+                    console.log('[sceneGroup] Pass2 换脸异常，交付 Pass1 结果:', pass2Err instanceof Error ? pass2Err.message : pass2Err);
+                  }
+                }
                 shotLatency = Date.now() - shotStart;
                 if (result.success && result.data) {
                   const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
@@ -898,7 +973,9 @@ export async function POST(req: NextRequest) {
                   failedCount++;
                   break;
                 }
-                if (shouldUseSceneGroupAnchor && !anchorImage) anchorImage = { data: result.data, mimeType: 'image/png' };
+                if (shouldUseSceneGroupAnchor && !anchorImage && !useFollowSceneTwoPass) {
+                  anchorImage = { data: result.data, mimeType: 'image/png' };
+                }
                 push('result', {
                   shotIndex: refSeq,
                   imageData: result.data,

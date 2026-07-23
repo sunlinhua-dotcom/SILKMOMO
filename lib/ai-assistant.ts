@@ -218,6 +218,139 @@ JSON only, no explanation.`,
   }
 }
 
+export interface FaceRegionAnalysis {
+  skinTone: string;
+  faceBox2d: [number, number, number, number];
+  visibleFaceBox2d: [number, number, number, number];
+  occluders: string[];
+  visibility: 'clear' | 'partial' | 'heavy' | 'none';
+  confidence: number;
+}
+
+const FACE_VISIBILITIES = new Set(['clear', 'partial', 'heavy', 'none']);
+
+function parseBox2d(value: unknown): [number, number, number, number] | null {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const nums = value.map(v => Number(v));
+  if (!nums.every(Number.isFinite)) return null;
+  if (nums.some(v => v < 0 || v > 1000)) return null;
+  const [ymin, xmin, ymax, xmax] = nums.map(v => Math.round(Math.min(1000, Math.max(0, v))));
+  if (ymax <= ymin || xmax <= xmin) return null;
+  return [ymin, xmin, ymax, xmax];
+}
+
+function clamp01(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function sanitizeSkinTone(value: unknown): string {
+  return typeof value === 'string'
+    ? value.replace(/[\r\n]/g, ' ').trim().slice(0, 220)
+    : '';
+}
+
+function sanitizeOccluders(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .map(v => v.replace(/[\r\n]/g, ' ').trim().slice(0, 60))
+    .slice(0, 8);
+}
+
+/**
+ * Analyze the visible face region and scene skin tone for follow_scene Pass2.
+ * Returns null on any parsing/validation failure so callers can deliver Pass1.
+ */
+export async function analyzeFaceRegionAndSkin(
+  imageBase64: string,
+  mimeType: string = 'image/png',
+): Promise<FaceRegionAnalysis | null> {
+  if (!LITE_CONFIG.apiKey || !imageBase64) return null;
+
+  try {
+    const url = `${LITE_CONFIG.baseUrl}/models/${LITE_CONFIG.model}:generateContent?key=${LITE_CONFIG.apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            {
+              text: `You are a precise computer-vision annotator for fashion image editing.
+
+Analyze the person in this image and return JSON only. Coordinates MUST use [ymin, xmin, ymax, xmax] normalized to integers 0-1000 over the whole image.
+
+Return exactly this JSON shape:
+{
+  "skinTone": "English description of the person's visible skin tone, including tan depth and warm/cool undertone",
+  "faceBox2d": [120, 420, 330, 610],
+  "visibleFaceBox2d": [150, 440, 300, 590],
+  "occluders": ["sunglasses", "hat brim", "hair"],
+  "visibility": "clear|partial|heavy|none",
+  "confidence": 0.0
+}
+
+Rules:
+- skinTone must describe the scene person's real visible skin, not a beauty ideal. Include tan depth and undertone, e.g. "medium-deep sun-tanned warm golden olive".
+- faceBox2d is the full estimated face/head skin area if unobstructed.
+- visibleFaceBox2d must include ONLY currently visible facial skin/features to edit. Exclude sunglasses, eyeglasses, hat brim, hair, hands, jewelry, masks, deep cast shadows that hide features, and all non-skin occluding objects.
+- visibility: clear = most facial features visible; partial = useful visible face remains but some occlusion/crop; heavy = too occluded for reliable face swap; none = no visible face.
+- If no reliable face is visible, set visibility to "none" and still keep JSON valid.
+- JSON only, no markdown, no explanations.`,
+            },
+            {
+              inlineData: {
+                mimeType: mimeType || 'image/png',
+                data: imageBase64,
+              },
+            },
+          ],
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0,
+          maxOutputTokens: 500,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      console.warn('[AI Lite] 脸部区域分析失败:', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text || typeof text !== 'string') return null;
+
+    const parsed = JSON.parse(text);
+    const skinTone = sanitizeSkinTone(parsed.skinTone);
+    const faceBox2d = parseBox2d(parsed.faceBox2d);
+    const visibleFaceBox2d = parseBox2d(parsed.visibleFaceBox2d);
+    const visibility = typeof parsed.visibility === 'string' && FACE_VISIBILITIES.has(parsed.visibility)
+      ? parsed.visibility as FaceRegionAnalysis['visibility']
+      : null;
+
+    if (!skinTone || !faceBox2d || !visibleFaceBox2d || !visibility) return null;
+
+    return {
+      skinTone,
+      faceBox2d,
+      visibleFaceBox2d,
+      occluders: sanitizeOccluders(parsed.occluders),
+      visibility,
+      confidence: clamp01(parsed.confidence),
+    };
+  } catch (error) {
+    console.warn('[AI Lite] 脸部区域分析异常:', sanitizeUpstreamError(error));
+    return null;
+  }
+}
+
 /** 防止 API key 随错误信息（如 URL 解析失败的 TypeError）外泄到日志/客户端 */
 function sanitizeUpstreamError(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);

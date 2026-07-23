@@ -21,6 +21,7 @@ interface AIChatBoxProps {
   context?: string;
   onActions?: (actions: AIActions) => void;
   onTriggerGenerate?: () => void;
+  hideBodySkinQuickTags?: boolean;
   /** 布局模式：sidebar = 桌面左侧边栏，bottom = 移动端底栏 */
   mode?: 'sidebar' | 'bottom';
   /** 空状态提示文案（不传则显示默认） */
@@ -95,11 +96,13 @@ function useAIChat(context?: string, onActions?: (a: AIActions) => void, onTrigg
 
 // ─── 桌面端：左侧可折叠侧边栏 ────────────────────────────────────────────────
 
-export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStateHint, placeholder }: Omit<AIChatBoxProps, 'mode'>) {
+export function AIChatSidebar({ context, onActions, onTriggerGenerate, hideBodySkinQuickTags, emptyStateHint, placeholder }: Omit<AIChatBoxProps, 'mode'>) {
   const [collapsed, setCollapsed] = useState(false);
   const { messages, input, setInput, loading, scrollRef, inputRef, handleSend, handleKeyDown } = useAIChat(context, onActions, onTriggerGenerate);
 
-  const QUICK_TAGS = ['产品图', '场景图', '纤细体型', '白皙肤色', '极简背景'];
+  const QUICK_TAGS = hideBodySkinQuickTags
+    ? ['产品图', '场景图', '极简背景']
+    : ['产品图', '场景图', '纤细体型', '白皙肤色', '极简背景'];
 
   return (
     <aside
@@ -239,11 +242,13 @@ export function AIChatSidebar({ context, onActions, onTriggerGenerate, emptyStat
 
 // ─── 移动端：固定底栏 ────────────────────────────────────────────────────────
 
-export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<AIChatBoxProps, 'mode'>) {
+export function AIChatBottomBar({ context, onActions, onTriggerGenerate, hideBodySkinQuickTags }: Omit<AIChatBoxProps, 'mode'>) {
   const [expanded, setExpanded] = useState(false);
   const { messages, input, setInput, loading, scrollRef, inputRef, handleSend, handleKeyDown } = useAIChat(context, onActions, onTriggerGenerate);
 
-  const QUICK_TAGS = ['产品图', '场景图', '纤细', '白皙'];
+  const QUICK_TAGS = hideBodySkinQuickTags
+    ? ['产品图', '场景图']
+    : ['产品图', '场景图', '纤细', '白皙'];
   const latestAIMsg = messages.filter(m => m.role === 'ai').at(-1);
 
   return (
@@ -376,11 +381,11 @@ export function AIChatBottomBar({ context, onActions, onTriggerGenerate }: Omit<
 // ─── 旧版兼容导出（顶部搜索栏形态，仅移动端底栏向上兼容）───────────────────
 
 /** @deprecated 使用 AIChatSidebar（桌面）+ AIChatBottomBar（移动）代替 */
-export function AIChatBox({ context, onActions, onTriggerGenerate }: AIChatBoxProps) {
+export function AIChatBox({ context, onActions, onTriggerGenerate, hideBodySkinQuickTags }: AIChatBoxProps) {
   return (
     <>
-      <AIChatSidebar context={context} onActions={onActions} onTriggerGenerate={onTriggerGenerate} />
-      <AIChatBottomBar context={context} onActions={onActions} onTriggerGenerate={onTriggerGenerate} />
+      <AIChatSidebar context={context} onActions={onActions} onTriggerGenerate={onTriggerGenerate} hideBodySkinQuickTags={hideBodySkinQuickTags} />
+      <AIChatBottomBar context={context} onActions={onActions} onTriggerGenerate={onTriggerGenerate} hideBodySkinQuickTags={hideBodySkinQuickTags} />
     </>
   );
 }

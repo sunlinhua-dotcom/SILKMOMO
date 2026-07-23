@@ -384,6 +384,7 @@ export default function TaskDetailPage() {
     const isGroup = moduleType === 'scene' && !!freshProject.sceneGroup;
     const sceneGroupMode = getSceneGroupMode(freshProject);
     const modelIdentityMode = getModelIdentityMode(freshProject);
+    const followSceneLocksModelParams = isGroup && modelIdentityMode === 'follow_scene';
     const shouldUseSceneGroupAnchor = isGroup && (modelIdentityMode === 'fresh' || modelIdentityMode === 'follow_scene');
     const productGroups = isGroup && sceneGroupMode === 'products'
       ? buildProductGroupsFromImages(freshInputs.products)
@@ -494,32 +495,37 @@ export default function TaskDetailPage() {
 
     try {
       // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
-      const effectiveModelId = newModelId || freshProject.modelId || '';
+      const effectiveModelId = followSceneLocksModelParams ? '' : (newModelId || freshProject.modelId || '');
       const effectiveEngine: 'gemini' | 'openai' = newEngine;
       const effectiveQuality = normalizeGenerationQuality(newQuality);
-      const effectiveBodyType = newBodyType || freshProject.bodyType || DEFAULT_BODY_TYPE.id;
-      const effectiveSkinTone = newSkinTone || freshProject.skinTone || DEFAULT_SKIN_TONE.id;
-      const modelChanged = effectiveModelId !== (freshProject.modelId || '');
+      const effectiveBodyType = followSceneLocksModelParams ? '' : (newBodyType || freshProject.bodyType || DEFAULT_BODY_TYPE.id);
+      const effectiveSkinTone = followSceneLocksModelParams ? '' : (newSkinTone || freshProject.skinTone || DEFAULT_SKIN_TONE.id);
+      const modelChanged = !followSceneLocksModelParams && effectiveModelId !== (freshProject.modelId || '');
       const engineChanged = effectiveEngine !== (freshProject.engine || 'gemini');
       const qualityChanged = effectiveQuality !== normalizeGenerationQuality(freshProject.generationQuality);
-      const bodyTypeChanged = effectiveBodyType !== (freshProject.bodyType || DEFAULT_BODY_TYPE.id);
-      const skinToneChanged = effectiveSkinTone !== (freshProject.skinTone || DEFAULT_SKIN_TONE.id);
+      const bodyTypeChanged = !followSceneLocksModelParams && effectiveBodyType !== (freshProject.bodyType || DEFAULT_BODY_TYPE.id);
+      const skinToneChanged = !followSceneLocksModelParams && effectiveSkinTone !== (freshProject.skinTone || DEFAULT_SKIN_TONE.id);
       if (modelChanged || engineChanged || qualityChanged || bodyTypeChanged || skinToneChanged) {
-        await db.projects.update(taskId, {
-          modelId: effectiveModelId || undefined,
+        const projectPatch: Partial<Project> = {
           engine: effectiveEngine,
           generationQuality: effectiveQuality,
-          bodyType: effectiveBodyType,
-          skinTone: effectiveSkinTone,
           updatedAt: new Date(),
-        });
+        };
+        if (!followSceneLocksModelParams) {
+          projectPatch.modelId = effectiveModelId || undefined;
+          projectPatch.bodyType = effectiveBodyType as Project['bodyType'];
+          projectPatch.skinTone = effectiveSkinTone as Project['skinTone'];
+        }
+        await db.projects.update(taskId, projectPatch);
         setProject(prev => prev ? {
           ...prev,
-          modelId: effectiveModelId || undefined,
           engine: effectiveEngine,
           generationQuality: effectiveQuality,
-          bodyType: effectiveBodyType,
-          skinTone: effectiveSkinTone,
+          ...(followSceneLocksModelParams ? {} : {
+            modelId: effectiveModelId || undefined,
+            bodyType: effectiveBodyType as Project['bodyType'],
+            skinTone: effectiveSkinTone as Project['skinTone'],
+          }),
         } : null);
       }
 
@@ -569,9 +575,9 @@ export default function TaskDetailPage() {
           bgRefImages: freshInputs.bgRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           sceneRefImages: freshInputs.sceneRefs.map(img => ({ data: img.data, mimeType: img.mimeType })),
           accessoryImages: freshInputs.accessories.map(img => ({ data: img.data, mimeType: img.mimeType })),
-          modelId: effectiveModelId || undefined,
-          bodyType: effectiveBodyType,
-          skinTone: effectiveSkinTone,
+          modelId: followSceneLocksModelParams ? undefined : (effectiveModelId || undefined),
+          bodyType: followSceneLocksModelParams ? undefined : effectiveBodyType,
+          skinTone: followSceneLocksModelParams ? undefined : effectiveSkinTone,
           engine: effectiveEngine,
           quality: effectiveEngine === 'openai' ? effectiveQuality : undefined,
           anchorImage: moduleType === 'product' ? anchorForChunk : undefined,
@@ -942,15 +948,20 @@ export default function TaskDetailPage() {
       }
 
       // 3. 更新 Project 参数
-      await db.projects.update(taskId, {
-        modelId: newModelId || undefined,
-        bodyType: newBodyType,
-        skinTone: newSkinTone,
+      const followSceneLocksModelParams =
+        project.moduleType === 'scene' && !!project.sceneGroup && getModelIdentityMode(project) === 'follow_scene';
+      const projectPatch: Partial<Project> = {
         engine: newEngine,
         generationQuality: normalizeGenerationQuality(newQuality),
         status: 'pending',
         updatedAt: new Date(),
-      });
+      };
+      if (!followSceneLocksModelParams) {
+        projectPatch.modelId = newModelId || undefined;
+        projectPatch.bodyType = newBodyType;
+        projectPatch.skinTone = newSkinTone;
+      }
+      await db.projects.update(taskId, projectPatch);
 
       // 4. 重新加载 + 同步取得最新 project，直接传给 handleStartGeneration 避免 stale state
       const task = await db.projects.get(taskId);
@@ -1161,6 +1172,7 @@ export default function TaskDetailPage() {
   }
 
   const moduleType = project.moduleType || 'product';
+  const isFollowSceneGroupTask = moduleType === 'scene' && !!project.sceneGroup && getModelIdentityMode(project) === 'follow_scene';
   const remainingErrorCount = Math.max(0, getShotCount() - images.length);
   const displayErrorMessage = errorMessage
     ? getDisplayErrorMessage(errorMessage, images.length, remainingErrorCount)
@@ -1215,17 +1227,25 @@ export default function TaskDetailPage() {
           画质: {currentQualityLabel}
         </span>
       )}
-      {project.modelId && (
+      {isFollowSceneGroupTask ? (
+        <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+          肤色·体型·发型跟随场景图
+        </span>
+      ) : project.modelId && (
         <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
           模特: {currentModelName}{currentEthnicityLabel ? ` · ${currentEthnicityLabel}` : ''}
         </span>
       )}
-      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-        体型: {currentBodyTypeName}
-      </span>
-      <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
-        肤色: {currentSkinToneName}
-      </span>
+      {!isFollowSceneGroupTask && (
+        <>
+          <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+            体型: {currentBodyTypeName}
+          </span>
+          <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
+            肤色: {currentSkinToneName}
+          </span>
+        </>
+      )}
       {moduleType === 'product' && currentSkuLabel && (
         <span className="text-xs px-2.5 py-1 bg-[var(--color-background)] rounded-lg text-[var(--color-text-secondary)]">
           SKU: {currentSkuLabel}
@@ -1250,22 +1270,25 @@ export default function TaskDetailPage() {
   );
 
   // 任务页面的 AI Chat：当用户描述调整时，触发对当前任务的 customPrompt 重做
-  const taskChatContext = `当前任务: ${project.name}, 模块: ${moduleType === 'product' ? '产品图' : '场景图'}, 体型: ${currentBodyTypeName}, 肤色: ${currentSkinToneName}, 已生成: ${images.length}张`;
+  const taskChatContext = isFollowSceneGroupTask
+    ? `当前任务: ${project.name}, 模块: 场景图, 组图模式: 贴近场景模特，肤色·体型·发型跟随场景图, 已生成: ${images.length}张`
+    : `当前任务: ${project.name}, 模块: ${moduleType === 'product' ? '产品图' : '场景图'}, 体型: ${currentBodyTypeName}, 肤色: ${currentSkinToneName}, 已生成: ${images.length}张`;
 
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
       {/* 任务侧的 AI Chat 侧边栏：用户可以描述要调整什么，AI 提取参数后整任务重做 */}
       <AIChatSidebar
         context={taskChatContext}
+        hideBodySkinQuickTags={isFollowSceneGroupTask}
         emptyStateHint={`💬 描述要调整什么\n例如："模特表情更柔和"、"整体亮度提高"\n\nAI 会用你的描述重做这个任务的所有图片`}
         placeholder="描述要调整什么..."
         onActions={(actions) => {
           // 单图细节调整建议在结果图上 hover → ✨ 按钮
           // 这里的 chat 走整任务重做流程
-          if (actions.bodyType && actions.bodyType !== project.bodyType) {
+          if (!isFollowSceneGroupTask && actions.bodyType && actions.bodyType !== project.bodyType) {
             setNewBodyType(actions.bodyType);
           }
-          if (actions.skinTone && actions.skinTone !== project.skinTone) {
+          if (!isFollowSceneGroupTask && actions.skinTone && actions.skinTone !== project.skinTone) {
             setNewSkinTone(actions.skinTone);
           }
           // 捕获 prompt，下一步 onTriggerGenerate 时附加到生成请求
@@ -1374,9 +1397,15 @@ export default function TaskDetailPage() {
             <div className="p-5 space-y-6">
               {/* 当前参数概览 */}
               <div className="text-sm text-[var(--color-text-secondary)] space-y-1">
-                <div>当前模特: <span className="font-medium text-[var(--color-text)]">{currentModelName}</span></div>
-                <div>当前体型: <span className="font-medium text-[var(--color-text)]">{currentBodyTypeName}</span></div>
-                <div>当前肤色: <span className="font-medium text-[var(--color-text)]">{currentSkinToneName}</span></div>
+                {isFollowSceneGroupTask ? (
+                  <div className="font-medium text-[var(--color-text)]">肤色·体型·发型跟随场景图</div>
+                ) : (
+                  <>
+                    <div>当前模特: <span className="font-medium text-[var(--color-text)]">{currentModelName}</span></div>
+                    <div>当前体型: <span className="font-medium text-[var(--color-text)]">{currentBodyTypeName}</span></div>
+                    <div>当前肤色: <span className="font-medium text-[var(--color-text)]">{currentSkinToneName}</span></div>
+                  </>
+                )}
               </div>
 
               {/* 生图引擎选择 */}
@@ -1396,32 +1425,36 @@ export default function TaskDetailPage() {
                 )}
               </div>
 
-              {/* 模特选择 */}
-              <div>
-                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择模特</h3>
-                <ModelSelector
-                  selectedModel={newModelId}
-                  onSelect={setNewModelId}
-                />
-              </div>
+              {!isFollowSceneGroupTask && (
+                <>
+                  {/* 模特选择 */}
+                  <div>
+                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择模特</h3>
+                    <ModelSelector
+                      selectedModel={newModelId}
+                      onSelect={setNewModelId}
+                    />
+                  </div>
 
-              {/* 体型选择（三选） */}
-              <div>
-                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">体型选择</h3>
-                <BodyTypeSelector
-                  selectedBodyType={newBodyType}
-                  onSelect={setNewBodyType}
-                />
-              </div>
+                  {/* 体型选择（三选） */}
+                  <div>
+                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">体型选择</h3>
+                    <BodyTypeSelector
+                      selectedBodyType={newBodyType}
+                      onSelect={setNewBodyType}
+                    />
+                  </div>
 
-              {/* 肤色选择（三选）— 新增 */}
-              <div>
-                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">肤色选择</h3>
-                <SkinToneSelector
-                  selectedSkinTone={newSkinTone}
-                  onSelect={setNewSkinTone}
-                />
-              </div>
+                  {/* 肤色选择（三选）— 新增 */}
+                  <div>
+                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">肤色选择</h3>
+                    <SkinToneSelector
+                      selectedSkinTone={newSkinTone}
+                      onSelect={setNewSkinTone}
+                    />
+                  </div>
+                </>
+              )}
 
               {/* 风格参考上传 */}
               <div>
@@ -1452,7 +1485,9 @@ export default function TaskDetailPage() {
                 开始重新生成
               </button>
               <p className="text-xs text-[var(--color-text-muted)] mt-3 text-center">
-                将使用原有的产品图，配合新的模特/体型/肤色参数重新生成
+                {isFollowSceneGroupTask
+                  ? '将使用原有的产品图与场景图重新生成，肤色·体型·发型继续跟随场景图'
+                  : '将使用原有的产品图，配合新的模特/体型/肤色参数重新生成'}
               </p>
             </div>
           </div>
