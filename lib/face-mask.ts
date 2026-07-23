@@ -17,6 +17,7 @@ export interface NormalizedFacePassImage extends ReferenceImageInput {
 
 const MIN_FACE_AREA_RATIO = 0.01;
 const MASK_MARGIN_RATIO = 0.04;
+const EYEWEAR_OCCLUDER_RE = /sun?glass|eye ?glass|glasses|eyewear/i;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -49,7 +50,18 @@ export function isUsableFaceRegion(region: FaceRegionForMask | null): region is 
   return areaRatio >= MIN_FACE_AREA_RATIO;
 }
 
-function boxToEllipse(box: FaceBox2d, width: number, height: number) {
+function hasEyewearOccluder(occluders: string[] | undefined): boolean {
+  return !!occluders?.some(item => EYEWEAR_OCCLUDER_RE.test(item));
+}
+
+function adjustBoxForOccluders(box: FaceBox2d, occluders: string[] | undefined): { box: FaceBox2d; minTop?: number } {
+  if (!hasEyewearOccluder(occluders)) return { box };
+  const [ymin, xmin, ymax, xmax] = box;
+  const raisedYmin = Math.min(ymax - 1, ymin + 0.45 * (ymax - ymin));
+  return { box: [raisedYmin, xmin, ymax, xmax], minTop: raisedYmin };
+}
+
+function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: number) {
   const [ymin, xmin, ymax, xmax] = box;
   const boxWidth = ((xmax - xmin) / 1000) * width;
   const boxHeight = ((ymax - ymin) / 1000) * height;
@@ -58,7 +70,8 @@ function boxToEllipse(box: FaceBox2d, width: number, height: number) {
 
   const left = clamp((xmin / 1000) * width - marginX, 0, width);
   const right = clamp((xmax / 1000) * width + marginX, 0, width);
-  const top = clamp((ymin / 1000) * height - marginY, 0, height);
+  const minTopPx = minTop === undefined ? 0 : (minTop / 1000) * height;
+  const top = clamp((ymin / 1000) * height - marginY, minTopPx, height);
   const bottom = clamp((ymax / 1000) * height + marginY, 0, height);
 
   return {
@@ -72,12 +85,14 @@ function boxToEllipse(box: FaceBox2d, width: number, height: number) {
 export async function createFaceEditMask(
   image: Pick<NormalizedFacePassImage, 'width' | 'height'>,
   visibleFaceBox2d: FaceBox2d,
+  occluders?: string[],
 ): Promise<ReferenceImageInput> {
   if (!isValidBox(visibleFaceBox2d)) {
     throw new Error('可见脸部 bbox 非法');
   }
   const { width, height } = image;
-  const ellipse = boxToEllipse(visibleFaceBox2d, width, height);
+  const adjusted = adjustBoxForOccluders(visibleFaceBox2d, occluders);
+  const ellipse = boxToEllipse(adjusted.box, width, height, adjusted.minTop);
   const ellipseSvg = Buffer.from(`
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
   <ellipse cx="${ellipse.cx}" cy="${ellipse.cy}" rx="${ellipse.rx}" ry="${ellipse.ry}" fill="black"/>

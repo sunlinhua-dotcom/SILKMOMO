@@ -61,3 +61,16 @@ test('isUsableFaceRegion rejects tiny and hidden face regions', async () => {
   assert.equal(masks.isUsableFaceRegion({ visibility: 'clear', visibleFaceBox2d: [100, 100, 120, 120] }), false);
   assert.equal(masks.isUsableFaceRegion({ visibility: 'partial', visibleFaceBox2d: [200, 300, 550, 700] }), true);
 });
+
+test('createFaceEditMask excludes upper face when eyewear occludes the eyes', async () => {
+  const mask = await masks.createFaceEditMask(
+    { width: 1000, height: 1000 },
+    [200, 300, 800, 700],
+    ['sunglasses'],
+  );
+  const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
+
+  assert.equal(alphaAt(500, 440), 255);
+  assert.equal(alphaAt(500, 680), 0);
+});

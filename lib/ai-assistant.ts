@@ -298,6 +298,7 @@ Rules:
 - skinTone must describe the scene person's real visible skin, not a beauty ideal. Include tan depth and undertone, e.g. "medium-deep sun-tanned warm golden olive".
 - faceBox2d is the full estimated face/head skin area if unobstructed.
 - visibleFaceBox2d must include ONLY currently visible facial skin/features to edit. Exclude sunglasses, eyeglasses, hat brim, hair, hands, jewelry, masks, deep cast shadows that hide features, and all non-skin occluding objects.
+- If the person wears sunglasses or eyeglasses, you MUST list them in occluders, and visibleFaceBox2d MUST completely exclude lens and frame regions. Usually this means visibleFaceBox2d should start below the eyewear and include only the lower face such as nose tip, lips, chin, and jawline.
 - visibility: clear = most facial features visible; partial = useful visible face remains but some occlusion/crop; heavy = too occluded for reliable face swap; none = no visible face.
 - If no reliable face is visible, set visibility to "none" and still keep JSON valid.
 - JSON only, no markdown, no explanations.`,

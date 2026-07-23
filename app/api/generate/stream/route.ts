@@ -903,7 +903,7 @@ export async function POST(req: NextRequest) {
                     if (!isUsableFaceRegion(faceAnalysis)) {
                       console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
                     } else {
-                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d);
+                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, faceAnalysis.occluders);
                       const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone);
                       const pass2Result = await generateBackendImage({
                         prompt: faceSwapPrompt,
