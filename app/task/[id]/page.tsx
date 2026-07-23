@@ -384,7 +384,7 @@ export default function TaskDetailPage() {
     const isGroup = moduleType === 'scene' && !!freshProject.sceneGroup;
     const sceneGroupMode = getSceneGroupMode(freshProject);
     const modelIdentityMode = getModelIdentityMode(freshProject);
-    const shouldUseSceneGroupAnchor = isGroup && modelIdentityMode === 'fresh';
+    const shouldUseSceneGroupAnchor = isGroup && (modelIdentityMode === 'fresh' || modelIdentityMode === 'follow_scene');
     const productGroups = isGroup && sceneGroupMode === 'products'
       ? buildProductGroupsFromImages(freshInputs.products)
       : undefined;
@@ -408,8 +408,8 @@ export default function TaskDetailPage() {
         if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string')) groupGarmentCategories = parsed;
       } catch { /* ignore */ }
     }
-    // 组图重做/补齐（指定了目标序号）时，取一张已有结果图作「新模特身份锚」，让补的图与首批同一个新人；
-    // 全量生成（未指定 target）不带锚，由服务端首张成功图自锚。注意单张重做前该图已被降级为 result_backup，
+    // 组图重做/补齐（指定了目标序号）时，取已存锚或一张已有结果图作身份锚，让补的图与首批同一个新人/同一张派生脸；
+    // 全量生成（未指定 target）不带锚，由服务端预生成身份锚，失败时才回退首张成功图自锚。注意单张重做前该图已被降级为 result_backup，
     // 故按 type==='result' 过滤能自然排除正在重做的那张。
     let groupAnchor: { data: string; mimeType: string } | undefined;
     if (shouldUseSceneGroupAnchor) {
