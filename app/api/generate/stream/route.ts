@@ -24,7 +24,7 @@ import { generateImage as generateBackendImage, normalizeBackend, resolveApiMode
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage } from '@/lib/postprocess';
-import { createFaceEditMask, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
+import { createFaceEditMask, harmonizeFaceTone, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -739,14 +739,30 @@ export async function POST(req: NextRequest) {
               } catch { /* skip */ }
             }
 
-            let derivedAnchorSkinTone: string | undefined;
-            if (modelIdentityMode === 'follow_scene' && shouldUseSceneGroupAnchor && !anchorImage && sceneRefImages[0] && !clientClosed) {
-              push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
+            const sceneSkinToneCache = new Map<string, string | null>();
+            const getSceneSkinTone = async (image: ImageInput | undefined): Promise<string | undefined> => {
+              if (modelIdentityMode !== 'follow_scene' || !image || clientClosed) return undefined;
+              const cacheKey = `${image.mimeType}:${image.data.length}:${image.data.slice(0, 96)}`;
+              if (sceneSkinToneCache.has(cacheKey)) {
+                return sceneSkinToneCache.get(cacheKey) ?? undefined;
+              }
+
               try {
                 const { analyzeFaceRegionAndSkin } = await import('@/lib/ai-assistant');
-                const skinAnalysis = await analyzeFaceRegionAndSkin(sceneRefImages[0].data, sceneRefImages[0].mimeType);
-                if (skinAnalysis?.skinTone) derivedAnchorSkinTone = skinAnalysis.skinTone;
-              } catch { /* skip: anchor prompt falls back to current behavior */ }
+                const skinAnalysis = await analyzeFaceRegionAndSkin(image.data, image.mimeType);
+                const skinTone = skinAnalysis?.skinTone || undefined;
+                sceneSkinToneCache.set(cacheKey, skinTone ?? null);
+                return skinTone;
+              } catch {
+                sceneSkinToneCache.set(cacheKey, null);
+                return undefined;
+              }
+            };
+
+            let derivedAnchorSkinTone: string | undefined;
+            if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && (!anchorImage || useFollowSceneTwoPass)) {
+              push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
+              derivedAnchorSkinTone = await getSceneSkinTone(sceneRefImages[0]);
             }
 
             if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed) {
@@ -851,6 +867,7 @@ export async function POST(req: NextRequest) {
               let prompt = '';
               try {
                 const twoPassActive = useFollowSceneTwoPass && !!anchorImage;
+                const sceneSkinTone = useFollowSceneTwoPass ? await getSceneSkinTone(baseRef) : undefined;
                 if (useFollowSceneTwoPass && !twoPassActive) {
                   console.log(`[sceneGroup] 派生锚缺失，回退单步换脸 #${refSeq}`);
                 }
@@ -861,6 +878,7 @@ export async function POST(req: NextRequest) {
                   modelIdentityMode,
                   productLabel: currentProductLabel,
                   identityPass: twoPassActive ? 'garment-only' : 'combined',
+                  sceneSkinTone,
                   hasAnchor: !twoPassActive && shouldUseSceneGroupAnchor && !!anchorImage,
                   hasReplacementAccessory,
                   isRegeneration: requestHasSceneGroupAnchor,
@@ -921,7 +939,18 @@ export async function POST(req: NextRequest) {
                       }, engine);
 
                       if (pass2Result.success && pass2Result.data) {
-                        result = pass2Result;
+                        let finalPass2Data = pass2Result.data;
+                        try {
+                          const harmonizedFace = await harmonizeFaceTone(
+                            normalizedPass1.buffer,
+                            Buffer.from(pass2Result.data, 'base64'),
+                            maskImage.ellipse,
+                          );
+                          finalPass2Data = harmonizedFace.toString('base64');
+                        } catch (toneErr) {
+                          console.log('[sceneGroup] Pass2 面部调色失败，使用原 Pass2 结果:', toneErr instanceof Error ? toneErr.message : toneErr);
+                        }
+                        result = { ...pass2Result, data: finalPass2Data };
                         prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
                       } else {
                         console.log('[sceneGroup] Pass2 换脸失败，交付 Pass1 结果:', pass2Result.error);

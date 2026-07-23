@@ -15,8 +15,35 @@ export interface NormalizedFacePassImage extends ReferenceImageInput {
   buffer: Buffer;
 }
 
+export interface FaceMaskEllipse {
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+  width: number;
+  height: number;
+}
+
+export interface FaceEditMaskImage extends ReferenceImageInput {
+  ellipse: FaceMaskEllipse;
+}
+
+interface RawRgbaImage {
+  data: Buffer;
+  width: number;
+  height: number;
+  channels: 4;
+}
+
+interface SkinStats {
+  count: number;
+  mean: [number, number, number];
+  std: [number, number, number];
+}
+
 const MIN_FACE_AREA_RATIO = 0.01;
 const MASK_MARGIN_RATIO = 0.04;
+const MIN_TONE_SAMPLE_COUNT = 500;
 const EYEWEAR_OCCLUDER_RE = /sun?glass|eye ?glass|glasses|eyewear/i;
 
 function clamp(value: number, min: number, max: number): number {
@@ -61,7 +88,7 @@ function adjustBoxForOccluders(box: FaceBox2d, occluders: string[] | undefined):
   return { box: [raisedYmin, xmin, ymax, xmax], minTop: raisedYmin };
 }
 
-function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: number) {
+function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: number): FaceMaskEllipse {
   const [ymin, xmin, ymax, xmax] = box;
   const boxWidth = ((xmax - xmin) / 1000) * width;
   const boxHeight = ((ymax - ymin) / 1000) * height;
@@ -79,6 +106,8 @@ function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: nu
     cy: (top + bottom) / 2,
     rx: Math.max(1, (right - left) / 2),
     ry: Math.max(1, (bottom - top) / 2),
+    width,
+    height,
   };
 }
 
@@ -86,7 +115,7 @@ export async function createFaceEditMask(
   image: Pick<NormalizedFacePassImage, 'width' | 'height'>,
   visibleFaceBox2d: FaceBox2d,
   occluders?: string[],
-): Promise<ReferenceImageInput> {
+): Promise<FaceEditMaskImage> {
   if (!isValidBox(visibleFaceBox2d)) {
     throw new Error('可见脸部 bbox 非法');
   }
@@ -110,5 +139,162 @@ export async function createFaceEditMask(
     .png()
     .toBuffer();
 
-  return { data: buffer.toString('base64'), mimeType: 'image/png' };
+  return { data: buffer.toString('base64'), mimeType: 'image/png', ellipse };
+}
+
+async function readRgbaImage(buffer: Buffer): Promise<RawRgbaImage> {
+  const { data, info } = await sharp(buffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  return {
+    data,
+    width: info.width,
+    height: info.height,
+    channels: 4,
+  };
+}
+
+function ellipseDistance(ellipse: FaceMaskEllipse, x: number, y: number): number {
+  const dx = (x + 0.5 - ellipse.cx) / ellipse.rx;
+  const dy = (y + 0.5 - ellipse.cy) / ellipse.ry;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function isSkinPixel(image: RawRgbaImage, offset: number): boolean {
+  const r = image.data[offset];
+  const g = image.data[offset + 1];
+  const b = image.data[offset + 2];
+  const a = image.channels > 3 ? image.data[offset + 3] : 255;
+  if (a < 16) return false;
+
+  const cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+  const cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+  return cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173;
+}
+
+function collectSkinStats(
+  image: RawRgbaImage,
+  ellipse: FaceMaskEllipse,
+  acceptsRadius: (radius: number) => boolean,
+): SkinStats {
+  const sum: [number, number, number] = [0, 0, 0];
+  const sumSq: [number, number, number] = [0, 0, 0];
+  let count = 0;
+
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const radius = ellipseDistance(ellipse, x, y);
+      if (!acceptsRadius(radius)) continue;
+
+      const offset = (y * image.width + x) * image.channels;
+      if (!isSkinPixel(image, offset)) continue;
+
+      for (let c = 0; c < 3; c++) {
+        const value = image.data[offset + c];
+        sum[c] += value;
+        sumSq[c] += value * value;
+      }
+      count++;
+    }
+  }
+
+  if (count === 0) return { count, mean: [0, 0, 0], std: [0, 0, 0] };
+
+  const mean = sum.map(value => value / count) as [number, number, number];
+  const std = sumSq.map((value, index) => {
+    const variance = Math.max(0, value / count - mean[index] * mean[index]);
+    return Math.sqrt(variance);
+  }) as [number, number, number];
+
+  return { count, mean, std };
+}
+
+function gaussianFeatherAlpha(radius: number, featherNorm: number): number {
+  const fullStrengthRadius = Math.max(0, 1 - featherNorm);
+  if (radius <= fullStrengthRadius) return 1;
+  const sigma = Math.max(0.001, featherNorm / 3);
+  return clamp(Math.exp(-0.5 * ((radius - fullStrengthRadius) / sigma) ** 2), 0, 1);
+}
+
+function sameDimensions(first: RawRgbaImage, second: RawRgbaImage, ellipse: FaceMaskEllipse): boolean {
+  return (
+    first.width === second.width
+    && first.height === second.height
+    && first.width === ellipse.width
+    && first.height === ellipse.height
+  );
+}
+
+export async function harmonizeFaceTone(
+  pass1Png: Buffer,
+  pass2Png: Buffer,
+  ellipse: FaceMaskEllipse,
+): Promise<Buffer> {
+  if (!Number.isFinite(ellipse.cx) || !Number.isFinite(ellipse.cy) || ellipse.rx <= 0 || ellipse.ry <= 0) {
+    return pass2Png;
+  }
+
+  const [pass1, pass2] = await Promise.all([
+    readRgbaImage(pass1Png),
+    readRgbaImage(pass2Png),
+  ]);
+
+  if (!sameDimensions(pass1, pass2, ellipse)) {
+    console.log('[face-tone-harmonize] skip: image size mismatch', {
+      pass1: `${pass1.width}x${pass1.height}`,
+      pass2: `${pass2.width}x${pass2.height}`,
+      ellipse: `${ellipse.width}x${ellipse.height}`,
+    });
+    return pass2Png;
+  }
+
+  const referenceStats = collectSkinStats(pass1, ellipse, radius => radius >= 1.15 && radius <= 1.45);
+  const targetStats = collectSkinStats(pass2, ellipse, radius => radius <= 1);
+  if (referenceStats.count < MIN_TONE_SAMPLE_COUNT || targetStats.count < MIN_TONE_SAMPLE_COUNT) {
+    console.log('[face-tone-harmonize] skip: skin samples too few', {
+      referenceCount: referenceStats.count,
+      targetCount: targetStats.count,
+    });
+    return pass2Png;
+  }
+
+  const output = Buffer.from(pass2.data);
+  const transferRatio = referenceStats.std.map((std, index) => {
+    const ratio = std / Math.max(1, targetStats.std[index]);
+    return clamp(Number.isFinite(ratio) ? ratio : 1, 0.6, 1.6);
+  });
+  const featherNorm = clamp((Math.min(ellipse.rx, ellipse.ry) * 0.08) / Math.max(1, Math.min(ellipse.rx, ellipse.ry)), 0.01, 0.5);
+
+  for (let y = 0; y < pass2.height; y++) {
+    for (let x = 0; x < pass2.width; x++) {
+      const radius = ellipseDistance(ellipse, x, y);
+      if (radius > 1) continue;
+
+      const offset = (y * pass2.width + x) * pass2.channels;
+      if (!isSkinPixel(pass2, offset)) continue;
+
+      const edgeAlpha = gaussianFeatherAlpha(radius, featherNorm);
+
+      for (let c = 0; c < 3; c++) {
+        const transferred = clamp(
+          (pass2.data[offset + c] - targetStats.mean[c]) * transferRatio[c] + referenceStats.mean[c],
+          0,
+          255,
+        );
+        output[offset + c] = Math.round(pass2.data[offset + c] * (1 - edgeAlpha) + transferred * edgeAlpha);
+      }
+    }
+  }
+
+  return sharp(output, {
+    raw: {
+      width: pass2.width,
+      height: pass2.height,
+      channels: pass2.channels,
+    },
+  })
+    .png()
+    .toBuffer();
 }
