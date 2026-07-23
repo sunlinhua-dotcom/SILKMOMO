@@ -218,6 +218,19 @@ function gaussianFeatherAlpha(radius: number, featherNorm: number): number {
   return clamp(Math.exp(-0.5 * ((radius - fullStrengthRadius) / sigma) ** 2), 0, 1);
 }
 
+function smoothstepRange(min: number, max: number, value: number): number {
+  const t = clamp((value - min) / Math.max(0.001, max - min), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function pixelLuma(image: RawRgbaImage, offset: number): number {
+  return (
+    image.data[offset] * 0.2126
+    + image.data[offset + 1] * 0.7152
+    + image.data[offset + 2] * 0.0722
+  );
+}
+
 function sameDimensions(first: RawRgbaImage, second: RawRgbaImage, ellipse: FaceMaskEllipse): boolean {
   return (
     first.width === second.width
@@ -273,9 +286,10 @@ export async function harmonizeFaceTone(
       if (radius > 1) continue;
 
       const offset = (y * pass2.width + x) * pass2.channels;
-      if (!isSkinPixel(pass2, offset)) continue;
-
       const edgeAlpha = gaussianFeatherAlpha(radius, featherNorm);
+      const darkWeight = smoothstepRange(30, 70, pixelLuma(pass2, offset));
+      const applyAlpha = edgeAlpha * darkWeight * 0.9;
+      if (applyAlpha <= 0) continue;
 
       for (let c = 0; c < 3; c++) {
         const transferred = clamp(
@@ -283,7 +297,7 @@ export async function harmonizeFaceTone(
           0,
           255,
         );
-        output[offset + c] = Math.round(pass2.data[offset + c] * (1 - edgeAlpha) + transferred * edgeAlpha);
+        output[offset + c] = Math.round(pass2.data[offset + c] * (1 - applyAlpha) + transferred * applyAlpha);
       }
     }
   }

@@ -105,6 +105,8 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
   const ellipse = { cx: 100, cy: 100, rx: 40, ry: 50, width, height };
   const referenceSkin = [150, 100, 70];
   const targetSkin = [220, 170, 140];
+  const highlight = [235, 230, 225];
+  const darkOccluder = [25, 25, 28];
   const outside = [150, 100, 70];
 
   const normalizedRadius = (x, y) => Math.sqrt(((x - ellipse.cx) / ellipse.rx) ** 2 + ((y - ellipse.cy) / ellipse.ry) ** 2);
@@ -114,6 +116,8 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
   });
   const pass2 = await pngFromPainter(width, height, (x, y) => {
     const radius = normalizedRadius(x, y);
+    if (x === 100 && y === 90) return highlight;
+    if (x === 100 && y === 110) return darkOccluder;
     return radius <= 1 ? targetSkin : outside;
   });
 
@@ -122,6 +126,8 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
   const { data, info } = await sharp(harmonized).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
   const center = pixelAt(data, info, 100, 100);
+  const highlightAfter = pixelAt(data, info, 100, 90);
+  const darkAfter = pixelAt(data, info, 100, 110);
   const outsideAfter = pixelAt(data, info, 100, 38);
   const innerEdge = pixelAt(data, info, 100, 52);
   const outerEdge = pixelAt(data, info, 100, 49);
@@ -129,6 +135,14 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
   assert.ok(
     colorDistance(center, referenceSkin) < colorDistance(targetSkin, referenceSkin),
     `center ${center.slice(0, 3)} should move toward ${referenceSkin}`,
+  );
+  assert.ok(
+    colorDistance(highlightAfter, referenceSkin) < colorDistance(highlight, referenceSkin) * 0.75,
+    `highlight ${highlightAfter.slice(0, 3)} should also move toward ${referenceSkin}`,
+  );
+  assert.ok(
+    colorDistance(darkAfter, darkOccluder) < 8,
+    `dark occluder ${darkAfter.slice(0, 3)} should stay close to ${darkOccluder}`,
   );
   assert.deepEqual(outsideAfter.slice(0, 3), outside);
   assert.ok(
