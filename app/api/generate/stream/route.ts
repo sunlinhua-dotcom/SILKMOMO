@@ -193,6 +193,29 @@ ${FACE_REALISM_DIRECTIVE}
 `.trim();
 }
 
+function buildDerivedAnchorPortraitPrompt(): string {
+  return `
+Create ONE photorealistic fictional American-Asian / Eurasian mixed fashion model facial-identity portrait card.
+
+This is an infrastructure facial identity anchor for a fashion generation set. The person must be entirely fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
+
+This portrait defines ONLY a new face identity for downstream scene edits. It is NOT a skin-tone reference, NOT a hairstyle reference, NOT a body reference, and NOT a styling reference; those will be taken from each scene-base image later.
+
+Face direction:
+- A refined mixed European-Asian / Asian-American fictional fashion model face.
+- Almond eyes with subtle East-Asian eyelid character, softly defined brows, a gentle refined nose bridge with a natural tip, high cheekbones, a fuller realistic midface, a tapered jawline and chin, and naturally full but precise lips.
+- Memorable, asymmetric, real human features; not generic, not doll-like, not celebrity-like, not copied from any real person.
+
+Image requirements:
+- Half-body portrait, front-facing, neutral to slight warm smile.
+- Plain light neutral background, soft natural lighting that reveals real skin texture (avoid flat glamour lighting that erases pores).
+- Simple realistic hair kept clear enough to reveal the face structure; no text, no logo, no watermark.
+- The output should be a clear facial identity reference for one consistent new fictional model.
+
+${FACE_REALISM_DIRECTIVE}
+`.trim();
+}
+
 // ═══════════════════════════════════════
 // SSE 辅助函数
 // ═══════════════════════════════════════
@@ -686,8 +709,8 @@ export async function POST(req: NextRequest) {
             }
 
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
-            const shouldUseSceneGroupAnchor = modelIdentityMode === 'fresh';
-            // 新模特身份锚：让 N 张是同一个新人（身份对齐、姿势各随底图）。
+            const shouldUseSceneGroupAnchor = modelIdentityMode === 'fresh' || modelIdentityMode === 'follow_scene';
+            // 新模特身份锚：fresh 锁完整新人身份；follow_scene 锁派生脸部身份（肤色/发型/体型仍随场景底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
             // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
             const requestHasSceneGroupAnchor = shouldUseSceneGroupAnchor && !!(
@@ -714,8 +737,11 @@ export async function POST(req: NextRequest) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
+                const anchorPrompt = modelIdentityMode === 'follow_scene'
+                  ? buildDerivedAnchorPortraitPrompt()
+                  : buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig);
                 const anchorResult = await generateBackendImage({
-                  prompt: buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig),
+                  prompt: anchorPrompt,
                   productImages: [],
                   aspectRatio: '3:4',
                 }, 'gemini');
