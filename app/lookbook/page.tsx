@@ -252,8 +252,10 @@ export default function LookbookStudio() {
           ? `同景换品 ${new Date().toLocaleString('zh-CN')}`
           : `组图·换装 ${new Date().toLocaleString('zh-CN')}`),
         moduleType: 'scene',
-        bodyType: DEFAULT_BODY_TYPE.id,
-        skinTone: DEFAULT_SKIN_TONE.id,
+        ...(modelIdentityMode === 'fresh' ? {
+          bodyType: DEFAULT_BODY_TYPE.id,
+          skinTone: DEFAULT_SKIN_TONE.id,
+        } : {}),
         engine: selectedEngine,
         generationQuality: selectedEngine === 'openai' ? selectedQuality : undefined,
         sceneOutputSize,

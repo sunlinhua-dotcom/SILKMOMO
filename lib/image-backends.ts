@@ -16,6 +16,7 @@ import { normalizeReferenceImage } from './reference-image-normalizer';
 export interface ImageInput {
   data: string;     // base64
   mimeType: string;
+  skipNormalization?: boolean; // internal: caller already normalized this exact buffer (used for mask alignment)
 }
 
 export interface BackendInput {
@@ -26,6 +27,7 @@ export interface BackendInput {
   sceneRefImages?: ImageInput[];
   accessoryImages?: ImageInput[];
   anchorImage?: ImageInput;
+  maskImage?: ImageInput; // OpenAI edits mask (PNG alpha: transparent = editable). Gemini ignores it.
   aspectRatio: '1:1' | '3:4' | '4:3' | '9:16' | '16:9';
   quality?: GenerationQuality;
   // 组图（换装）模式：把 sceneRefImages 当作可编辑底图，放在参考图队首（GPT edit 的
@@ -128,7 +130,9 @@ async function normalizeImageList(images: ImageInput[] | undefined, label: strin
   if (!images) return undefined;
   const normalized: ImageInput[] = [];
   for (let i = 0; i < images.length; i += 1) {
-    normalized.push(await normalizeReferenceImage(images[i], `${label}[${i}]`));
+    normalized.push(images[i].skipNormalization
+      ? images[i]
+      : await normalizeReferenceImage(images[i], `${label}[${i}]`));
   }
   return normalized;
 }
@@ -144,6 +148,8 @@ async function normalizeBackendReferenceImages(input: BackendInput): Promise<Bac
     anchorImage: input.anchorImage
       ? await normalizeReferenceImage(input.anchorImage, 'anchor')
       : undefined,
+    // Mask dimensions must match the first final image buffer exactly; never normalize it here.
+    maskImage: input.maskImage,
   };
 }
 
@@ -361,6 +367,12 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
     const ext = r.img.mimeType.split('/')[1] || 'png';
     formData.append('image[]', blob, `${r.tag}-${i}.${ext}`);
   });
+
+  if (input.maskImage) {
+    const maskBuffer = Buffer.from(input.maskImage.data, 'base64');
+    const maskBlob = new Blob([maskBuffer], { type: input.maskImage.mimeType || 'image/png' });
+    formData.append('mask', maskBlob, 'face-mask.png');
+  }
 
   let response: Response;
   try {
