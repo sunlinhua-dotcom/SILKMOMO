@@ -69,6 +69,7 @@ export interface SceneGroupGenerateOptions {
   sceneGroupMode?: 'swap' | 'products'; // swap=N景1品；products=1景N品
   modelIdentityMode?: ModelIdentityMode; // fresh=全新模特；follow_scene=贴近场景模特
   identityPass?: 'combined' | 'garment-only'; // 两步走：Pass1 只换衣；默认仍为现有单步换衣+换人
+  sceneSkinTone?: string;             // 两步走 Pass1：场景人物肤色锁定，用于新露出的手臂/胸口等皮肤
   productLabel?: string;              // products 模式下当前产品组名称（用于 prompt 点名）
   hasAnchor?: boolean;                // 是否附了身份锚（fresh=完整新人；follow_scene=派生脸部身份）
   hasReplacementAccessory?: boolean;  // 用户是否上传了替换附件（否则保留原图附件）
@@ -347,6 +348,7 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
   const {
     garmentDescription,
     identityPass = 'combined',
+    sceneSkinTone,
     hasAnchor = false,
     hasReplacementAccessory = false,
     isRegeneration = false,
@@ -357,6 +359,9 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
   const identityMode: ModelIdentityMode = modelIdentityMode === 'follow_scene' ? 'follow_scene' : 'fresh';
   const isGarmentOnlyPass = identityPass === 'garment-only';
   const effectiveHasAnchor = isGarmentOnlyPass ? false : hasAnchor;
+  const garmentOnlySkinToneRule = isGarmentOnlyPass && sceneSkinTone
+    ? ` The person's skin EVERYWHERE — including any skin newly exposed by the garment change (arms, chest, neckline, shoulders, legs) — must be exactly this skin tone: ${sceneSkinTone}. Newly painted skin MUST match the person's original visible skin (legs/face) in tan depth, warmth, and undertone; paler or pinker newly-exposed skin is a FAILURE.`
+    : '';
 
   const groupModelConsistencyRule = isGarmentOnlyPass
     ? 'Pass1 garment-only edit: keep the scene-base person completely unchanged; only replace garment.'
@@ -399,7 +404,7 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
     ? `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. The scene-base is the single source of truth for pose, composition, crop, lighting, scene, background, environment, color grade, filter, atmosphere, expression, makeup, styling language, and overall photography language. Preserve, pixel-faithfully, EVERYTHING except the product garment listed under REPLACE #1 below:
 - The scene, background, environment, props, furniture, and accessories — including every accessory WORN by the person (headwear/hat, sunglasses/eyeglasses, jewelry, belt, bag, watch, scarf) — all in their exact positions. If headwear or eyewear covers part of the person's face or head in the base image, keep that exact coverage; NEVER remove, lift, or reposition it.
 - The lighting direction, color grade, overall atmosphere, filter, and film grain of the base image.
-- The person's exposure and lighting: light the edited garment EXACTLY as the base person is lit — same light direction, same exposure, same shadows on face and body. If the base person is backlit (e.g., sunset behind them) with the face underexposed or in shadow, the output face MUST stay equally underexposed/in shadow with only the same rim light. Do NOT add fill light, do NOT brighten or evenly light the face, do NOT boost sky saturation or glow. Preserve the subject-to-background exposure RATIO of the base image exactly: if the base subject reads darker than the sky/background, keep the subject equally darker in the output — never lift the subject's exposure toward the background's. Match the base image's sensor noise/grain on skin and fabric. Never shift the person's skin toward paler, pinker, or lighter than the base image — skin tan depth and warmth must match the base person exactly.
+- The person's exposure and lighting: light the edited garment EXACTLY as the base person is lit — same light direction, same exposure, same shadows on face and body. If the base person is backlit (e.g., sunset behind them) with the face underexposed or in shadow, the output face MUST stay equally underexposed/in shadow with only the same rim light. Do NOT add fill light, do NOT brighten or evenly light the face, do NOT boost sky saturation or glow. Preserve the subject-to-background exposure RATIO of the base image exactly: if the base subject reads darker than the sky/background, keep the subject equally darker in the output — never lift the subject's exposure toward the background's. Match the base image's sensor noise/grain on skin and fabric. Never shift the person's skin toward paler, pinker, or lighter than the base image — skin tan depth and warmth must match the base person exactly.${garmentOnlySkinToneRule}
 - The camera angle, framing, crop, and composition. ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
 - The model's exact body pose, gesture, hand/leg position, head orientation if visible, and where they stand in the frame.
 ${freezeIdentityRule}

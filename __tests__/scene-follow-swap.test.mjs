@@ -19,6 +19,21 @@ test('buildSceneGroupPrompt garment-only pass preserves person and omits anchor 
   assert.doesNotMatch(prompt, /REPLACE #2 - Person: Replace the person/i);
 });
 
+test('buildSceneGroupPrompt garment-only pass locks newly exposed skin to scene tone', () => {
+  const prompt = api.buildSceneGroupPrompt({
+    garmentDescription: 'short-sleeve ivory silk blouse',
+    garmentCategories: ['top'],
+    modelIdentityMode: 'follow_scene',
+    identityPass: 'garment-only',
+    sceneSkinTone: 'deep honey bronze tan with warm golden olive undertone',
+  });
+
+  assert.match(prompt, /skin EVERYWHERE/i);
+  assert.match(prompt, /newly exposed by the garment change/i);
+  assert.match(prompt, /deep honey bronze tan with warm golden olive undertone/);
+  assert.match(prompt, /paler or pinker newly-exposed skin is a FAILURE/i);
+});
+
 test('buildFaceSwapPrompt limits edits to visible face and preserves scene skin and occluders', () => {
   assert.equal(typeof api.buildFaceSwapPrompt, 'function');
   const prompt = api.buildFaceSwapPrompt('deep warm olive tan with golden undertone');
