@@ -21,6 +21,25 @@ const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
 
 type LookbookMode = 'swap' | 'products';
+type ModelIdentityMode = 'fresh' | 'follow_scene';
+
+const MODEL_IDENTITY_OPTIONS: Array<{
+  id: ModelIdentityMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'fresh',
+    label: '全新模特',
+    description: '换成明显不同的全新虚构模特，整组保持同一个人。',
+  },
+  {
+    id: 'follow_scene',
+    label: '贴近场景模特',
+    description: '肤色、发型发色、体型都与场景图模特一致，仅对五官做局部调整（部分换脸），最大程度还原参考图。',
+  },
+];
+
 interface ProductGroupDraft {
   id: string;
   label: string;
@@ -107,6 +126,51 @@ function OutputSizeSelector({
   );
 }
 
+function ModelIdentitySelector({
+  value,
+  onChange,
+  radioName,
+}: {
+  value: ModelIdentityMode;
+  onChange: (mode: ModelIdentityMode) => void;
+  radioName: string;
+}) {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {MODEL_IDENTITY_OPTIONS.map((option) => (
+        <label
+          key={option.id}
+          className={`flex h-full cursor-pointer flex-col gap-2 rounded-xl border p-4 transition-all duration-200 ${
+            value === option.id
+              ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.05)]'
+              : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
+          }`}
+        >
+          <input
+            type="radio"
+            name={radioName}
+            value={option.id}
+            checked={value === option.id}
+            onChange={() => onChange(option.id)}
+            className="sr-only"
+          />
+          <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
+            <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 ${
+              value === option.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
+            }`}>
+              {value === option.id && <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />}
+            </span>
+            {option.label}
+          </span>
+          <span className="pl-6 text-xs leading-relaxed text-[var(--color-text-muted)]">
+            {option.description}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
 export default function LookbookStudio() {
   // ── 登录 / 余额 ──
   const [currentUser, setCurrentUser] = useState<{ balanceFen: number } | null>(null);
@@ -123,6 +187,7 @@ export default function LookbookStudio() {
 
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
+  const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('fresh');
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -195,6 +260,7 @@ export default function LookbookStudio() {
         sceneHasModel: true,
         sceneGroup: true,
         sceneGroupMode: mode,
+        modelIdentityMode,
         sceneGroupCategories: mode === 'products'
           ? JSON.stringify(productModeLabels)
           : JSON.stringify(
@@ -412,10 +478,12 @@ export default function LookbookStudio() {
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">④ 模特</h3>
-              <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-                每张都换成<span className="text-[var(--color-accent)] font-medium">同一个全新模特</span>，并保持场景照的姿势、构图与氛围。
-              </p>
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">④ 模特</h3>
+              <ModelIdentitySelector
+                value={modelIdentityMode}
+                onChange={setModelIdentityMode}
+                radioName="swapModelIdentityMode"
+              />
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
@@ -513,10 +581,12 @@ export default function LookbookStudio() {
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">③ 模特</h3>
-              <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
-                每张都使用<span className="text-[var(--color-accent)] font-medium">同一个全新模特</span>，并保持场景图中的姿势、机位和情绪一致。
-              </p>
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">③ 模特</h3>
+              <ModelIdentitySelector
+                value={modelIdentityMode}
+                onChange={setModelIdentityMode}
+                radioName="productsModelIdentityMode"
+              />
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">

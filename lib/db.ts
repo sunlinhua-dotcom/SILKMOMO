@@ -42,6 +42,7 @@ export interface Project {
   // 场景图·组图（换装）模式专属
   sceneGroup?: boolean;              // true=组图（N 张 lookbook → N 张换装图）
   sceneGroupMode?: string;           // swap=N景1品；products=1景N品（非索引字段，不 bump Dexie version）
+  modelIdentityMode?: string;        // fresh=全新模特；follow_scene=贴近场景模特（非索引字段，不 bump Dexie version）
   sceneGroupCategories?: string;     // JSON: 分析出的主品品类（用于展示/回显）
 
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）

@@ -41,6 +41,8 @@ interface ProductGroupPayload {
   categories?: string[];
 }
 
+type ModelIdentityMode = 'fresh' | 'follow_scene';
+
 // 备份-图片严格配对：两侧都 defined 且 shotIndex 相等，或两侧都 undefined（场景图）；
 // 任一侧 undefined 而另一侧 defined → 不匹配（避免通配匹配到错误备份）。
 function backupMatchesImage(b: ImageItem, imgShotIndex: number | undefined): boolean {
@@ -51,6 +53,10 @@ function backupMatchesImage(b: ImageItem, imgShotIndex: number | undefined): boo
 
 function getSceneGroupMode(project: Project | null | undefined): 'swap' | 'products' {
   return project?.sceneGroupMode === 'products' ? 'products' : 'swap';
+}
+
+function getModelIdentityMode(project: Project | null | undefined): ModelIdentityMode {
+  return project?.modelIdentityMode === 'follow_scene' ? 'follow_scene' : 'fresh';
 }
 
 function sortImagesByPrimaryKey(images: ImageItem[]): ImageItem[] {
@@ -377,6 +383,8 @@ export default function TaskDetailPage() {
     // 组图（换装）：迭代维度是「参考图序号」，不是产品镜次
     const isGroup = moduleType === 'scene' && !!freshProject.sceneGroup;
     const sceneGroupMode = getSceneGroupMode(freshProject);
+    const modelIdentityMode = getModelIdentityMode(freshProject);
+    const shouldUseSceneGroupAnchor = isGroup && modelIdentityMode === 'fresh';
     const productGroups = isGroup && sceneGroupMode === 'products'
       ? buildProductGroupsFromImages(freshInputs.products)
       : undefined;
@@ -404,13 +412,13 @@ export default function TaskDetailPage() {
     // 全量生成（未指定 target）不带锚，由服务端首张成功图自锚。注意单张重做前该图已被降级为 result_backup，
     // 故按 type==='result' 过滤能自然排除正在重做的那张。
     let groupAnchor: { data: string; mimeType: string } | undefined;
-    if (isGroup) {
+    if (shouldUseSceneGroupAnchor) {
       const savedAnchor = allImgs.find(i => i.type === 'anchor');
       if (savedAnchor) {
         groupAnchor = { data: savedAnchor.data, mimeType: savedAnchor.mimeType };
       }
     }
-    if (isGroup && !groupAnchor && overrideShotIndexes && overrideShotIndexes.length > 0) {
+    if (shouldUseSceneGroupAnchor && !groupAnchor && overrideShotIndexes && overrideShotIndexes.length > 0) {
       const doneSiblings = allImgs
         .filter(i => i.type === 'result' && typeof i.shotIndex === 'number' && !overrideShotIndexes.includes(i.shotIndex))
         .sort((a, b) => (a.shotIndex as number) - (b.shotIndex as number));
@@ -576,8 +584,9 @@ export default function TaskDetailPage() {
           sceneHasModel: freshProject.sceneHasModel !== false,
           sceneGroup: isGroup || undefined,
           sceneGroupMode: isGroup ? sceneGroupMode : undefined,
+          modelIdentityMode: isGroup ? modelIdentityMode : undefined,
           sceneGroupTargetIndexes: isGroup ? chunkShots : undefined,
-          sceneGroupAnchor: isGroup ? groupAnchorForChunk : undefined,
+          sceneGroupAnchor: shouldUseSceneGroupAnchor ? groupAnchorForChunk : undefined,
           sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
         }),
@@ -649,7 +658,7 @@ export default function TaskDetailPage() {
 
             } else if (eventType === 'anchor') {
               const imageData = payload.imageData as string | undefined;
-              if (isGroup && imageData) {
+              if (shouldUseSceneGroupAnchor && imageData) {
                 groupAnchorForChunk = { data: imageData, mimeType: 'image/png' };
                 try {
                   const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
@@ -765,7 +774,7 @@ export default function TaskDetailPage() {
           if (a) anchorForChunk = { data: a.data, mimeType: 'image/png' };
         } catch { /* 抓不到 anchor 不阻塞,后续块会各自锚定 */ }
       }
-      if (isGroup && !groupAnchorForChunk) {
+      if (shouldUseSceneGroupAnchor && !groupAnchorForChunk) {
         try {
           const savedAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
           if (savedAnchor) {

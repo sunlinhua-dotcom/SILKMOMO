@@ -59,12 +59,15 @@ export interface SceneGenerateOptions {
   customPrompt?: string;       // 用户对该次生成的额外要求
 }
 
+export type ModelIdentityMode = 'fresh' | 'follow_scene';
+
 // 组图（换装）模式：以一张 lookbook 参考图为底图做「编辑」——
 // 冻结场景+姿势，只换服装 + 换成全新匿名模特（规避五官侵权）。
 export interface SceneGroupGenerateOptions {
   garmentDescription?: string;        // AI 分析出的用户主品服装描述
   garmentCategories?: string[];       // 用户上传替换的主品品类（top/pants/dress…），用于点明换哪几件
   sceneGroupMode?: 'swap' | 'products'; // swap=N景1品；products=1景N品
+  modelIdentityMode?: ModelIdentityMode; // fresh=全新模特；follow_scene=贴近场景模特
   productLabel?: string;              // products 模式下当前产品组名称（用于 prompt 点名）
   hasAnchor?: boolean;                // 是否附了「首张成功图」作为新模特身份锚（保证 N 张同一新人）
   hasReplacementAccessory?: boolean;  // 用户是否上传了替换附件（否则保留原图附件）
@@ -346,18 +349,30 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
     hasReplacementAccessory = false,
     isRegeneration = false,
     sceneGroupMode = 'swap',
+    modelIdentityMode = 'fresh',
     productLabel,
   } = options;
+  const identityMode: ModelIdentityMode = modelIdentityMode === 'follow_scene' ? 'follow_scene' : 'fresh';
+
+  const groupModelConsistencyRule = identityMode === 'follow_scene'
+    ? 'the identity baseline for each output is the person in its own scene-base image. Keep the scene-base person\'s skin tone unchanged, hair color/length/styling unchanged, body build unchanged, and age feeling unchanged; apply only a partial adjustment to a few visible facial feature proportions so it is not an exact identity replica.'
+    : hasAnchor
+      ? 'an Anchor Reference Image is provided; precisely match that same fictional model identity across this image and the set.'
+      : 'no anchor is provided; create one new fictional model identity and lock it for the group instead of copying a real reference person.';
+  const groupContinuityRule = identityMode === 'follow_scene'
+    ? 'treat outputs as one set. Keep output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group; model identity follows each image\'s own scene-base person with only partial facial feature adjustment.'
+    : 'treat outputs as one set. Keep model identity, output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group.';
+  const freezeIdentityRule = identityMode === 'follow_scene'
+    ? '- Preserve the base person\'s expression, mood, makeup language, and hair styling; only limited visible facial feature proportions may change for the partial face adjustment. Hair styling means HOW the hair is worn, and in follow-scene mode the base person\'s exact hair color, visible length category, texture, tucked-or-loose state, and overall hairstyle must remain unchanged.'
+    : '- Preserve the base person\'s expression, mood, makeup language, and hair styling; only the facial identity/features may change. Hair styling means HOW the hair is worn (visible length category under headwear, wave pattern, tucked or loose), NOT the base person\'s exact hair color or identity — the new model\'s visible hair color/texture must differ noticeably from the base person\'s.';
 
   const priorityRules = `PRIORITY ORDER FOR THIS GROUP IMAGE (resolve every conflict in this order):
 1. Product fidelity first: the user's product reference image(s) define the garment silhouette, cut, tailoring, proportions, neckline, collar, sleeves, hem, seams, closures, print/pattern, color, fabric texture, and drape. These product details override any clothing visible in the scene-base/lookbook reference. Product reference images are garment-only references; they provide NO background, wall, floor, lighting, color grade, filter, props, or scene context.
-2. Group model consistency second: ${hasAnchor
-  ? 'an Anchor Reference Image is provided; precisely match that same fictional model identity across this image and the set.'
-  : 'no anchor is provided; create one new fictional model identity and lock it for the group instead of copying a real reference person.'}
+2. Group model consistency second: ${groupModelConsistencyRule}
 3. Reference lighting/filter/atmosphere third: the scene-base image is the ONLY authority for lighting direction, shadow softness, color temperature, color grade, filter, atmosphere, scene, background, environment, and overall photographic language; preserve these pixel-faithfully.
 4. Worn accessories fourth: every non-garment item the scene-base person wears or carries (headwear/hat, sunglasses/eyeglasses, jewelry, belt, bag, watch, scarf, shoes) MUST stay present, worn the same way, in the same position, with the same occlusion of face or body. The garment swap and the identity swap NEVER add, remove, lift, or reposition these items.
 5. Reference expression/makeup/styling fifth: keep the scene-base person's expression, mood, makeup language, hairstyle styling, pose, and body attitude, while changing only facial identity as required. Face visibility must match the base: if the base person's face is partially or fully hidden by headwear, eyewear, hair, or camera angle, keep it hidden the same way.
-6. Group continuity sixth: treat outputs as one set. Keep model identity, output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group.`;
+6. Group continuity sixth: ${groupContinuityRule}`;
 
   const regenerationRule = isRegeneration
     ? `REGENERATION / FILL-IN RULE: This image is replacing or filling one image inside an already approved group. Match the approved group anchored by the provided anchor/result image and the existing references. Do not redesign the model, do not change the product interpretation, do not invent a new filter or lighting style, and do not explore a new creative direction.`
@@ -367,10 +382,10 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
   const freeze = `TASK: Edit the FIRST reference image (tagged "scene-base"). Treat it as the exact base photograph. The scene-base is the single source of truth for pose, composition, crop, lighting, scene, background, environment, color grade, filter, atmosphere, expression, makeup, styling language, and overall photography language. Preserve, pixel-faithfully, EVERYTHING except the two elements listed under REPLACE below:
 - The scene, background, environment, props, furniture, and accessories — including every accessory WORN by the person (headwear/hat, sunglasses/eyeglasses, jewelry, belt, bag, watch, scarf) — all in their exact positions. If headwear or eyewear covers part of the person's face or head in the base image, keep that exact coverage; NEVER remove, lift, or reposition it to reveal the new face.
 - The lighting direction, color grade, overall atmosphere, filter, and film grain of the base image.
-- The person's exposure and lighting: light the new person EXACTLY as the base person is lit — same light direction, same exposure, same shadows on face and body. If the base person is backlit (e.g., sunset behind them) with the face underexposed or in shadow, the output face MUST stay equally underexposed/in shadow with only the same rim light. Do NOT add fill light, do NOT brighten or evenly light the face, do NOT boost sky saturation or glow.
+- The person's exposure and lighting: light the new person EXACTLY as the base person is lit — same light direction, same exposure, same shadows on face and body. If the base person is backlit (e.g., sunset behind them) with the face underexposed or in shadow, the output face MUST stay equally underexposed/in shadow with only the same rim light. Do NOT add fill light, do NOT brighten or evenly light the face, do NOT boost sky saturation or glow. Preserve the subject-to-background exposure RATIO of the base image exactly: if the base subject reads darker than the sky/background, keep the subject equally darker in the output — never lift the subject's exposure toward the background's. Match the base image's sensor noise/grain on skin and fabric.
 - The camera angle, framing, crop, and composition. ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
 - The model's exact body pose, gesture, hand/leg position, head orientation if visible, and where they stand in the frame.
-- Preserve the base person's expression, mood, makeup language, and hair styling; only the facial identity/features may change.
+${freezeIdentityRule}
 Product reference images are garment-only inputs. Completely ignore every product-reference background, wall, floor, studio setup, outdoor/indoor scene, prop, lighting direction, shadow, color tone, color filter, and atmosphere. None of those product-reference non-garment elements may appear in the output.
 Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result must look like the SAME photo with only the product garment and the person's identity swapped.`;
 
@@ -389,9 +404,14 @@ Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result m
 
   // 人物替换为全新匿名模特（规避侵权）
   const productIdentityRule = `Any person visible in the "product" reference image(s) is NOT an identity reference. Completely ignore their face, hairstyle, facial features, age, expression, and identity. Use product images ONLY for garment fabric, color, pattern, silhouette, cut, tailoring, and construction.`;
-  const newModel = hasAnchor
-    ? `REPLACE #2 - Person: Replace the person with the SAME fictional model shown in the "anchor" reference image. Precisely match the anchor model's face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling, so this image and the rest of the set clearly depict ONE consistent fictional person. The anchor is the ONLY identity reference. ${productIdentityRule} This model must remain clearly different from the real person in the scene-base image and from any person appearing in the product reference image(s). Keep the anchor identity, but the pose, body position, expression, mood, makeup language, hair styling, lighting, scene, crop, and photography must follow the scene-base image, NOT the anchor. Identity matching applies ONLY to the parts of the face/head actually visible in the scene-base image. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or rotate the head to show more of the anchor's face.`
-    : `REPLACE #2 - Person: Replace the person with a new anonymous fictional model, with moderately changed facial features so the output does not replicate the scene-base person's real identity. Do not make a fixed generic face; create a fashion-appropriate fictional model and keep the same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling locked for this group. ${productIdentityRule} Do NOT reproduce or resemble the base person's facial identity or any product-reference person's facial identity. Keep the same pose, body position, skin-tone range, build, expression, mood, makeup language, hair styling, lighting, crop, and scene as the base image; only swap facial identity/features. Identity replacement applies ONLY to the parts of the face/head actually visible in the scene-base image. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or change the head pose to show the new face.`;
+  let newModel: string;
+  if (identityMode === 'follow_scene') {
+    newModel = `REPLACE #2 - Person: Keep the overall appearance of the person in the scene-base image as the identity baseline for THIS image. Keep the SAME skin tone exactly (do NOT lighten, darken, or change the person's skin tone), the same hair color, the same hair length, the same hair styling, the same hairline visibility, the same body build, the same body proportions, and the same age feeling. Apply ONLY a PARTIAL face adjustment: moderately change a few visible facial-feature proportions (eyes, nose, lips) so the output is not an exact replica of the real person's identity, while the overall read still feels like the scene-base model. ${productIdentityRule} Any person visible in the product reference image(s) is still NOT an identity reference. The product image(s) provide garment details only, never the model identity. Face/head visibility and occlusion must match the scene-base image exactly. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or rotate/change the head pose to show more face.`;
+  } else if (hasAnchor) {
+    newModel = `REPLACE #2 - Person: Replace the person with the SAME fictional model shown in the "anchor" reference image. Precisely match the anchor model's face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling, so this image and the rest of the set clearly depict ONE consistent fictional person. The anchor is the ONLY identity reference. ${productIdentityRule} This model must remain clearly different from the real person in the scene-base image and from any person appearing in the product reference image(s). Keep the anchor identity, but the pose, body position, expression, mood, makeup language, hair styling, lighting, scene, crop, and photography must follow the scene-base image, NOT the anchor. Identity matching applies ONLY to the parts of the face/head actually visible in the scene-base image. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or rotate the head to show more of the anchor's face. Where the anchor's features are occluded in this shot, keep the occlusion; wherever features ARE visible, show the ANCHOR's features (the anchor's hair color, lips, jawline) — NEVER the scene-base person's. Visible hair and face must be recognizably the anchor model, clearly distinct from the scene-base person.`;
+  } else {
+    newModel = `REPLACE #2 - Person: Replace the person with a new anonymous fictional model, with moderately changed facial features so the output does not replicate the scene-base person's real identity. Do not make a fixed generic face; create a fashion-appropriate fictional model and keep the same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling locked for this group. ${productIdentityRule} Do NOT reproduce or resemble the base person's facial identity or any product-reference person's facial identity. Keep the same pose, body position, skin-tone range, build, expression, mood, makeup language, hair styling, lighting, crop, and scene as the base image; only swap facial identity/features. Identity replacement applies ONLY to the parts of the face/head actually visible in the scene-base image. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or change the head pose to show the new face. Keeping the occlusion the SAME never means copying the base person. Wherever any facial feature or hair IS visible, it MUST clearly belong to a DIFFERENT person: noticeably change the visible features (lips, nose, jawline, chin) AND noticeably change the hair color and/or length/texture, so the output person cannot be mistaken for the scene-base person. Keep only the styling language (how the hair is worn under any headwear, the makeup style), never the person's identity.`;
+  }
 
   // 附件处理
   const accessory = hasReplacementAccessory
@@ -405,7 +425,7 @@ CRITICAL RULES (follow strictly):
 - Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change. Never add, remove, or reposition worn accessories.
 - Product reference images are garment references ONLY - ignore any person, face, hairstyle, identity, background, wall, floor, lighting, color tone, filter, prop, or scene element visible in them.
 - The scene-base image is the sole authority for scene, background, lighting, filter, color grade, and atmosphere; preserve them pixel-faithfully.
-- Match the base image's exposure and color grade exactly: no added fill light on the face, no brightening, no beauty relighting, no extra saturation or glow in the sky or on skin.
+- The output must read as the SAME exposure and development as the base photo: same histogram character, same subject-to-background brightness ratio, same white balance, same grain. No added fill light on the face, no brightening, no beauty relighting, no extra saturation or glow in the sky or on skin.
 - Scene-base/lookbook clothing is not a garment design reference; it only shows how clothing sits on the body in that pose.
 - The result must look like a real film photograph, not an illustration, 3D render, beauty-filter image, or synthetic AI fashion render.`.trim();
 
