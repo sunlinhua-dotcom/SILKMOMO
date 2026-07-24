@@ -93,15 +93,52 @@ test('createFaceEditMask subtracts an exact eyewear rectangle while keeping the 
     {
       occluders: ['sunglasses'],
       eyewearBox2d: [400, 350, 550, 650],
+      faceBox2d: [200, 200, 800, 800],
       headPose: 'profile',
     },
   );
   const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
 
-  assert.ok(mask.geometry.eyewearRect);
+  assert.ok(mask.geometry.occluderRects.some(rect => rect.label === 'eyewear'));
   assert.equal(alphaAt(100, 95), 255, 'eyewear center must remain protected');
   assert.equal(alphaAt(65, 120), 0, 'profile nose area outside eyewear must remain editable');
+});
+
+test('createFaceEditMask clamps the ellipse to faceBox2d', async () => {
+  const mask = await masks.createFaceEditMask(
+    { width: 200, height: 200 },
+    [100, 100, 900, 900],
+    {
+      faceBox2d: [250, 250, 750, 750],
+      headPose: 'profile',
+    },
+  );
+  const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
+
+  assert.deepEqual(mask.geometry.faceRect, { left: 50, top: 50, right: 150, bottom: 150 });
+  assert.equal(alphaAt(35, 100), 255, 'ellipse pixels outside faceBox must stay protected');
+  assert.equal(alphaAt(100, 100), 0, 'ellipse pixels inside faceBox remain editable');
+});
+
+test('createFaceEditMask protects a generic hat-brim occluder box', async () => {
+  const mask = await masks.createFaceEditMask(
+    { width: 200, height: 200 },
+    [100, 100, 900, 900],
+    {
+      faceBox2d: [100, 100, 900, 900],
+      occluderBoxes2d: [
+        { label: 'hat brim', box2d: [300, 200, 450, 800] },
+      ],
+    },
+  );
+  const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
+
+  assert.ok(mask.geometry.occluderRects.some(rect => rect.label === 'hat brim'));
+  assert.equal(alphaAt(100, 75), 255, 'hat brim must stay protected');
+  assert.equal(alphaAt(100, 120), 0, 'visible cheek below the brim remains editable');
 });
 
 test('createFaceEditMask falls back to the legacy lower-face crop when eyewear bbox is missing', async () => {
@@ -111,13 +148,14 @@ test('createFaceEditMask falls back to the legacy lower-face crop when eyewear b
     {
       occluders: ['sunglasses'],
       eyewearBox2d: null,
+      faceBox2d: [200, 300, 800, 700],
       headPose: 'profile',
     },
   );
   const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
 
-  assert.equal(mask.geometry.eyewearRect, null);
+  assert.equal(mask.geometry.occluderRects.length, 0);
   assert.equal(alphaAt(500, 440), 255);
   assert.equal(alphaAt(500, 680), 0);
 });
@@ -145,7 +183,10 @@ test('harmonizeFaceTone pulls editable skin toward reference, skips eyewear, and
   const ellipse = { cx: 100, cy: 100, rx: 40, ry: 50, width, height };
   const geometry = {
     ellipse,
-    eyewearRect: { left: 92, top: 94, right: 108, bottom: 106 },
+    faceRect: { left: 0, top: 0, right: width, bottom: height },
+    occluderRects: [
+      { label: 'hat brim', left: 92, top: 94, right: 108, bottom: 106 },
+    ],
   };
   const referenceSkin = [150, 100, 70];
   const targetSkin = [220, 170, 140];
@@ -161,8 +202,9 @@ test('harmonizeFaceTone pulls editable skin toward reference, skips eyewear, and
   });
   const pass2 = await pngFromPainter(width, height, (x, y) => {
     const radius = normalizedRadius(x, y);
-    if (x >= geometry.eyewearRect.left && x < geometry.eyewearRect.right
-      && y >= geometry.eyewearRect.top && y < geometry.eyewearRect.bottom) return eyewearColor;
+    const occluder = geometry.occluderRects[0];
+    if (x >= occluder.left && x < occluder.right
+      && y >= occluder.top && y < occluder.bottom) return eyewearColor;
     if (x === 100 && y === 90) return highlight;
     if (x === 100 && y === 110) return darkOccluder;
     return radius <= 1 ? targetSkin : outside;
@@ -206,7 +248,10 @@ test('compositeFaceRegion takes swap pixels inside ellipse, feathers boundary, a
   const ellipse = { cx: 40, cy: 40, rx: 20, ry: 20, width, height };
   const geometry = {
     ellipse,
-    eyewearRect: { left: 32, top: 34, right: 48, bottom: 42 },
+    faceRect: { left: 20, top: 20, right: 60, bottom: 60 },
+    occluderRects: [
+      { label: 'sunglasses', left: 32, top: 34, right: 48, bottom: 42 },
+    ],
   };
   const pass1Color = [40, 50, 60];
   const swapColor = [210, 80, 30];
@@ -228,4 +273,38 @@ test('compositeFaceRegion takes swap pixels inside ellipse, feathers boundary, a
   assert.ok(colorDistance(editableFace, swapColor) < 2, `editable face ${editableFace.slice(0, 3)} should be swap-colored`);
   assert.ok(colorDistance(edge, pass1Color) > 1, `edge ${edge.slice(0, 3)} should include some swap color`);
   assert.ok(colorDistance(edge, swapColor) > 1, `edge ${edge.slice(0, 3)} should be feathered, not full swap`);
+});
+
+test('compositeFaceRegion uses a continuous YCbCr skin weight with a nonzero floor', async () => {
+  const width = 120;
+  const height = 120;
+  const ellipse = { cx: 60, cy: 60, rx: 50, ry: 50, width, height };
+  const geometry = {
+    ellipse,
+    faceRect: { left: 5, top: 5, right: 115, bottom: 115 },
+    occluderRects: [],
+  };
+  const delta = [30, 20, -20];
+  const colors = {
+    skin: [180, 120, 90],
+    transition: [145, 135, 145],
+    sky: [80, 150, 210],
+  };
+  const baseColorAt = x => (x < 50 ? colors.skin : x < 80 ? colors.transition : colors.sky);
+  const pass1 = await pngFromPainter(width, height, x => baseColorAt(x));
+  const swap = await pngFromPainter(width, height, x => {
+    const base = baseColorAt(x);
+    return [base[0] + delta[0], base[1] + delta[1], base[2] + delta[2]];
+  });
+
+  const composited = await masks.compositeFaceRegion(pass1, swap, geometry);
+  const { data, info } = await sharp(composited).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const effectiveAlpha = (x, base) => (pixelAt(data, info, x, 60)[0] - base[0]) / delta[0];
+  const skinAlpha = effectiveAlpha(30, colors.skin);
+  const transitionAlpha = effectiveAlpha(65, colors.transition);
+  const skyAlpha = effectiveAlpha(90, colors.sky);
+
+  assert.ok(skinAlpha > 0.9, `skin alpha ${skinAlpha} should stay strong`);
+  assert.ok(transitionAlpha < skinAlpha && transitionAlpha > skyAlpha, `weights should transition smoothly: ${skinAlpha}, ${transitionAlpha}, ${skyAlpha}`);
+  assert.ok(skyAlpha >= 0.1 && skyAlpha < 0.3, `non-skin alpha ${skyAlpha} must decay without becoming a hole`);
 });
