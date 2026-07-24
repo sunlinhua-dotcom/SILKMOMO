@@ -29,14 +29,14 @@ const MODEL_IDENTITY_OPTIONS: Array<{
   description: string;
 }> = [
   {
-    id: 'fresh',
-    label: '全新模特',
-    description: '换成明显不同的全新虚构模特，整组保持同一个人。',
-  },
-  {
     id: 'follow_scene',
     label: '贴近场景模特',
     description: '肤色、发型发色、体型都与场景图模特一致，仅对五官做局部调整（部分换脸），最大程度还原参考图。',
+  },
+  {
+    id: 'fresh',
+    label: '全新模特',
+    description: '换成明显不同的全新虚构模特，整组保持同一个人。',
   },
 ];
 
@@ -187,7 +187,7 @@ export default function LookbookStudio() {
 
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
-  const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('fresh');
+  const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('follow_scene');
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -465,7 +465,16 @@ export default function LookbookStudio() {
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">③ 替换附件（选填）</h3>
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">③ 模特</h3>
+              <ModelIdentitySelector
+                value={modelIdentityMode}
+                onChange={setModelIdentityMode}
+                radioName="swapModelIdentityMode"
+              />
+            </div>
+
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
+              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-1">④ 替换附件（选填）</h3>
               <p className="text-xs text-[var(--color-text-muted)] mb-3">
                 留空则保留场景主图里原有的包、首饰、鞋帽等附件；上传则替换。
               </p>
@@ -476,15 +485,6 @@ export default function LookbookStudio() {
                 images={accessoryImages}
                 onImagesChange={setAccessoryImages}
                 variant="gold"
-              />
-            </div>
-
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text)] mb-4">④ 模特</h3>
-              <ModelIdentitySelector
-                value={modelIdentityMode}
-                onChange={setModelIdentityMode}
-                radioName="swapModelIdentityMode"
               />
             </div>
 
