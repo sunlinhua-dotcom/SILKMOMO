@@ -86,27 +86,72 @@ test('isUsableFaceRegion rejects tiny and hidden face regions', async () => {
   assert.equal(masks.isUsableFaceRegion({ visibility: 'partial', visibleFaceBox2d: [200, 300, 550, 700] }), true);
 });
 
-test('createFaceEditMask excludes upper face when eyewear occludes the eyes', async () => {
+test('createFaceEditMask subtracts an exact eyewear rectangle while keeping the profile nose editable', async () => {
   const mask = await masks.createFaceEditMask(
-    { width: 1000, height: 1000 },
-    [200, 300, 800, 700],
-    ['sunglasses'],
+    { width: 200, height: 200 },
+    [200, 200, 800, 800],
+    {
+      occluders: ['sunglasses'],
+      eyewearBox2d: [400, 350, 550, 650],
+      headPose: 'profile',
+    },
   );
   const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
 
+  assert.ok(mask.geometry.eyewearRect);
+  assert.equal(alphaAt(100, 95), 255, 'eyewear center must remain protected');
+  assert.equal(alphaAt(65, 120), 0, 'profile nose area outside eyewear must remain editable');
+});
+
+test('createFaceEditMask falls back to the legacy lower-face crop when eyewear bbox is missing', async () => {
+  const mask = await masks.createFaceEditMask(
+    { width: 1000, height: 1000 },
+    [200, 300, 800, 700],
+    {
+      occluders: ['sunglasses'],
+      eyewearBox2d: null,
+      headPose: 'profile',
+    },
+  );
+  const { data, info } = await sharp(Buffer.from(mask.data, 'base64')).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const alphaAt = (x, y) => data[(y * info.width + x) * info.channels + 3];
+
+  assert.equal(mask.geometry.eyewearRect, null);
   assert.equal(alphaAt(500, 440), 255);
   assert.equal(alphaAt(500, 680), 0);
 });
 
-test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the edge', async () => {
+test('profile ellipse preserves the bbox aspect ratio and adds silhouette safety margin', async () => {
+  const frontal = await masks.createFaceEditMask(
+    { width: 1000, height: 1000 },
+    [100, 400, 900, 600],
+    { headPose: 'frontal' },
+  );
+  const profile = await masks.createFaceEditMask(
+    { width: 1000, height: 1000 },
+    [100, 400, 900, 600],
+    { headPose: 'profile' },
+  );
+
+  assert.ok(profile.geometry.ellipse.rx < profile.geometry.ellipse.ry / 2);
+  assert.ok(profile.geometry.ellipse.rx > frontal.geometry.ellipse.rx);
+  assert.ok(profile.geometry.ellipse.ry > frontal.geometry.ellipse.ry);
+});
+
+test('harmonizeFaceTone pulls editable skin toward reference, skips eyewear, and feathers the edge', async () => {
   const width = 200;
   const height = 200;
   const ellipse = { cx: 100, cy: 100, rx: 40, ry: 50, width, height };
+  const geometry = {
+    ellipse,
+    eyewearRect: { left: 92, top: 94, right: 108, bottom: 106 },
+  };
   const referenceSkin = [150, 100, 70];
   const targetSkin = [220, 170, 140];
   const highlight = [235, 230, 225];
   const darkOccluder = [25, 25, 28];
+  const eyewearColor = [245, 210, 180];
   const outside = [150, 100, 70];
 
   const normalizedRadius = (x, y) => Math.sqrt(((x - ellipse.cx) / ellipse.rx) ** 2 + ((y - ellipse.cy) / ellipse.ry) ** 2);
@@ -116,16 +161,19 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
   });
   const pass2 = await pngFromPainter(width, height, (x, y) => {
     const radius = normalizedRadius(x, y);
+    if (x >= geometry.eyewearRect.left && x < geometry.eyewearRect.right
+      && y >= geometry.eyewearRect.top && y < geometry.eyewearRect.bottom) return eyewearColor;
     if (x === 100 && y === 90) return highlight;
     if (x === 100 && y === 110) return darkOccluder;
     return radius <= 1 ? targetSkin : outside;
   });
 
   assert.equal(typeof masks.harmonizeFaceTone, 'function');
-  const harmonized = await masks.harmonizeFaceTone(pass1, pass2, ellipse);
+  const harmonized = await masks.harmonizeFaceTone(pass1, pass2, geometry);
   const { data, info } = await sharp(harmonized).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  const center = pixelAt(data, info, 100, 100);
+  const center = pixelAt(data, info, 100, 120);
+  const eyewearAfter = pixelAt(data, info, 100, 100);
   const highlightAfter = pixelAt(data, info, 100, 90);
   const darkAfter = pixelAt(data, info, 100, 110);
   const outsideAfter = pixelAt(data, info, 100, 38);
@@ -136,6 +184,7 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
     colorDistance(center, referenceSkin) < colorDistance(targetSkin, referenceSkin),
     `center ${center.slice(0, 3)} should move toward ${referenceSkin}`,
   );
+  assert.deepEqual(eyewearAfter.slice(0, 3), eyewearColor);
   assert.ok(
     colorDistance(highlightAfter, referenceSkin) < colorDistance(highlight, referenceSkin) * 0.75,
     `highlight ${highlightAfter.slice(0, 3)} should also move toward ${referenceSkin}`,
@@ -155,6 +204,10 @@ test('compositeFaceRegion takes swap pixels inside ellipse, feathers boundary, a
   const width = 80;
   const height = 80;
   const ellipse = { cx: 40, cy: 40, rx: 20, ry: 20, width, height };
+  const geometry = {
+    ellipse,
+    eyewearRect: { left: 32, top: 34, right: 48, bottom: 42 },
+  };
   const pass1Color = [40, 50, 60];
   const swapColor = [210, 80, 30];
 
@@ -162,15 +215,17 @@ test('compositeFaceRegion takes swap pixels inside ellipse, feathers boundary, a
   const smallerSwap = await pngFromPainter(40, 40, () => swapColor);
 
   assert.equal(typeof masks.compositeFaceRegion, 'function');
-  const composited = await masks.compositeFaceRegion(pass1, smallerSwap, ellipse);
+  const composited = await masks.compositeFaceRegion(pass1, smallerSwap, geometry);
   const { data, info } = await sharp(composited).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 
-  const center = pixelAt(data, info, 40, 40);
+  const protectedEyewear = pixelAt(data, info, 40, 38);
+  const editableFace = pixelAt(data, info, 40, 48);
   const outside = pixelAt(data, info, 8, 8);
   const edge = pixelAt(data, info, 59, 40);
 
   assert.deepEqual(outside.slice(0, 3), pass1Color);
-  assert.ok(colorDistance(center, swapColor) < 2, `center ${center.slice(0, 3)} should be swap-colored`);
+  assert.deepEqual(protectedEyewear.slice(0, 3), pass1Color);
+  assert.ok(colorDistance(editableFace, swapColor) < 2, `editable face ${editableFace.slice(0, 3)} should be swap-colored`);
   assert.ok(colorDistance(edge, pass1Color) > 1, `edge ${edge.slice(0, 3)} should include some swap color`);
   assert.ok(colorDistance(edge, swapColor) > 1, `edge ${edge.slice(0, 3)} should be feathered, not full swap`);
 });

@@ -222,12 +222,15 @@ export interface FaceRegionAnalysis {
   skinTone: string;
   faceBox2d: [number, number, number, number];
   visibleFaceBox2d: [number, number, number, number];
+  eyewearBox2d: [number, number, number, number] | null;
+  headPose: 'frontal' | 'three-quarter' | 'profile';
   occluders: string[];
   visibility: 'clear' | 'partial' | 'heavy' | 'none';
   confidence: number;
 }
 
 const FACE_VISIBILITIES = new Set(['clear', 'partial', 'heavy', 'none']);
+const FACE_HEAD_POSES = new Set(['frontal', 'three-quarter', 'profile']);
 
 function parseBox2d(value: unknown): [number, number, number, number] | null {
   if (!Array.isArray(value) || value.length !== 4) return null;
@@ -289,6 +292,8 @@ Return exactly this JSON shape:
   "skinTone": "English description of the person's visible skin tone, including tan depth and warm/cool undertone",
   "faceBox2d": [120, 420, 330, 610],
   "visibleFaceBox2d": [150, 440, 300, 590],
+  "eyewearBox2d": [155, 435, 215, 600],
+  "headPose": "frontal|three-quarter|profile",
   "occluders": ["sunglasses", "hat brim", "hair"],
   "visibility": "clear|partial|heavy|none",
   "confidence": 0.0
@@ -297,8 +302,11 @@ Return exactly this JSON shape:
 Rules:
 - skinTone must describe the scene person's real visible skin, not a beauty ideal. Include tan depth and undertone, e.g. "medium-deep sun-tanned warm golden olive".
 - faceBox2d is the full estimated face/head skin area if unobstructed.
-- visibleFaceBox2d must include ONLY currently visible facial skin/features to edit. Exclude sunglasses, eyeglasses, hat brim, hair, hands, jewelry, masks, deep cast shadows that hide features, and all non-skin occluding objects.
-- If the person wears sunglasses or eyeglasses, you MUST list them in occluders, and visibleFaceBox2d MUST completely exclude lens and frame regions. Usually this means visibleFaceBox2d should start below the eyewear and include only the lower face such as nose tip, lips, chin, and jawline.
+- visibleFaceBox2d is the bounding envelope of all currently visible, identity-bearing facial skin and contours. It may geometrically overlap an occluder because it is a box, not a segmentation mask.
+- For a three-quarter or profile face, visibleFaceBox2d MUST include the complete visible nose bridge and nose-tip silhouette, lips, chin point, jawline, and cheek contour. It must not start below the eyewear; eyewearBox2d removes the lenses and frame separately.
+- eyewearBox2d must be the tight bounding box of all visible lenses plus the complete frame, excluding hat, hair, eyebrows, nose, and cheek. Use null when there are no sunglasses or eyeglasses.
+- headPose describes the face orientation: frontal, three-quarter, or profile.
+- List sunglasses or eyeglasses in occluders. Also list hat brim, hair, hands, jewelry, masks, deep cast shadows that hide features, and other non-skin occluding objects.
 - visibility: clear = most facial features visible; partial = useful visible face remains but some occlusion/crop; heavy = too occluded for reliable face swap; none = no visible face.
 - If no reliable face is visible, set visibility to "none" and still keep JSON valid.
 - JSON only, no markdown, no explanations.`,
@@ -332,16 +340,22 @@ Rules:
     const skinTone = sanitizeSkinTone(parsed.skinTone);
     const faceBox2d = parseBox2d(parsed.faceBox2d);
     const visibleFaceBox2d = parseBox2d(parsed.visibleFaceBox2d);
+    const eyewearBox2d = parseBox2d(parsed.eyewearBox2d);
+    const headPose = typeof parsed.headPose === 'string' && FACE_HEAD_POSES.has(parsed.headPose)
+      ? parsed.headPose as FaceRegionAnalysis['headPose']
+      : null;
     const visibility = typeof parsed.visibility === 'string' && FACE_VISIBILITIES.has(parsed.visibility)
       ? parsed.visibility as FaceRegionAnalysis['visibility']
       : null;
 
-    if (!skinTone || !faceBox2d || !visibleFaceBox2d || !visibility) return null;
+    if (!skinTone || !faceBox2d || !visibleFaceBox2d || !headPose || !visibility) return null;
 
     return {
       skinTone,
       faceBox2d,
       visibleFaceBox2d,
+      eyewearBox2d,
+      headPose,
       occluders: sanitizeOccluders(parsed.occluders),
       visibility,
       confidence: clamp01(parsed.confidence),
