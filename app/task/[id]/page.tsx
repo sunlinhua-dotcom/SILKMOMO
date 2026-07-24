@@ -1729,10 +1729,16 @@ export default function TaskDetailPage() {
                   variant="full"
                 />
               )}
-              <ModelSelector
-                selectedModel={newModelId}
-                onSelect={setNewModelId}
-              />
+              {isFollowSceneGroupTask ? (
+                <div className="rounded-xl border border-[var(--color-border-light)] bg-[var(--color-background)] px-4 py-3 text-sm font-medium text-[var(--color-text-secondary)]">
+                  肤色·体型·发型跟随场景图
+                </div>
+              ) : (
+                <ModelSelector
+                  selectedModel={newModelId}
+                  onSelect={setNewModelId}
+                />
+              )}
             </div>
 
             {moduleType === 'product' && getShotCount() > 1 ? (
