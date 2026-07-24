@@ -3,6 +3,7 @@ import { normalizeReferenceImage, type ReferenceImageInput } from './reference-i
 
 export type FaceBox2d = [number, number, number, number]; // [ymin, xmin, ymax, xmax], normalized 0-1000
 export type FaceVisibility = 'clear' | 'partial' | 'heavy' | 'none';
+export type FaceHeadPose = 'frontal' | 'three-quarter' | 'profile';
 
 export interface FaceRegionForMask {
   visibility: FaceVisibility;
@@ -24,8 +25,26 @@ export interface FaceMaskEllipse {
   height: number;
 }
 
-export interface FaceEditMaskImage extends ReferenceImageInput {
+export interface FaceMaskRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface FaceMaskGeometry {
   ellipse: FaceMaskEllipse;
+  eyewearRect: FaceMaskRect | null;
+}
+
+export interface FaceEditMaskImage extends ReferenceImageInput {
+  geometry: FaceMaskGeometry;
+}
+
+export interface CreateFaceEditMaskOptions {
+  occluders?: string[];
+  eyewearBox2d?: FaceBox2d | null;
+  headPose?: FaceHeadPose;
 }
 
 interface RawRgbaImage {
@@ -43,6 +62,9 @@ interface SkinStats {
 
 const MIN_FACE_AREA_RATIO = 0.01;
 const MASK_MARGIN_RATIO = 0.04;
+const PROFILE_MASK_MARGIN_RATIO = 0.08;
+const EYEWEAR_MARGIN_RATIO = 0.04;
+const EYEWEAR_FEATHER_RATIO = 0.04;
 const MIN_TONE_SAMPLE_COUNT = 500;
 const EYEWEAR_OCCLUDER_RE = /sun?glass|eye ?glass|glasses|eyewear/i;
 
@@ -88,12 +110,18 @@ function adjustBoxForOccluders(box: FaceBox2d, occluders: string[] | undefined):
   return { box: [raisedYmin, xmin, ymax, xmax], minTop: raisedYmin };
 }
 
-function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: number): FaceMaskEllipse {
+function boxToEllipse(
+  box: FaceBox2d,
+  width: number,
+  height: number,
+  marginRatio: number,
+  minTop?: number,
+): FaceMaskEllipse {
   const [ymin, xmin, ymax, xmax] = box;
   const boxWidth = ((xmax - xmin) / 1000) * width;
   const boxHeight = ((ymax - ymin) / 1000) * height;
-  const marginX = boxWidth * MASK_MARGIN_RATIO;
-  const marginY = boxHeight * MASK_MARGIN_RATIO;
+  const marginX = boxWidth * marginRatio;
+  const marginY = boxHeight * marginRatio;
 
   const left = clamp((xmin / 1000) * width - marginX, 0, width);
   const right = clamp((xmax / 1000) * width + marginX, 0, width);
@@ -111,21 +139,58 @@ function boxToEllipse(box: FaceBox2d, width: number, height: number, minTop?: nu
   };
 }
 
+function boxToPixelRect(box: FaceBox2d, width: number, height: number): FaceMaskRect {
+  const [ymin, xmin, ymax, xmax] = box;
+  const boxWidth = ((xmax - xmin) / 1000) * width;
+  const boxHeight = ((ymax - ymin) / 1000) * height;
+  const marginX = Math.max(1, boxWidth * EYEWEAR_MARGIN_RATIO);
+  const marginY = Math.max(1, boxHeight * EYEWEAR_MARGIN_RATIO);
+
+  return {
+    left: clamp((xmin / 1000) * width - marginX, 0, width),
+    top: clamp((ymin / 1000) * height - marginY, 0, height),
+    right: clamp((xmax / 1000) * width + marginX, 0, width),
+    bottom: clamp((ymax / 1000) * height + marginY, 0, height),
+  };
+}
+
 export async function createFaceEditMask(
   image: Pick<NormalizedFacePassImage, 'width' | 'height'>,
   visibleFaceBox2d: FaceBox2d,
-  occluders?: string[],
+  options: CreateFaceEditMaskOptions = {},
 ): Promise<FaceEditMaskImage> {
   if (!isValidBox(visibleFaceBox2d)) {
     throw new Error('可见脸部 bbox 非法');
   }
   const { width, height } = image;
-  const adjusted = adjustBoxForOccluders(visibleFaceBox2d, occluders);
-  const ellipse = boxToEllipse(adjusted.box, width, height, adjusted.minTop);
+  const hasEyewear = hasEyewearOccluder(options.occluders);
+  const eyewearBox2d = isValidBox(options.eyewearBox2d)
+    ? options.eyewearBox2d
+    : null;
+  const adjusted = hasEyewear && !eyewearBox2d
+    ? adjustBoxForOccluders(visibleFaceBox2d, options.occluders)
+    : { box: visibleFaceBox2d };
+  const marginRatio = options.headPose === 'profile'
+    ? PROFILE_MASK_MARGIN_RATIO
+    : MASK_MARGIN_RATIO;
+  const ellipse = boxToEllipse(adjusted.box, width, height, marginRatio, adjusted.minTop);
+  const eyewearRect = eyewearBox2d
+    ? boxToPixelRect(eyewearBox2d, width, height)
+    : null;
   const ellipseSvg = Buffer.from(`
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
   <ellipse cx="${ellipse.cx}" cy="${ellipse.cy}" rx="${ellipse.rx}" ry="${ellipse.ry}" fill="black"/>
 </svg>`);
+  const eyewearSvg = eyewearRect
+    ? Buffer.from(`
+<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+  <rect x="${eyewearRect.left}" y="${eyewearRect.top}" width="${eyewearRect.right - eyewearRect.left}" height="${eyewearRect.bottom - eyewearRect.top}" fill="black"/>
+</svg>`)
+    : null;
+  const composites: sharp.OverlayOptions[] = [
+    { input: ellipseSvg, blend: 'dest-out' },
+  ];
+  if (eyewearSvg) composites.push({ input: eyewearSvg, blend: 'over' });
 
   const buffer = await sharp({
     create: {
@@ -135,11 +200,15 @@ export async function createFaceEditMask(
       background: { r: 0, g: 0, b: 0, alpha: 1 },
     },
   })
-    .composite([{ input: ellipseSvg, blend: 'dest-out' }])
+    .composite(composites)
     .png()
     .toBuffer();
 
-  return { data: buffer.toString('base64'), mimeType: 'image/png', ellipse };
+  return {
+    data: buffer.toString('base64'),
+    mimeType: 'image/png',
+    geometry: { ellipse, eyewearRect },
+  };
 }
 
 async function readRgbaImage(buffer: Buffer): Promise<RawRgbaImage> {
@@ -162,6 +231,24 @@ function ellipseDistance(ellipse: FaceMaskEllipse, x: number, y: number): number
   return Math.sqrt(dx * dx + dy * dy);
 }
 
+function isInsideRect(rect: FaceMaskRect | null, x: number, y: number): boolean {
+  if (!rect) return false;
+  const px = x + 0.5;
+  const py = y + 0.5;
+  return px >= rect.left && px <= rect.right && py >= rect.top && py <= rect.bottom;
+}
+
+function exclusionFeatherAlpha(rect: FaceMaskRect | null, x: number, y: number, featherPx: number): number {
+  if (!rect) return 1;
+  if (isInsideRect(rect, x, y)) return 0;
+
+  const px = x + 0.5;
+  const py = y + 0.5;
+  const dx = px < rect.left ? rect.left - px : px > rect.right ? px - rect.right : 0;
+  const dy = py < rect.top ? rect.top - py : py > rect.bottom ? py - rect.bottom : 0;
+  return smoothstepRange(0, featherPx, Math.hypot(dx, dy));
+}
+
 function isSkinPixel(image: RawRgbaImage, offset: number): boolean {
   const r = image.data[offset];
   const g = image.data[offset + 1];
@@ -176,9 +263,10 @@ function isSkinPixel(image: RawRgbaImage, offset: number): boolean {
 
 function collectSkinStats(
   image: RawRgbaImage,
-  ellipse: FaceMaskEllipse,
+  geometry: FaceMaskGeometry,
   acceptsRadius: (radius: number) => boolean,
 ): SkinStats {
+  const { ellipse, eyewearRect } = geometry;
   const sum: [number, number, number] = [0, 0, 0];
   const sumSq: [number, number, number] = [0, 0, 0];
   let count = 0;
@@ -187,6 +275,7 @@ function collectSkinStats(
     for (let x = 0; x < image.width; x++) {
       const radius = ellipseDistance(ellipse, x, y);
       if (!acceptsRadius(radius)) continue;
+      if (isInsideRect(eyewearRect, x, y)) continue;
 
       const offset = (y * image.width + x) * image.channels;
       if (!isSkinPixel(image, offset)) continue;
@@ -231,7 +320,8 @@ function pixelLuma(image: RawRgbaImage, offset: number): number {
   );
 }
 
-function sameDimensions(first: RawRgbaImage, second: RawRgbaImage, ellipse: FaceMaskEllipse): boolean {
+function sameDimensions(first: RawRgbaImage, second: RawRgbaImage, geometry: FaceMaskGeometry): boolean {
+  const { ellipse } = geometry;
   return (
     first.width === second.width
     && first.height === second.height
@@ -243,8 +333,9 @@ function sameDimensions(first: RawRgbaImage, second: RawRgbaImage, ellipse: Face
 export async function harmonizeFaceTone(
   pass1Png: Buffer,
   pass2Png: Buffer,
-  ellipse: FaceMaskEllipse,
+  geometry: FaceMaskGeometry,
 ): Promise<Buffer> {
+  const { ellipse, eyewearRect } = geometry;
   if (!Number.isFinite(ellipse.cx) || !Number.isFinite(ellipse.cy) || ellipse.rx <= 0 || ellipse.ry <= 0) {
     return pass2Png;
   }
@@ -254,7 +345,7 @@ export async function harmonizeFaceTone(
     readRgbaImage(pass2Png),
   ]);
 
-  if (!sameDimensions(pass1, pass2, ellipse)) {
+  if (!sameDimensions(pass1, pass2, geometry)) {
     console.log('[face-tone-harmonize] skip: image size mismatch', {
       pass1: `${pass1.width}x${pass1.height}`,
       pass2: `${pass2.width}x${pass2.height}`,
@@ -263,8 +354,8 @@ export async function harmonizeFaceTone(
     return pass2Png;
   }
 
-  const referenceStats = collectSkinStats(pass1, ellipse, radius => radius >= 1.15 && radius <= 1.45);
-  const targetStats = collectSkinStats(pass2, ellipse, radius => radius <= 1);
+  const referenceStats = collectSkinStats(pass1, geometry, radius => radius >= 1.15 && radius <= 1.45);
+  const targetStats = collectSkinStats(pass2, geometry, radius => radius <= 1);
   if (referenceStats.count < MIN_TONE_SAMPLE_COUNT || targetStats.count < MIN_TONE_SAMPLE_COUNT) {
     console.log('[face-tone-harmonize] skip: skin samples too few', {
       referenceCount: referenceStats.count,
@@ -279,6 +370,7 @@ export async function harmonizeFaceTone(
     return clamp(Number.isFinite(ratio) ? ratio : 1, 0.6, 1.6);
   });
   const featherNorm = clamp((Math.min(ellipse.rx, ellipse.ry) * 0.08) / Math.max(1, Math.min(ellipse.rx, ellipse.ry)), 0.01, 0.5);
+  const exclusionFeatherPx = Math.max(1, Math.min(ellipse.rx, ellipse.ry) * EYEWEAR_FEATHER_RATIO);
 
   for (let y = 0; y < pass2.height; y++) {
     for (let x = 0; x < pass2.width; x++) {
@@ -288,7 +380,8 @@ export async function harmonizeFaceTone(
       const offset = (y * pass2.width + x) * pass2.channels;
       const edgeAlpha = gaussianFeatherAlpha(radius, featherNorm);
       const darkWeight = smoothstepRange(30, 70, pixelLuma(pass2, offset));
-      const applyAlpha = edgeAlpha * darkWeight * 0.9;
+      const exclusionAlpha = exclusionFeatherAlpha(eyewearRect, x, y, exclusionFeatherPx);
+      const applyAlpha = edgeAlpha * exclusionAlpha * darkWeight * 0.9;
       if (applyAlpha <= 0) continue;
 
       for (let c = 0; c < 3; c++) {
@@ -316,8 +409,9 @@ export async function harmonizeFaceTone(
 export async function compositeFaceRegion(
   pass1Png: Buffer,
   swapPng: Buffer,
-  ellipse: FaceMaskEllipse,
+  geometry: FaceMaskGeometry,
 ): Promise<Buffer> {
+  const { ellipse, eyewearRect } = geometry;
   if (!Number.isFinite(ellipse.cx) || !Number.isFinite(ellipse.cy) || ellipse.rx <= 0 || ellipse.ry <= 0) {
     return pass1Png;
   }
@@ -339,13 +433,15 @@ export async function compositeFaceRegion(
   const swap = await readRgbaImage(swapBuffer);
   const output = Buffer.from(pass1.data);
   const featherNorm = clamp((Math.min(ellipse.rx, ellipse.ry) * 0.08) / Math.max(1, Math.min(ellipse.rx, ellipse.ry)), 0.01, 0.5);
+  const exclusionFeatherPx = Math.max(1, Math.min(ellipse.rx, ellipse.ry) * EYEWEAR_FEATHER_RATIO);
 
   for (let y = 0; y < pass1.height; y++) {
     for (let x = 0; x < pass1.width; x++) {
       const radius = ellipseDistance(ellipse, x, y);
       if (radius > 1) continue;
 
-      const alpha = gaussianFeatherAlpha(radius, featherNorm);
+      const alpha = gaussianFeatherAlpha(radius, featherNorm)
+        * exclusionFeatherAlpha(eyewearRect, x, y, exclusionFeatherPx);
       if (alpha <= 0) continue;
 
       const offset = (y * pass1.width + x) * pass1.channels;

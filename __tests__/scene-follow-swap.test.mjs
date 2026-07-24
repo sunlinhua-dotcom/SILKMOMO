@@ -87,6 +87,9 @@ test('follow_scene two-pass activates per image only when a derived anchor exist
   assert.match(routeSource, /buildFaceSwapPrompt\(faceAnalysis\.skinTone, \{/);
   assert.match(routeSource, /lowerFaceOnly/);
   assert.match(routeSource, /occluders: faceAnalysis\.occluders/);
+  assert.match(routeSource, /eyewearBox2d: faceAnalysis\.eyewearBox2d/);
+  assert.match(routeSource, /headPose: faceAnalysis\.headPose/);
+  assert.match(routeSource, /maskImage\.geometry/);
   assert.match(routeSource, /if \(useFollowSceneTwoPass && !twoPassActive\)/);
   assert.match(routeSource, /派生锚缺失，回退单步换脸/);
   assert.doesNotMatch(routeSource, /if \(useFollowSceneTwoPass && pass1Result\.success && pass1Result\.data\)/);

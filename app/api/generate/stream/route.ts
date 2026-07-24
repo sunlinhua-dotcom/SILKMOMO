@@ -929,7 +929,11 @@ export async function POST(req: NextRequest) {
                     if (!isUsableFaceRegion(faceAnalysis)) {
                       console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
                     } else {
-                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, faceAnalysis.occluders);
+                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, {
+                        occluders: faceAnalysis.occluders,
+                        eyewearBox2d: faceAnalysis.eyewearBox2d,
+                        headPose: faceAnalysis.headPose,
+                      });
                       let pass2Resolved = false;
 
                       const faceSwapV2Result = anchorImage
@@ -940,14 +944,14 @@ export async function POST(req: NextRequest) {
                           const compositedFace = await compositeFaceRegion(
                             normalizedPass1.buffer,
                             Buffer.from(faceSwapV2Result.data, 'base64'),
-                            maskImage.ellipse,
+                            maskImage.geometry,
                           );
                           let finalPass2Data = compositedFace.toString('base64');
                           try {
                             const harmonizedFace = await harmonizeFaceTone(
                               normalizedPass1.buffer,
                               compositedFace,
-                              maskImage.ellipse,
+                              maskImage.geometry,
                             );
                             finalPass2Data = harmonizedFace.toString('base64');
                           } catch (toneErr) {
@@ -991,7 +995,7 @@ export async function POST(req: NextRequest) {
                             const harmonizedFace = await harmonizeFaceTone(
                               normalizedPass1.buffer,
                               Buffer.from(pass2Result.data, 'base64'),
-                              maskImage.ellipse,
+                              maskImage.geometry,
                             );
                             finalPass2Data = harmonizedFace.toString('base64');
                           } catch (toneErr) {
