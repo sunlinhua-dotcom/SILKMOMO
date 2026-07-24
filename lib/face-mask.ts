@@ -312,3 +312,57 @@ export async function harmonizeFaceTone(
     .png()
     .toBuffer();
 }
+
+export async function compositeFaceRegion(
+  pass1Png: Buffer,
+  swapPng: Buffer,
+  ellipse: FaceMaskEllipse,
+): Promise<Buffer> {
+  if (!Number.isFinite(ellipse.cx) || !Number.isFinite(ellipse.cy) || ellipse.rx <= 0 || ellipse.ry <= 0) {
+    return pass1Png;
+  }
+
+  const pass1 = await readRgbaImage(pass1Png);
+  const ellipseMatchesPass1 = pass1.width === ellipse.width && pass1.height === ellipse.height;
+  if (!ellipseMatchesPass1) {
+    console.log('[face-composite] skip: ellipse size mismatch', {
+      pass1: `${pass1.width}x${pass1.height}`,
+      ellipse: `${ellipse.width}x${ellipse.height}`,
+    });
+    return pass1Png;
+  }
+
+  const swapBuffer = await sharp(swapPng)
+    .resize(pass1.width, pass1.height, { fit: 'fill' })
+    .png()
+    .toBuffer();
+  const swap = await readRgbaImage(swapBuffer);
+  const output = Buffer.from(pass1.data);
+  const featherNorm = clamp((Math.min(ellipse.rx, ellipse.ry) * 0.08) / Math.max(1, Math.min(ellipse.rx, ellipse.ry)), 0.01, 0.5);
+
+  for (let y = 0; y < pass1.height; y++) {
+    for (let x = 0; x < pass1.width; x++) {
+      const radius = ellipseDistance(ellipse, x, y);
+      if (radius > 1) continue;
+
+      const alpha = gaussianFeatherAlpha(radius, featherNorm);
+      if (alpha <= 0) continue;
+
+      const offset = (y * pass1.width + x) * pass1.channels;
+      for (let c = 0; c < 3; c++) {
+        output[offset + c] = Math.round(swap.data[offset + c] * alpha + pass1.data[offset + c] * (1 - alpha));
+      }
+      output[offset + 3] = Math.round(swap.data[offset + 3] * alpha + pass1.data[offset + 3] * (1 - alpha));
+    }
+  }
+
+  return sharp(output, {
+    raw: {
+      width: pass1.width,
+      height: pass1.height,
+      channels: pass1.channels,
+    },
+  })
+    .png()
+    .toBuffer();
+}

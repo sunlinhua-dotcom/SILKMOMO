@@ -150,3 +150,27 @@ test('harmonizeFaceTone pulls masked skin toward reference ring and feathers the
     `feathered boundary ${innerEdge.slice(0, 3)} -> ${outerEdge.slice(0, 3)} should reduce the original jump`,
   );
 });
+
+test('compositeFaceRegion takes swap pixels inside ellipse, feathers boundary, and preserves outside pass1', async () => {
+  const width = 80;
+  const height = 80;
+  const ellipse = { cx: 40, cy: 40, rx: 20, ry: 20, width, height };
+  const pass1Color = [40, 50, 60];
+  const swapColor = [210, 80, 30];
+
+  const pass1 = await pngFromPainter(width, height, () => pass1Color);
+  const smallerSwap = await pngFromPainter(40, 40, () => swapColor);
+
+  assert.equal(typeof masks.compositeFaceRegion, 'function');
+  const composited = await masks.compositeFaceRegion(pass1, smallerSwap, ellipse);
+  const { data, info } = await sharp(composited).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+
+  const center = pixelAt(data, info, 40, 40);
+  const outside = pixelAt(data, info, 8, 8);
+  const edge = pixelAt(data, info, 59, 40);
+
+  assert.deepEqual(outside.slice(0, 3), pass1Color);
+  assert.ok(colorDistance(center, swapColor) < 2, `center ${center.slice(0, 3)} should be swap-colored`);
+  assert.ok(colorDistance(edge, pass1Color) > 1, `edge ${edge.slice(0, 3)} should include some swap color`);
+  assert.ok(colorDistance(edge, swapColor) > 1, `edge ${edge.slice(0, 3)} should be feathered, not full swap`);
+});

@@ -24,7 +24,8 @@ import { generateImage as generateBackendImage, normalizeBackend, resolveApiMode
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage } from '@/lib/postprocess';
-import { createFaceEditMask, harmonizeFaceTone, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
+import { compositeFaceRegion, createFaceEditMask, harmonizeFaceTone, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
+import { swapFaceVia302 } from '@/lib/face-swap';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
@@ -929,42 +930,78 @@ export async function POST(req: NextRequest) {
                       console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
                     } else {
                       const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, faceAnalysis.occluders);
-                      const lowerFaceOnly = faceAnalysis.occluders.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
-                      const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
-                        lowerFaceOnly,
-                        occluders: faceAnalysis.occluders,
-                      });
-                      const pass2Result = await generateBackendImage({
-                        prompt: faceSwapPrompt,
-                        productImages: [],
-                        sceneRefImages: [{
-                          data: normalizedPass1.data,
-                          mimeType: normalizedPass1.mimeType,
-                          skipNormalization: true,
-                        }],
-                        anchorImage,
-                        maskImage,
-                        sceneAsEditBase: true,
-                        aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-                        quality,
-                      }, engine);
+                      let pass2Resolved = false;
 
-                      if (pass2Result.success && pass2Result.data) {
-                        let finalPass2Data = pass2Result.data;
+                      const faceSwapV2Result = anchorImage
+                        ? await swapFaceVia302(normalizedPass1, anchorImage)
+                        : null;
+                      if (faceSwapV2Result?.data) {
                         try {
-                          const harmonizedFace = await harmonizeFaceTone(
+                          const compositedFace = await compositeFaceRegion(
                             normalizedPass1.buffer,
-                            Buffer.from(pass2Result.data, 'base64'),
+                            Buffer.from(faceSwapV2Result.data, 'base64'),
                             maskImage.ellipse,
                           );
-                          finalPass2Data = harmonizedFace.toString('base64');
-                        } catch (toneErr) {
-                          console.log('[sceneGroup] Pass2 面部调色失败，使用原 Pass2 结果:', toneErr instanceof Error ? toneErr.message : toneErr);
+                          let finalPass2Data = compositedFace.toString('base64');
+                          try {
+                            const harmonizedFace = await harmonizeFaceTone(
+                              normalizedPass1.buffer,
+                              compositedFace,
+                              maskImage.ellipse,
+                            );
+                            finalPass2Data = harmonizedFace.toString('base64');
+                          } catch (toneErr) {
+                            console.log('[sceneGroup] Pass2=faceswap-v2 面部调色失败，使用本地合成结果:', toneErr instanceof Error ? toneErr.message : toneErr);
+                          }
+                          result = { ...pass1Result, data: finalPass2Data };
+                          prompt = `${prompt}\n\n--- PASS2 FACE SWAP V2 ---\n302 face-swap-v2 + local ellipse composite + tone harmonization.`;
+                          pass2Resolved = true;
+                          console.log(`[sceneGroup] Pass2=faceswap-v2 #${refSeq}`);
+                        } catch (swapCompositeErr) {
+                          console.log('[sceneGroup] Pass2=faceswap-v2 合成失败，回退 GPT mask edits:', swapCompositeErr instanceof Error ? swapCompositeErr.message : swapCompositeErr);
                         }
-                        result = { ...pass2Result, data: finalPass2Data };
-                        prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
                       } else {
-                        console.log('[sceneGroup] Pass2 换脸失败，交付 Pass1 结果:', pass2Result.error);
+                        console.log(`[sceneGroup] Pass2=faceswap-v2 未产出 #${refSeq}，回退 GPT mask edits`);
+                      }
+
+                      if (!pass2Resolved) {
+                        const lowerFaceOnly = faceAnalysis.occluders.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
+                        const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
+                          lowerFaceOnly,
+                          occluders: faceAnalysis.occluders,
+                        });
+                        const pass2Result = await generateBackendImage({
+                          prompt: faceSwapPrompt,
+                          productImages: [],
+                          sceneRefImages: [{
+                            data: normalizedPass1.data,
+                            mimeType: normalizedPass1.mimeType,
+                            skipNormalization: true,
+                          }],
+                          anchorImage,
+                          maskImage,
+                          sceneAsEditBase: true,
+                          aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                          quality,
+                        }, engine);
+
+                        if (pass2Result.success && pass2Result.data) {
+                          let finalPass2Data = pass2Result.data;
+                          try {
+                            const harmonizedFace = await harmonizeFaceTone(
+                              normalizedPass1.buffer,
+                              Buffer.from(pass2Result.data, 'base64'),
+                              maskImage.ellipse,
+                            );
+                            finalPass2Data = harmonizedFace.toString('base64');
+                          } catch (toneErr) {
+                            console.log('[sceneGroup] Pass2 GPT mask edits 面部调色失败，使用原 Pass2 结果:', toneErr instanceof Error ? toneErr.message : toneErr);
+                          }
+                          result = { ...pass2Result, data: finalPass2Data };
+                          prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
+                        } else {
+                          console.log('[sceneGroup] Pass2 GPT mask edits 失败，交付 Pass1 结果:', pass2Result.error);
+                        }
                       }
                     }
                   } catch (pass2Err) {
