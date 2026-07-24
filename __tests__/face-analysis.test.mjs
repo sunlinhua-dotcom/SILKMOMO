@@ -20,6 +20,11 @@ test('analyzeFaceRegionAndSkin requests and parses profile pose plus exact eyewe
               eyewearBox2d: [300, 385, 455, 625],
               headPose: 'profile',
               occluders: ['sunglasses', 'hat brim'],
+              occluderBoxes2d: [
+                { label: 'sunglasses', box2d: [300, 385, 455, 625] },
+                { label: 'hat brim', box2d: [235, 370, 330, 705] },
+                { label: 'hair', box2d: [330, 650, 700, 725] },
+              ],
               visibility: 'partial',
               confidence: 0.91,
             }),
@@ -39,10 +44,21 @@ test('analyzeFaceRegionAndSkin requests and parses profile pose plus exact eyewe
 
     assert.deepEqual(result.eyewearBox2d, [300, 385, 455, 625]);
     assert.equal(result.headPose, 'profile');
+    assert.deepEqual(result.occluderBoxes2d, [
+      { label: 'sunglasses', box2d: [300, 385, 455, 625] },
+      { label: 'hat brim', box2d: [235, 370, 330, 705] },
+      { label: 'hair', box2d: [330, 650, 700, 725] },
+    ]);
     assert.match(prompt, /"eyewearBox2d"/);
     assert.match(prompt, /"headPose"/);
+    assert.match(prompt, /"occluderBoxes2d"/);
     assert.match(prompt, /complete.*nose bridge.*chin.*jawline/i);
     assert.match(prompt, /must not start below the eyewear/i);
+    assert.match(prompt, /tight.*bounding box/i);
+    assert.match(prompt, /separate box.*disconnected/i);
+    assert.match(prompt, /hat-brim box.*local segment.*face oval.*never include.*lateral brim/i);
+    assert.match(prompt, /faceBox2d must contain visibleFaceBox2d.*outermost nose tip/i);
+    assert.match(prompt, /slanted or curved.*multiple small boxes/i);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.GEMINI_API_KEY;

@@ -218,6 +218,11 @@ JSON only, no explanation.`,
   }
 }
 
+export interface FaceOccluderBox2d {
+  label: string;
+  box2d: [number, number, number, number];
+}
+
 export interface FaceRegionAnalysis {
   skinTone: string;
   faceBox2d: [number, number, number, number];
@@ -225,6 +230,7 @@ export interface FaceRegionAnalysis {
   eyewearBox2d: [number, number, number, number] | null;
   headPose: 'frontal' | 'three-quarter' | 'profile';
   occluders: string[];
+  occluderBoxes2d: FaceOccluderBox2d[];
   visibility: 'clear' | 'partial' | 'heavy' | 'none';
   confidence: number;
 }
@@ -262,6 +268,23 @@ function sanitizeOccluders(value: unknown): string[] {
     .slice(0, 8);
 }
 
+function sanitizeOccluderBoxes(value: unknown): FaceOccluderBox2d[] {
+  if (!Array.isArray(value)) return [];
+  const boxes: FaceOccluderBox2d[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const candidate = item as { label?: unknown; box2d?: unknown };
+    const label = typeof candidate.label === 'string'
+      ? candidate.label.replace(/[\r\n]/g, ' ').trim().slice(0, 60)
+      : '';
+    const box2d = parseBox2d(candidate.box2d);
+    if (!label || !box2d) continue;
+    boxes.push({ label, box2d });
+    if (boxes.length >= 12) break;
+  }
+  return boxes;
+}
+
 /**
  * Analyze the visible face region and scene skin tone for follow_scene Pass2.
  * Returns null on any parsing/validation failure so callers can deliver Pass1.
@@ -295,18 +318,28 @@ Return exactly this JSON shape:
   "eyewearBox2d": [155, 435, 215, 600],
   "headPose": "frontal|three-quarter|profile",
   "occluders": ["sunglasses", "hat brim", "hair"],
+  "occluderBoxes2d": [
+    {"label": "sunglasses", "box2d": [155, 435, 215, 600]},
+    {"label": "hat brim", "box2d": [135, 450, 165, 585]},
+    {"label": "hair", "box2d": [180, 585, 315, 640]}
+  ],
   "visibility": "clear|partial|heavy|none",
   "confidence": 0.0
 }
 
 Rules:
 - skinTone must describe the scene person's real visible skin, not a beauty ideal. Include tan depth and undertone, e.g. "medium-deep sun-tanned warm golden olive".
-- faceBox2d is the full estimated face/head skin area if unobstructed.
+- faceBox2d is the tight full anatomical face-skin boundary estimated as if unobstructed. Exclude hat, hair, neck, ears outside the face oval, and background; do not use the whole head or hat silhouette.
+- faceBox2d must contain visibleFaceBox2d and reach every visible profile silhouette point, especially the outermost nose tip and chin point.
 - visibleFaceBox2d is the bounding envelope of all currently visible, identity-bearing facial skin and contours. It may geometrically overlap an occluder because it is a box, not a segmentation mask.
 - For a three-quarter or profile face, visibleFaceBox2d MUST include the complete visible nose bridge and nose-tip silhouette, lips, chin point, jawline, and cheek contour. It must not start below the eyewear; eyewearBox2d removes the lenses and frame separately.
 - eyewearBox2d must be the tight bounding box of all visible lenses plus the complete frame, excluding hat, hair, eyebrows, nose, and cheek. Use null when there are no sunglasses or eyeglasses.
 - headPose describes the face orientation: frontal, three-quarter, or profile.
 - List sunglasses or eyeglasses in occluders. Also list hat brim, hair, hands, jewelry, masks, deep cast shadows that hide features, and other non-skin occluding objects.
+- occluderBoxes2d must contain a tight bounding box for every visible object that overlaps or hides any part of the face, including eyewear, the occluding portion of a hat brim, and large hair sections. Do not box the whole hat or hairstyle when only a smaller part overlaps the face.
+- A hat-brim box must cover only the local segment that physically overlaps the face oval; never include the crown or lateral brim extending away from the face.
+- Approximate a slanted or curved brim with multiple small boxes along the actual occluding pixels instead of one large axis-aligned rectangle.
+- Use a separate box for every disconnected occluding region, repeating the label when necessary. Never make one oversized box that bridges separated hair strands or accessories across visible skin.
 - visibility: clear = most facial features visible; partial = useful visible face remains but some occlusion/crop; heavy = too occluded for reliable face swap; none = no visible face.
 - If no reliable face is visible, set visibility to "none" and still keep JSON valid.
 - JSON only, no markdown, no explanations.`,
@@ -341,6 +374,7 @@ Rules:
     const faceBox2d = parseBox2d(parsed.faceBox2d);
     const visibleFaceBox2d = parseBox2d(parsed.visibleFaceBox2d);
     const eyewearBox2d = parseBox2d(parsed.eyewearBox2d);
+    const occluderBoxes2d = sanitizeOccluderBoxes(parsed.occluderBoxes2d);
     const headPose = typeof parsed.headPose === 'string' && FACE_HEAD_POSES.has(parsed.headPose)
       ? parsed.headPose as FaceRegionAnalysis['headPose']
       : null;
@@ -357,6 +391,7 @@ Rules:
       eyewearBox2d,
       headPose,
       occluders: sanitizeOccluders(parsed.occluders),
+      occluderBoxes2d,
       visibility,
       confidence: clamp01(parsed.confidence),
     };

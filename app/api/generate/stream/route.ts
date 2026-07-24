@@ -931,7 +931,9 @@ export async function POST(req: NextRequest) {
                     } else {
                       const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, {
                         occluders: faceAnalysis.occluders,
+                        occluderBoxes2d: faceAnalysis.occluderBoxes2d,
                         eyewearBox2d: faceAnalysis.eyewearBox2d,
+                        faceBox2d: faceAnalysis.faceBox2d,
                         headPose: faceAnalysis.headPose,
                       });
                       let pass2Resolved = false;
