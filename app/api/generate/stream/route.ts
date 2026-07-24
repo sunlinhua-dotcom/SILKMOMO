@@ -27,6 +27,7 @@ import { normalizeGeneratedImage } from '@/lib/postprocess';
 import { createFaceEditMask, harmonizeFaceTone, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
+const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
 
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
@@ -191,8 +192,14 @@ Image requirements:
 - The output should be a clear identity reference for one consistent new model.
 
 ${FACE_REALISM_DIRECTIVE}
-`.trim();
+  `.trim();
 }
+
+const DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE = `DERIVED ANCHOR PORTRAIT REALISM (critical for downstream face identity quality):
+- Casting: depict a 24-28 year old agency-signed high-fashion editorial model, not an ordinary civilian snapshot subject. The face should have striking, camera-ready features suitable for luxury silk lookbook and editorial campaign work.
+- Skin and retouch: fresh rested skin with professional clean retouching and natural pore-level texture. Keep believable skin detail without pushing freckles, blemishes, fatigue, age, or roughness.
+- Avoid: no heavy freckles, no heavy blemishes, no tired under-eyes, no age-up, no plain civilian look, no generic AI beauty face.
+- Finish: photorealistic fashion portrait, never plastic, CGI, waxy, doll-like, over-smoothed, or celebrity-like.`;
 
 function buildDerivedAnchorPortraitPrompt(skinToneNote?: string): string {
   const skinToneLine = skinToneNote
@@ -217,8 +224,8 @@ Image requirements:
 - Simple realistic hair kept clear enough to reveal the face structure; no text, no logo, no watermark.
 - The output should be a clear facial identity reference for one consistent new fictional model.
 
-${FACE_REALISM_DIRECTIVE}
-`.trim();
+${DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE}
+  `.trim();
 }
 
 // ═══════════════════════════════════════
@@ -922,7 +929,11 @@ export async function POST(req: NextRequest) {
                       console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
                     } else {
                       const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, faceAnalysis.occluders);
-                      const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone);
+                      const lowerFaceOnly = faceAnalysis.occluders.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
+                      const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
+                        lowerFaceOnly,
+                        occluders: faceAnalysis.occluders,
+                      });
                       const pass2Result = await generateBackendImage({
                         prompt: faceSwapPrompt,
                         productImages: [],

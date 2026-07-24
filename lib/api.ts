@@ -77,6 +77,11 @@ export interface SceneGroupGenerateOptions {
   customPrompt?: string;              // 用户对该次生成的额外要求
 }
 
+export interface FaceSwapPromptOptions {
+  lowerFaceOnly?: boolean;
+  occluders?: string[];
+}
+
 const GARMENT_CATEGORY_EN: Record<string, string> = {
   dress: 'dress', top: 'top', pants: 'pants/trousers', skirt: 'skirt',
   suit: 'suit set', outerwear: 'outerwear', jumpsuit: 'jumpsuit', other: 'garment',
@@ -128,6 +133,12 @@ export const FACE_REALISM_DIRECTIVE = `FACE, SKIN & LIGHT REALISM (critical — 
 - Overall: authentic editorial lookbook photography with real skin texture and restrained film color, not a polished render, synthetic beauty ad, or over-retouched studio portrait.`;
 
 const SAFE_CROPPED_COMPOSITION_DIRECTIVE = `Cropped composition safety: If the reference or shot calls for a face-outside-frame crop, describe and render it as a standard e-commerce crop: frame cropped at the neck/shoulders or with the head naturally outside the frame. Keep normal human anatomy and garment fit; never interpret it as a "headless" or "no head" body concept.`;
+
+const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
+
+function hasFaceSwapEyewearOccluder(occluders: string[] | undefined): boolean {
+  return !!occluders?.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
+}
 
 /**
  * 为产品图模块的单个镜次构建完整的 Prompt
@@ -380,7 +391,7 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
       : 'treat outputs as one set. Keep output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group; each output casts a different model of the same look based on its own scene-base person (same skin tone/hair/build, clearly different face).'
     : 'treat outputs as one set. Keep model identity, output size/framing logic, lighting, product color, fabric texture, silhouette proportions, and photographic language continuous across the group.';
   const freezeIdentityRule = isGarmentOnlyPass
-    ? '- Keep the scene-base person completely unchanged: face/hair/skin tone/body build, facial features, expression, makeup, visible skin, pose, body proportions, and all occlusions stay exactly as in the base image. This pass must only replace garment.'
+    ? '- Person freeze: face, hair, skin tone, body build, facial features, expression, makeup, visible skin, pose, body proportions, age feeling, and all face/body occlusions stay exactly as in the base image. This pass only replaces the garment.'
     : identityMode === 'follow_scene'
     ? effectiveHasAnchor
       ? '- Preserve the base person\'s expression, mood, makeup language, and hair styling, and keep her exact hair color, visible length category, texture, tucked-or-loose state, overall hairstyle, body build/proportions, and skin tone unchanged — but the FACE identity comes from the provided anchor reference: precisely match the anchor face shape, eye shape, eyebrow shape, nose bridge, cheekbone structure, lip shape, jawline, chin, and facial proportions wherever visible. Do NOT copy the anchor\'s skin tone, hair color, hair length, hairstyle, hairline, body build, pose, expression, makeup, lighting, exposure, or accessories; those remain locked to the scene-base image.'
@@ -437,7 +448,7 @@ Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result m
   const productIdentityRule = `Any person visible in the "product" reference image(s) is NOT an identity reference. Completely ignore their face, hairstyle, facial features, age, expression, and identity. Use product images ONLY for garment fabric, color, pattern, silhouette, cut, tailoring, and construction.`;
   let newModel: string;
   if (isGarmentOnlyPass) {
-    newModel = `REPLACE #2 - Person: Pass1 garment-only edit. Keep the person completely unchanged from the scene-base image: face/hair/skin tone/body build, facial features, expression, makeup, visible skin, pose, body proportions, age feeling, and all face/body occlusions must stay exactly the same. Do NOT use any anchor image, do NOT change identity, and do NOT redraw the face. The only replaceable element in this pass is the garment described in REPLACE #1. ${productIdentityRule}`;
+    newModel = `REPLACE #2 - Person: No person replacement in Pass1. Ignore any anchor and every product-reference person as identity input. Keep the scene-base person unchanged; do not redraw the face, hair, body, expression, visible skin, pose, age feeling, or occlusions. The only replaceable element in this pass is the garment described in REPLACE #1. ${productIdentityRule}`;
   } else if (identityMode === 'follow_scene' && effectiveHasAnchor) {
     newModel = `REPLACE #2 - Person: Replace the person with the SAME fictional FACE identity shown in the "anchor" reference image. Precisely match only the anchor model's facial identity: face shape, eye shape, eyebrow shape, nose bridge, cheekbone structure, lip shape, jawline, chin, facial proportions, and visible facial feature geometry, so this image and the rest of the set clearly use ONE consistent fictional face identity. The anchor is the ONLY facial identity reference. DO NOT copy the anchor's skin complexion/tone, hair color, hair length, hairstyle, hairline, body build/proportions, pose, expression, makeup language, lighting, exposure, scene, crop, clothing, or accessories. Instead, preserve the scene-base person's exact skin tone (sample the tan depth, warmth, and undertone from the scene-base person's skin and reproduce them on the new face AND body/limbs — paler, pinker, lighter, or less tanned skin is a FAILURE), the same hair color, hair length, hair styling, hairline visibility, the same body build and proportions, and the same age feeling. Keep the same expression, mood, and makeup language from the scene-base image. The output must read as the anchor's face identity wearing the scene-base person's skin tone, hair, body, pose, and styling — not as the scene-base face, and not as the anchor's skin/hair/body. Automated face recognition must NOT match her to the scene-base person. ${productIdentityRule} Face/head visibility and occlusion must match the scene-base image exactly. If the base person's face is partially or fully occluded by headwear, sunglasses, hair, or the camera angle, keep the SAME occlusion — do NOT uncover the face, remove or lift any accessory, or rotate/change the head pose to show more face. Identity matching applies ONLY to the parts of the face/head actually visible in the scene-base image; wherever facial features ARE visible, show the ANCHOR's facial structure with the SCENE-BASE skin tone and hair.`;
   } else if (identityMode === 'follow_scene') {
@@ -467,6 +478,7 @@ CRITICAL RULES (follow strictly):
   const userAddon = options.customPrompt
     ? `\n\nUser adjustment request (apply on top of the above, but never violate the CRITICAL RULES, the scene/pose freeze, or garment fidelity): ${options.customPrompt}`
     : '';
+  const faceRealismBlock = isGarmentOnlyPass ? '' : `\n\n${FACE_REALISM_DIRECTIVE}`;
 
   return `
 ${priorityRules}
@@ -479,24 +491,34 @@ ${garment}
 
 ${newModel}
 
-${accessory}
-
-${FACE_REALISM_DIRECTIVE}
+${accessory}${faceRealismBlock}
 
 ${rules}${userAddon}
   `.trim();
 }
 
-export function buildFaceSwapPrompt(skinToneNote?: string): string {
+export function buildFaceSwapPrompt(
+  skinToneNote?: string,
+  options: FaceSwapPromptOptions = {},
+): string {
   const skinToneRule = skinToneNote
     ? `Scene skin tone lock: ${skinToneNote}. The edited face must keep this exact tan depth, warmth/coolness, undertone, and exposure so it matches the person\'s neck/body perfectly.`
     : 'Scene skin tone lock: the edited face skin must match the person\'s neck/body in the image perfectly: same tan depth, warmth/coolness, undertone, exposure, shadows, and grain.';
+  const lowerFaceOnly = options.lowerFaceOnly || hasFaceSwapEyewearOccluder(options.occluders);
+  const lowerFaceRule = lowerFaceOnly
+    ? `
+LOWER-FACE IDENTITY MODE (eyewear or face occlusion detected):
+- The identity MUST change through the visible lower face: different lip outline and cupid's bow, different mouth width, different philtrum length, different chin point and jaw angle, different lower-cheek contour.
+- Reproducing the scene-base person's lips, mouth width, jawline, or chin is a FAILURE.
+- Keep sunglasses, eyeglasses, hats, hair, shadows, and every occluder exactly unchanged. Do not invent hidden eyes, uncover the face, or expand the visible face area.`
+    : '';
 
   return `
 FACE SWAP PASS - single objective:
 Only in the editable area defined by the mask, redraw the visible facial features to match the anchor reference facial structure: face shape, eye shape, eyebrow shape, nose bridge, cheekbone structure, lips, jawline, chin, and facial proportions.
 
 ${skinToneRule}
+${lowerFaceRule}
 
 Hard preservation rules:
 - The editable area is ONLY the visible skin/feature area of the face. Do not change hair strands, hairline outside the mask, sunglasses, eyeglasses, hat brim, jewelry, hands, clothing, background, pose, crop, or any occluder.
