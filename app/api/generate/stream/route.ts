@@ -18,30 +18,14 @@ import {
   normalizeGenerationQuality,
   type GenerationQuality,
 } from '@/lib/billing-constants';
-import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, buildFaceSwapPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
+import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage } from '@/lib/postprocess';
-import {
-  alignSwapTone,
-  buildFaceAlphaField,
-  compositeFaceRegion,
-  createFaceEditMask,
-  effectiveAlphaArea,
-  hasSufficientEffectiveAlphaArea,
-  isUsableFaceRegion,
-  normalizeImageForFacePass,
-} from '@/lib/face-mask';
-import { swapFaceVia302 } from '@/lib/face-swap';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
-const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
-const REQUEST_SOFT_BUDGET_MS = 540_000;
-const PASS2_TOTAL_BUDGET_MS = 240_000;
-const PASS2_FALLBACK_ENTRY_MS = 60_000;
-const PASS2_FALLBACK_TIMEOUT_MS = 180_000;
 
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
@@ -751,8 +735,11 @@ export async function POST(req: NextRequest) {
             }
 
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
+            // 一次成型：衣服参考 + 锚脸参考 + 场景底图一次出图。
+            // 旧的 Pass2（face-swap-v2 + 本地椭圆合成 / GPT 小蒙版重画）已整体下线：
+            // 局部合成必然在脸颊留接缝，七个批次补丁都没能根治；实测单遍带锚脸即可
+            // 稳住身份，且脸与颈部肤色连续（离线量化 7.05，原图基准 6.06）。
             const shouldUseSceneGroupAnchor = modelIdentityMode === 'fresh' || modelIdentityMode === 'follow_scene';
-            const useFollowSceneTwoPass = modelIdentityMode === 'follow_scene' && engine === 'openai';
             // 新模特身份锚：fresh 锁完整新人身份；follow_scene 锁派生脸部身份（肤色/发型/体型仍随场景底图）。
             // 重做/补齐时客户端会带上已有一张结果图作锚，使补的图与首批同一新人；
             // 首批全量生成时无锚，先创建一张不计费肖像卡；失败则回退为本批首张成功图充当。
@@ -919,13 +906,7 @@ export async function POST(req: NextRequest) {
               let shotLatency = 0;
               let prompt = '';
               const timings = {
-                t_analyze: 0,
-                t_pass1: 0,
-                t_bbox: 0,
-                t_swap: 0,
-                t_align: 0,
-                t_composite: 0,
-                t_maskedit: 0,
+                t_generate: 0,
                 t_encode: 0,
               };
               const logTimings = () => {
@@ -934,36 +915,20 @@ export async function POST(req: NextRequest) {
                   .join(' '));
               };
               try {
-                const twoPassActive = useFollowSceneTwoPass && !!anchorImage;
-                const analyzeStart = Date.now();
-                const sceneSkinTone = useFollowSceneTwoPass
-                  ? await withPhaseBeat(
-                      push,
-                      '正在分析场景肤色',
-                      phaseMeta,
-                      () => getSceneSkinTone(baseRef),
-                    )
-                  : undefined;
-                timings.t_analyze = Date.now() - analyzeStart;
-                if (useFollowSceneTwoPass && !twoPassActive) {
-                  console.log(`[sceneGroup] 派生锚缺失，回退单步换脸 #${refSeq}`);
-                }
                 prompt = buildSceneGroupPrompt({
                   garmentDescription,
                   garmentCategories: currentGarmentCategories,
                   sceneGroupMode,
                   modelIdentityMode,
                   productLabel: currentProductLabel,
-                  identityPass: twoPassActive ? 'garment-only' : 'combined',
-                  sceneSkinTone,
-                  hasAnchor: !twoPassActive && shouldUseSceneGroupAnchor && !!anchorImage,
+                  hasAnchor: shouldUseSceneGroupAnchor && !!anchorImage,
                   hasReplacementAccessory,
                   isRegeneration: requestHasSceneGroupAnchor,
                   customPrompt: safeCustomPrompt,
                 });
                 const shotStart = Date.now();
-                const pass1Start = Date.now();
-                const pass1Result = await withPhaseBeat(
+                const generateStart = Date.now();
+                result = await withPhaseBeat(
                   push,
                   '正在生成场景换装',
                   phaseMeta,
@@ -972,205 +937,14 @@ export async function POST(req: NextRequest) {
                     productImages: currentProductImages,
                     sceneRefImages: [baseRef],
                     accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
-                    anchorImage: !twoPassActive && shouldUseSceneGroupAnchor ? anchorImage : undefined,
+                    anchorImage: shouldUseSceneGroupAnchor ? anchorImage : undefined,
                     sceneAsEditBase: true,
                     aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
                     ...(engine === 'openai' ? { quality } : {}),
                   }, engine),
                 );
-                timings.t_pass1 = Date.now() - pass1Start;
-                result = pass1Result;
+                timings.t_generate = Date.now() - generateStart;
 
-                if (twoPassActive && pass1Result.success && pass1Result.data) {
-                  push('status', {
-                    phase: 'generating',
-                    current: i + 1,
-                    total,
-                    shotIndex: refSeq,
-                    message: '正在替换模特面容...',
-                  });
-
-                  const pass2Start = Date.now();
-                  try {
-                    const normalizedPass1 = await normalizeImageForFacePass({
-                      data: pass1Result.data,
-                      mimeType: 'image/png',
-                    });
-                    const { analyzeFaceRegionAndSkin } = await import('@/lib/ai-assistant');
-                    const bboxStart = Date.now();
-                    const faceAnalysis = await withPhaseBeat(
-                      push,
-                      '正在定位面部区域',
-                      phaseMeta,
-                      () => analyzeFaceRegionAndSkin(normalizedPass1.data, normalizedPass1.mimeType),
-                    );
-                    timings.t_bbox = Date.now() - bboxStart;
-                    const faceSkipLog = {
-                      visibility: faceAnalysis?.visibility ?? 'null',
-                      box: faceAnalysis?.visibleFaceBox2d,
-                    };
-
-                    if (!isUsableFaceRegion(faceAnalysis)) {
-                      console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 脸部区域不可用`, faceSkipLog);
-                    } else {
-                      const maskImage = await createFaceEditMask(normalizedPass1, faceAnalysis.visibleFaceBox2d, {
-                        occluders: faceAnalysis.occluders,
-                        occluderBoxes2d: faceAnalysis.occluderBoxes2d,
-                        eyewearBox2d: faceAnalysis.eyewearBox2d,
-                        faceBox2d: faceAnalysis.faceBox2d,
-                        headPose: faceAnalysis.headPose,
-                      });
-                      console.log(`[face-geom] #${refSeq}`, JSON.stringify({
-                        pose: faceAnalysis.headPose,
-                        vis: faceAnalysis.visibility,
-                        img: `${normalizedPass1.width}x${normalizedPass1.height}`,
-                        ellipse: maskImage.geometry.ellipse,
-                        faceRect: maskImage.geometry.faceRect,
-                        occ: maskImage.geometry.occluderRects.map(
-                          rect => `${rect.label}:${rect.left},${rect.top},${rect.right},${rect.bottom}`,
-                        ),
-                        faceBox2d: faceAnalysis.faceBox2d,
-                        visibleBox2d: faceAnalysis.visibleFaceBox2d,
-                      }));
-
-                      const alphaField = await withPhaseBeat(
-                        push,
-                        '正在融合面部',
-                        phaseMeta,
-                        () => buildFaceAlphaField(
-                          maskImage.geometry,
-                          normalizedPass1.width,
-                          normalizedPass1.height,
-                        ),
-                      );
-                      const alphaArea = effectiveAlphaArea(alphaField);
-                      console.log(`[face-alpha] #${refSeq}`, {
-                        effectivePixels: alphaArea.pixels,
-                        totalPixels: alphaField.length,
-                        ratio: alphaArea.ratio,
-                        threshold: 0.0012,
-                      });
-
-                      if (!hasSufficientEffectiveAlphaArea(alphaField)) {
-                        console.log(
-                          `[sceneGroup] Pass2 跳过 #${refSeq}: 有效换脸区 ${(alphaArea.ratio * 100).toFixed(4)}% < 0.12%，交付 Pass1`,
-                        );
-                      } else if (Date.now() - startTime > REQUEST_SOFT_BUDGET_MS - PASS2_TOTAL_BUDGET_MS) {
-                        console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 请求预算不足，交付 Pass1`);
-                      } else {
-                        let pass2Resolved = false;
-                        const lowerFaceOnly = faceAnalysis.occluders.some(
-                          item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item),
-                        );
-                        const swapStart = Date.now();
-                        const swapAnchor = anchorImage;
-                        const faceSwapV2Result = swapAnchor
-                          ? await withPhaseBeat(
-                              push,
-                              '正在替换模特面容',
-                              phaseMeta,
-                              () => swapFaceVia302(normalizedPass1, swapAnchor),
-                            )
-                          : null;
-                        timings.t_swap = Date.now() - swapStart;
-                        if (faceSwapV2Result?.data) {
-                          try {
-                            const swapBuffer = Buffer.from(faceSwapV2Result.data, 'base64');
-                            const alignStart = Date.now();
-                            const alignedFace = await withPhaseBeat(
-                              push,
-                              '正在融合面部',
-                              phaseMeta,
-                              () => alignSwapTone(
-                                normalizedPass1.buffer,
-                                swapBuffer,
-                                maskImage.geometry,
-                              ),
-                            );
-                            timings.t_align = Date.now() - alignStart;
-                            const compositeStart = Date.now();
-                            const compositedFace = await withPhaseBeat(
-                              push,
-                              '正在融合面部',
-                              phaseMeta,
-                              () => compositeFaceRegion(
-                                normalizedPass1.buffer,
-                                alignedFace,
-                                maskImage.geometry,
-                                alphaField,
-                              ),
-                            );
-                            timings.t_composite = Date.now() - compositeStart;
-                            if (compositedFace) {
-                              result = { ...pass1Result, data: compositedFace.toString('base64') };
-                              prompt = `${prompt}\n\n--- PASS2 FACE SWAP V2 ---\n302 face-swap-v2 + pre-composite tone alignment + single blurred alpha composite.`;
-                              pass2Resolved = true;
-                              console.log(`[sceneGroup] Pass2=faceswap-v2 #${refSeq} (${Date.now() - pass2Start}ms)`);
-                            } else {
-                              console.log(`[sceneGroup] Pass2=faceswap-v2 合成被拒 #${refSeq}，回退 GPT mask edits`);
-                            }
-                          } catch (swapCompositeErr) {
-                            console.log('[sceneGroup] Pass2=faceswap-v2 合成失败，回退 GPT mask edits:', swapCompositeErr instanceof Error ? swapCompositeErr.message : swapCompositeErr);
-                          }
-                        } else {
-                          console.log(`[sceneGroup] Pass2=faceswap-v2 未产出 #${refSeq}，回退 GPT mask edits`);
-                        }
-
-                        if (!pass2Resolved) {
-                          const pass2Elapsed = Date.now() - pass2Start;
-                          const requestElapsed = Date.now() - startTime;
-                          const fallbackBudgetInsufficient = pass2Elapsed > PASS2_FALLBACK_ENTRY_MS
-                            || pass2Elapsed > PASS2_TOTAL_BUDGET_MS - PASS2_FALLBACK_TIMEOUT_MS
-                            || requestElapsed > REQUEST_SOFT_BUDGET_MS - PASS2_FALLBACK_TIMEOUT_MS;
-                          if (fallbackBudgetInsufficient) {
-                            console.log(`[sceneGroup] Pass2 GPT mask edits 预算不足 #${refSeq}，交付 Pass1`, {
-                              pass2Elapsed,
-                              requestElapsed,
-                            });
-                          } else {
-                            const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
-                              lowerFaceOnly,
-                              occluders: faceAnalysis.occluders,
-                            });
-                            const maskEditStart = Date.now();
-                            const pass2Result = await withPhaseBeat(
-                              push,
-                              '正在精修面部',
-                              phaseMeta,
-                              () => generateBackendImage({
-                                prompt: faceSwapPrompt,
-                                productImages: [],
-                                sceneRefImages: [{
-                                  data: normalizedPass1.data,
-                                  mimeType: normalizedPass1.mimeType,
-                                  skipNormalization: true,
-                                }],
-                                anchorImage,
-                                maskImage,
-                                sceneAsEditBase: true,
-                                promptPurpose: 'faceswap',
-                                timeoutMs: PASS2_FALLBACK_TIMEOUT_MS,
-                                allowRetryOn5xx: false,
-                                aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-                                quality,
-                              }, engine),
-                            );
-                            timings.t_maskedit = Date.now() - maskEditStart;
-                            if (pass2Result.success && pass2Result.data) {
-                              result = pass2Result;
-                              prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
-                              console.log(`[sceneGroup] Pass2=GPT mask edits #${refSeq}`);
-                            } else {
-                              console.log('[sceneGroup] Pass2 GPT mask edits 失败，交付 Pass1 结果:', pass2Result.error);
-                            }
-                          }
-                        }
-                      }
-                    }
-                  } catch (pass2Err) {
-                    console.log('[sceneGroup] Pass2 换脸异常，交付 Pass1 结果:', pass2Err instanceof Error ? pass2Err.message : pass2Err);
-                  }
-                }
                 shotLatency = Date.now() - shotStart;
                 if (result.success && result.data) {
                   const encodeStart = Date.now();
@@ -1217,7 +991,7 @@ export async function POST(req: NextRequest) {
                   failedCount++;
                   break;
                 }
-                if (shouldUseSceneGroupAnchor && !anchorImage && !useFollowSceneTwoPass) {
+                if (shouldUseSceneGroupAnchor && !anchorImage) {
                   anchorImage = { data: result.data, mimeType: 'image/png' };
                 }
                 push('result', {

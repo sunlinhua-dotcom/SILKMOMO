@@ -4,69 +4,101 @@ import test from 'node:test';
 
 const api = await import('../lib/api.ts');
 
-test('buildSceneGroupPrompt garment-only pass preserves person and omits anchor face replacement', () => {
-  const prompt = api.buildSceneGroupPrompt({
-    garmentDescription: 'ivory silk blouse with pearl buttons',
-    garmentCategories: ['top'],
+const followSceneWithAnchor = () => api.buildSceneGroupPrompt({
+  garmentDescription: 'blush satin flutter-sleeve top with covered buttons',
+  garmentCategories: ['top'],
+  modelIdentityMode: 'follow_scene',
+  hasAnchor: true,
+});
+
+test('follow_scene one-pass prompt carries anchor face identity plus scene-base skin/hair/body', () => {
+  const prompt = followSceneWithAnchor();
+
+  assert.match(prompt, /REPLACE #2 - Person: Replace the person with the SAME fictional FACE identity/);
+  assert.match(prompt, /The anchor is the ONLY facial identity reference/);
+  assert.match(prompt, /DO NOT copy the anchor's skin complexion\/tone/);
+  assert.match(prompt, /paler, pinker, lighter, or less tanned skin is a FAILURE/);
+});
+
+test('skin tone continuity block outranks the realism block and pins texture to the neck brightness', () => {
+  const prompt = followSceneWithAnchor();
+
+  assert.match(prompt, /SKIN TONE CONTINUITY \(this outranks the realism block below\)/);
+  assert.match(prompt, /the new face is the same skin as the neck directly beneath it/);
+  assert.match(prompt, /no visible step, edge, or tonal seam anywhere along the jawline/);
+  assert.match(prompt, /Render every pore, texture break and film grain AT the neck's own brightness/);
+  assert.match(prompt, /never lighten, cool down, or flatten the face in order to make its texture visible/);
+
+  // 顺序很重要：连续性必须出现在真实感块之前，后者才是被压制的一方
+  assert.ok(
+    prompt.indexOf('SKIN TONE CONTINUITY') < prompt.indexOf('REALISM (highest priority'),
+    'SKIN TONE CONTINUITY 必须排在 FACE_REALISM_DIRECTIVE 之前',
+  );
+});
+
+test('eyewear occlusion falls back to lower-face identity without needing face detection', () => {
+  const prompt = followSceneWithAnchor();
+
+  assert.match(prompt, /If the scene-base person's eyes are behind sunglasses or eyeglasses/);
+  assert.match(prompt, /take the anchor's lip outline and cupid's bow/);
+  assert.match(prompt, /mouth width, philtrum length, chin point, jaw angle, and lower-cheek contour/);
+  assert.match(prompt, /The eyewear itself stays exactly where it is, untouched, and no eye is drawn behind it/);
+});
+
+test('lower-face identity source follows whether an anchor is attached', () => {
+  const withoutAnchor = api.buildSceneGroupPrompt({
+    garmentDescription: 'blush satin top',
     modelIdentityMode: 'follow_scene',
-    hasAnchor: true,
-    identityPass: 'garment-only',
+    hasAnchor: false,
   });
 
-  assert.match(prompt, /only replace garment/i);
-  assert.match(prompt, /Person freeze/i);
-  assert.match(prompt, /face, hair, skin tone, body build/i);
-  assert.doesNotMatch(prompt, /FACE, SKIN & LIGHT REALISM/i);
-  assert.doesNotMatch(prompt, /tiny blemishes/i);
-  assert.doesNotMatch(prompt, /anchor face shape/i);
-  assert.doesNotMatch(prompt, /REPLACE #2 - Person: Replace the person/i);
-  assert.doesNotMatch(prompt, /facial identity/i);
-  assert.doesNotMatch(prompt, /the person's identity change/i);
+  assert.match(withoutAnchor, /take the new model's lip outline and cupid's bow/);
+  assert.doesNotMatch(withoutAnchor, /take the anchor's lip outline/);
 });
 
-test('buildSceneGroupPrompt garment-only pass locks newly exposed skin to scene tone', () => {
-  const prompt = api.buildSceneGroupPrompt({
-    garmentDescription: 'short-sleeve ivory silk blouse',
-    garmentCategories: ['top'],
-    modelIdentityMode: 'follow_scene',
-    identityPass: 'garment-only',
-    sceneSkinTone: 'deep honey bronze tan with warm golden olive undertone',
-  });
+test('worn accessories stay locked in the one-pass prompt', () => {
+  const prompt = followSceneWithAnchor();
 
-  assert.match(prompt, /skin EVERYWHERE/i);
-  assert.match(prompt, /newly exposed by the garment change/i);
-  assert.match(prompt, /deep honey bronze tan with warm golden olive undertone/);
-  assert.match(prompt, /paler or pinker newly-exposed skin is a FAILURE/i);
+  assert.match(prompt, /Keep EVERY existing accessory \(headwear\/hat, sunglasses\/eyeglasses, bag, jewelry, belt, watch, scarf, shoes\)/);
+  assert.match(prompt, /NEVER remove, lift, or reposition it to reveal the new face/);
 });
 
-test('buildFaceSwapPrompt limits edits to visible face and preserves scene skin and occluders', () => {
-  assert.equal(typeof api.buildFaceSwapPrompt, 'function');
-  const prompt = api.buildFaceSwapPrompt('deep warm olive tan with golden undertone');
+test('two-pass face swap architecture is fully retired', () => {
+  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
 
-  assert.match(prompt, /inside the mask/i);
-  assert.match(prompt, /face shape/i);
-  assert.match(prompt, /neck and shoulders/i);
-  assert.match(prompt, /hair, hairline, eyewear/i);
-  assert.match(prompt, /Outside it every pixel is final/i);
-  assert.match(prompt, /deep warm olive tan/i);
-  assert.match(prompt, /visible pores/i);
-  assert.match(prompt, /sees a different woman/i);
+  // 提示词构造器：不再有 Pass1 只换衣的分支
+  assert.doesNotMatch(apiSource, /identityPass/);
+  assert.doesNotMatch(apiSource, /isGarmentOnlyPass/);
+  assert.doesNotMatch(apiSource, /buildFaceSwapPrompt/);
+  // 注意：'garment-only' 这个词在正常提示词里合法出现（product reference images are
+  // garment-only references），只断言两步走那个取值已消失。
+  assert.doesNotMatch(apiSource, /'garment-only'/);
+
+  // 路由：不再有第二遍换脸、本地合成、蒙版重画
+  assert.doesNotMatch(routeSource, /twoPassActive/);
+  assert.doesNotMatch(routeSource, /useFollowSceneTwoPass/);
+  assert.doesNotMatch(routeSource, /swapFaceVia302/);
+  assert.doesNotMatch(routeSource, /buildFaceAlphaField|alignSwapTone|compositeFaceRegion|createFaceEditMask/);
+  assert.doesNotMatch(routeSource, /PASS2_TOTAL_BUDGET_MS|PASS2_FALLBACK_ENTRY_MS/);
+
+  // 退役模块已从仓库移除
+  assert.equal(fs.existsSync('lib/face-swap.ts'), false);
+  assert.equal(fs.existsSync('lib/face-mask.ts'), false);
 });
 
-test('buildFaceSwapPrompt adds lower-face identity rules for eyewear occlusion', () => {
-  const prompt = api.buildFaceSwapPrompt(undefined, {
-    lowerFaceOnly: true,
-    occluders: ['sunglasses'],
-  });
+test('follow_scene generates in a single backend call with the anchor attached', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
 
-  assert.match(prompt, /identity reads entirely from the lower face/);
-  assert.match(prompt, /anchor's lip outline and cupid's bow/);
-  assert.match(prompt, /mouth width/);
-  assert.match(prompt, /philtrum length/);
-  assert.match(prompt, /chin point/);
-  assert.match(prompt, /jaw angle/);
-  assert.match(prompt, /lower-cheek contour/);
-  assert.match(prompt, /Reproducing the previous person's lips, mouth width, jawline or chin is a failure/);
+  assert.match(routeSource, /hasAnchor: shouldUseSceneGroupAnchor && !!anchorImage/);
+  assert.match(routeSource, /anchorImage: shouldUseSceneGroupAnchor \? anchorImage : undefined/);
+  assert.match(routeSource, /sceneAsEditBase: true/);
+  assert.match(routeSource, /timings\.t_generate = Date\.now\(\) - generateStart/);
+
+  // 组图内每张只调一次生图；首张成功后充当后续的锚
+  const generateCalls = routeSource.match(/'正在生成场景换装'/g) || [];
+  assert.equal(generateCalls.length, 1);
+  assert.match(routeSource, /if \(shouldUseSceneGroupAnchor && !anchorImage\) \{\n\s+anchorImage = \{ data: result\.data/);
 });
 
 test('derived follow-scene anchor uses the final head-and-shoulders identity portrait prompt', () => {
@@ -80,48 +112,12 @@ test('derived follow-scene anchor uses the final head-and-shoulders identity por
   assert.match(derivedBlock, /85mm lens/);
   assert.match(derivedBlock, /face filling roughly 40%/);
   assert.match(derivedBlock, /rendered at pore level/);
-  assert.doesNotMatch(derivedBlock, /infrastructure facial identity anchor/);
-  assert.doesNotMatch(derivedBlock, /DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE/);
 });
 
-test('follow_scene two-pass activates per image only when a derived anchor exists', () => {
+test('every remaining long phase still heartbeats', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-
-  assert.match(routeSource, /const twoPassActive = useFollowSceneTwoPass && !!anchorImage/);
-  assert.match(routeSource, /identityPass: twoPassActive \? 'garment-only' : 'combined'/);
-  assert.match(routeSource, /hasAnchor: !twoPassActive && shouldUseSceneGroupAnchor && !!anchorImage/);
-  assert.match(routeSource, /buildFaceSwapPrompt\(faceAnalysis\.skinTone, \{/);
-  assert.match(routeSource, /lowerFaceOnly/);
-  assert.match(routeSource, /occluders: faceAnalysis\.occluders/);
-  assert.match(routeSource, /occluderBoxes2d: faceAnalysis\.occluderBoxes2d/);
-  assert.match(routeSource, /eyewearBox2d: faceAnalysis\.eyewearBox2d/);
-  assert.match(routeSource, /faceBox2d: faceAnalysis\.faceBox2d/);
-  assert.match(routeSource, /headPose: faceAnalysis\.headPose/);
-  assert.match(routeSource, /maskImage\.geometry/);
-  assert.match(routeSource, /if \(useFollowSceneTwoPass && !twoPassActive\)/);
-  assert.match(routeSource, /派生锚缺失，回退单步换脸/);
-  assert.doesNotMatch(routeSource, /if \(useFollowSceneTwoPass && pass1Result\.success && pass1Result\.data\)/);
-});
-
-test('follow_scene route heartbeats every long phase and gates Pass2 budgets and alpha area', () => {
-  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  for (const phase of [
-    '正在核对余额',
-    '正在分析场景肤色',
-    '正在生成场景换装',
-    '正在定位面部区域',
-    '正在替换模特面容',
-    '正在融合面部',
-    '正在精修面部',
-  ]) {
+  for (const phase of ['正在核对余额', '正在分析场景肤色', '正在生成场景换装']) {
     assert.match(routeSource, new RegExp(phase));
   }
-  assert.match(routeSource, /REQUEST_SOFT_BUDGET_MS = 540_000/);
-  assert.match(routeSource, /PASS2_TOTAL_BUDGET_MS = 240_000/);
-  assert.match(routeSource, /PASS2_FALLBACK_ENTRY_MS = 60_000/);
-  assert.match(routeSource, /PASS2_FALLBACK_TIMEOUT_MS = 180_000/);
-  assert.match(routeSource, /hasSufficientEffectiveAlphaArea\(alphaField\)/);
-  assert.match(routeSource, /promptPurpose: 'faceswap'/);
-  assert.match(routeSource, /allowRetryOn5xx: false/);
   assert.doesNotMatch(routeSource, /harmonizeFaceTone/);
 });
