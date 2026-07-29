@@ -24,11 +24,24 @@ import { generateImage as generateBackendImage, normalizeBackend, resolveApiMode
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage } from '@/lib/postprocess';
-import { compositeFaceRegion, createFaceEditMask, harmonizeFaceTone, isUsableFaceRegion, normalizeImageForFacePass } from '@/lib/face-mask';
+import {
+  alignSwapTone,
+  buildFaceAlphaField,
+  compositeFaceRegion,
+  createFaceEditMask,
+  effectiveAlphaArea,
+  hasSufficientEffectiveAlphaArea,
+  isUsableFaceRegion,
+  normalizeImageForFacePass,
+} from '@/lib/face-mask';
 import { swapFaceVia302 } from '@/lib/face-swap';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
+const REQUEST_SOFT_BUDGET_MS = 540_000;
+const PASS2_TOTAL_BUDGET_MS = 240_000;
+const PASS2_FALLBACK_ENTRY_MS = 60_000;
+const PASS2_FALLBACK_TIMEOUT_MS = 180_000;
 
 // ═══ Route Segment Config ═══
 // 禁止 Next.js 对此 route 的 fetch 做缓存/patch 干扰
@@ -179,53 +192,40 @@ function buildSceneGroupPortraitPrompt(
   return `
 Create ONE photorealistic fictional model identity portrait card.
 
-This is an infrastructure identity anchor for a fashion generation set. The person must be fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
+The person must be fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
 
 Model direction:
 ${modelLine}
 ${bodyLine}
 ${skinLine}
 
-Image requirements:
-- Half-body portrait, front-facing, neutral to slight warm smile.
-- Plain light neutral background, soft natural lighting that reveals real skin texture (avoid flat glamour lighting that erases pores).
-- Realistic hairstyle, no text, no logo, no watermark.
-- The output should be a clear identity reference for one consistent new model.
+Head and shoulders, shot on an 85mm lens from about two metres, her face filling roughly 40% of the frame. Facing camera, chin level, a neutral expression easing toward a faint smile. Plain light grey seamless behind her. One large soft source from the front left, a weak fill on the right, so the light rakes gently across her cheek and reveals the texture of the skin.
+
+Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
 
 ${FACE_REALISM_DIRECTIVE}
   `.trim();
 }
 
-const DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE = `DERIVED ANCHOR PORTRAIT REALISM (critical for downstream face identity quality):
-- Casting: depict a 24-28 year old agency-signed high-fashion editorial model, not an ordinary civilian snapshot subject. The face should have striking, camera-ready features suitable for luxury silk lookbook and editorial campaign work.
-- Skin and retouch: fresh rested skin with professional clean retouching and natural pore-level texture. Keep believable skin detail without pushing freckles, blemishes, fatigue, age, or roughness.
-- Avoid: no heavy freckles, no heavy blemishes, no tired under-eyes, no age-up, no plain civilian look, no generic AI beauty face.
-- Finish: photorealistic fashion portrait, never plastic, CGI, waxy, doll-like, over-smoothed, or celebrity-like.`;
-
 function buildDerivedAnchorPortraitPrompt(skinToneNote?: string): string {
   const skinToneLine = skinToneNote
-    ? `Required anchor skin tone for this portrait: ${skinToneNote}. Render the fictional face with this exact tan depth and warm/cool undertone so it cannot pull downstream edits paler or pinker. This remains ONLY a face-identity anchor; hair, body, pose, styling, lighting, and scene are still not references.`
-    : 'This portrait defines ONLY a new face identity for downstream scene edits. It is NOT a skin-tone reference, NOT a hairstyle reference, NOT a body reference, and NOT a styling reference; those will be taken from each scene-base image later.';
+    ? `Her skin tone is ${skinToneNote} — this exact tan depth and warm/cool undertone. This portrait sets her face and her skin tone; hair, body, pose, styling and lighting come from each scene later.`
+    : 'This portrait sets her face only. Hair, body, pose, styling and lighting come from each scene later.';
 
   return `
-Create ONE photorealistic fictional American-Asian / Eurasian mixed fashion model facial-identity portrait card.
+A studio identity portrait of one fictional woman, newly invented — not any real person, celebrity, or anyone in an uploaded image.
 
-This is an infrastructure facial identity anchor for a fashion generation set. The person must be entirely fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
+She is a 24-28 year old agency fashion model: almond eyes with a subtle East-Asian eyelid, softly defined brows, a gentle nose bridge with a natural tip, high cheekbones over a full midface, a tapered jawline and chin, naturally full and precisely drawn lips. Her face is specific and memorable, with the small asymmetries a real face has — one eye opening slightly wider, one brow a little higher.
 
 ${skinToneLine}
 
-Face direction:
-- A refined mixed European-Asian / Asian-American fictional fashion model face.
-- Almond eyes with subtle East-Asian eyelid character, softly defined brows, a gentle refined nose bridge with a natural tip, high cheekbones, a fuller realistic midface, a tapered jawline and chin, and naturally full but precise lips.
-- Memorable, asymmetric, real human features; not generic, not doll-like, not celebrity-like, not copied from any real person.
+Head and shoulders, shot on an 85mm lens from about two metres, her face filling roughly 40% of the frame. Facing camera, chin level, a neutral expression easing toward a faint smile. Plain light grey seamless behind her. One large soft source from the front left, a weak fill on the right, so the light rakes gently across her cheek and reveals the texture of the skin.
 
-Image requirements:
-- Half-body portrait, front-facing, neutral to slight warm smile.
-- Plain light neutral background, soft natural lighting that reveals real skin texture (avoid flat glamour lighting that erases pores).
-- Simple realistic hair kept clear enough to reveal the face structure; no text, no logo, no watermark.
-- The output should be a clear facial identity reference for one consistent new fictional model.
+Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
 
-${DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE}
+Skin: rested and healthy, rendered at pore level — pores across the T-zone and cheeks, fine vellus hair at the hairline, faint natural tonal shifts between forehead, cheek and chin, sheen only on the nose bridge, upper cheekbone and chin. The retouching is a good retoucher's: texture intact, nothing sanded away.
+
+Grade: restrained analog color, gentle highlight rolloff, fine film grain in the shadow areas of the skin. A photograph.
   `.trim();
 }
 
@@ -235,6 +235,35 @@ ${DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE}
 
 function sseEvent(type: string, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+type StreamPush = (type: string, data: unknown) => void;
+
+function startPhaseBeat(push: StreamPush, phase: string, meta: Record<string, unknown>): () => void {
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    push('status', {
+      ...meta,
+      phase: 'generating',
+      heartbeat: true,
+      message: `${phase}（已耗时 ${Math.round((Date.now() - t0) / 1000)}s）`,
+    });
+  }, 20_000);
+  return () => clearInterval(timer);
+}
+
+async function withPhaseBeat<T>(
+  push: StreamPush,
+  phase: string,
+  meta: Record<string, unknown>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const stop = startPhaseBeat(push, phase, meta);
+  try {
+    return await operation();
+  } finally {
+    stop();
+  }
 }
 
 // 旧版内联实现 callGeminiApi / buildParts 已删除。
@@ -768,9 +797,14 @@ export async function POST(req: NextRequest) {
             };
 
             let derivedAnchorSkinTone: string | undefined;
-            if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && (!anchorImage || useFollowSceneTwoPass)) {
+            if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && !anchorImage) {
               push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
-              derivedAnchorSkinTone = await getSceneSkinTone(sceneRefImages[0]);
+              derivedAnchorSkinTone = await withPhaseBeat(
+                push,
+                '正在分析场景肤色',
+                {},
+                () => getSceneSkinTone(sceneRefImages[0]),
+              );
             }
 
             if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed) {
@@ -836,7 +870,13 @@ export async function POST(req: NextRequest) {
                   : `正在生成第 ${i + 1}/${total} 张组图（参考图 #${refSeq}）...`,
               });
 
-              const balance = await checkBalance(auth.userId, costFen);
+              const phaseMeta = { current: i + 1, total, shotIndex: refSeq };
+              const balance = await withPhaseBeat(
+                push,
+                '正在核对余额',
+                phaseMeta,
+                () => checkBalance(auth.userId, costFen),
+              );
               if (!balance.sufficient) {
                 const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -852,7 +892,12 @@ export async function POST(req: NextRequest) {
               }
 
               const chargeLabel = chargeDescription(sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`);
-              const deduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
+              const deduction = await withPhaseBeat(
+                push,
+                '正在核对余额',
+                phaseMeta,
+                () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel),
+              );
               if (!deduction.success) {
                 const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -873,9 +918,33 @@ export async function POST(req: NextRequest) {
               let resultHeight = 0;
               let shotLatency = 0;
               let prompt = '';
+              const timings = {
+                t_analyze: 0,
+                t_pass1: 0,
+                t_bbox: 0,
+                t_swap: 0,
+                t_align: 0,
+                t_composite: 0,
+                t_maskedit: 0,
+                t_encode: 0,
+              };
+              const logTimings = () => {
+                console.log(`[timing] #${refSeq} ` + Object.entries(timings)
+                  .map(([key, value]) => `${key}=${value}ms`)
+                  .join(' '));
+              };
               try {
                 const twoPassActive = useFollowSceneTwoPass && !!anchorImage;
-                const sceneSkinTone = useFollowSceneTwoPass ? await getSceneSkinTone(baseRef) : undefined;
+                const analyzeStart = Date.now();
+                const sceneSkinTone = useFollowSceneTwoPass
+                  ? await withPhaseBeat(
+                      push,
+                      '正在分析场景肤色',
+                      phaseMeta,
+                      () => getSceneSkinTone(baseRef),
+                    )
+                  : undefined;
+                timings.t_analyze = Date.now() - analyzeStart;
                 if (useFollowSceneTwoPass && !twoPassActive) {
                   console.log(`[sceneGroup] 派生锚缺失，回退单步换脸 #${refSeq}`);
                 }
@@ -893,16 +962,23 @@ export async function POST(req: NextRequest) {
                   customPrompt: safeCustomPrompt,
                 });
                 const shotStart = Date.now();
-                const pass1Result = await generateBackendImage({
-                  prompt,
-                  productImages: currentProductImages,
-                  sceneRefImages: [baseRef],
-                  accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
-                  anchorImage: !twoPassActive && shouldUseSceneGroupAnchor ? anchorImage : undefined,
-                  sceneAsEditBase: true,
-                  aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-                  ...(engine === 'openai' ? { quality } : {}),
-                }, engine);
+                const pass1Start = Date.now();
+                const pass1Result = await withPhaseBeat(
+                  push,
+                  '正在生成场景换装',
+                  phaseMeta,
+                  () => generateBackendImage({
+                    prompt,
+                    productImages: currentProductImages,
+                    sceneRefImages: [baseRef],
+                    accessoryImages: hasReplacementAccessory ? accessoryImages : undefined,
+                    anchorImage: !twoPassActive && shouldUseSceneGroupAnchor ? anchorImage : undefined,
+                    sceneAsEditBase: true,
+                    aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                    ...(engine === 'openai' ? { quality } : {}),
+                  }, engine),
+                );
+                timings.t_pass1 = Date.now() - pass1Start;
                 result = pass1Result;
 
                 if (twoPassActive && pass1Result.success && pass1Result.data) {
@@ -914,13 +990,21 @@ export async function POST(req: NextRequest) {
                     message: '正在替换模特面容...',
                   });
 
+                  const pass2Start = Date.now();
                   try {
                     const normalizedPass1 = await normalizeImageForFacePass({
                       data: pass1Result.data,
                       mimeType: 'image/png',
                     });
                     const { analyzeFaceRegionAndSkin } = await import('@/lib/ai-assistant');
-                    const faceAnalysis = await analyzeFaceRegionAndSkin(normalizedPass1.data, normalizedPass1.mimeType);
+                    const bboxStart = Date.now();
+                    const faceAnalysis = await withPhaseBeat(
+                      push,
+                      '正在定位面部区域',
+                      phaseMeta,
+                      () => analyzeFaceRegionAndSkin(normalizedPass1.data, normalizedPass1.mimeType),
+                    );
+                    timings.t_bbox = Date.now() - bboxStart;
                     const faceSkipLog = {
                       visibility: faceAnalysis?.visibility ?? 'null',
                       box: faceAnalysis?.visibleFaceBox2d,
@@ -936,77 +1020,150 @@ export async function POST(req: NextRequest) {
                         faceBox2d: faceAnalysis.faceBox2d,
                         headPose: faceAnalysis.headPose,
                       });
-                      let pass2Resolved = false;
+                      console.log(`[face-geom] #${refSeq}`, JSON.stringify({
+                        pose: faceAnalysis.headPose,
+                        vis: faceAnalysis.visibility,
+                        img: `${normalizedPass1.width}x${normalizedPass1.height}`,
+                        ellipse: maskImage.geometry.ellipse,
+                        faceRect: maskImage.geometry.faceRect,
+                        occ: maskImage.geometry.occluderRects.map(
+                          rect => `${rect.label}:${rect.left},${rect.top},${rect.right},${rect.bottom}`,
+                        ),
+                        faceBox2d: faceAnalysis.faceBox2d,
+                        visibleBox2d: faceAnalysis.visibleFaceBox2d,
+                      }));
 
-                      const faceSwapV2Result = anchorImage
-                        ? await swapFaceVia302(normalizedPass1, anchorImage)
-                        : null;
-                      if (faceSwapV2Result?.data) {
-                        try {
-                          const compositedFace = await compositeFaceRegion(
-                            normalizedPass1.buffer,
-                            Buffer.from(faceSwapV2Result.data, 'base64'),
-                            maskImage.geometry,
-                          );
-                          let finalPass2Data = compositedFace.toString('base64');
-                          try {
-                            const harmonizedFace = await harmonizeFaceTone(
-                              normalizedPass1.buffer,
-                              compositedFace,
-                              maskImage.geometry,
-                            );
-                            finalPass2Data = harmonizedFace.toString('base64');
-                          } catch (toneErr) {
-                            console.log('[sceneGroup] Pass2=faceswap-v2 面部调色失败，使用本地合成结果:', toneErr instanceof Error ? toneErr.message : toneErr);
-                          }
-                          result = { ...pass1Result, data: finalPass2Data };
-                          prompt = `${prompt}\n\n--- PASS2 FACE SWAP V2 ---\n302 face-swap-v2 + local ellipse composite + tone harmonization.`;
-                          pass2Resolved = true;
-                          console.log(`[sceneGroup] Pass2=faceswap-v2 #${refSeq}`);
-                        } catch (swapCompositeErr) {
-                          console.log('[sceneGroup] Pass2=faceswap-v2 合成失败，回退 GPT mask edits:', swapCompositeErr instanceof Error ? swapCompositeErr.message : swapCompositeErr);
-                        }
+                      const alphaField = await withPhaseBeat(
+                        push,
+                        '正在融合面部',
+                        phaseMeta,
+                        () => buildFaceAlphaField(
+                          maskImage.geometry,
+                          normalizedPass1.width,
+                          normalizedPass1.height,
+                        ),
+                      );
+                      const alphaArea = effectiveAlphaArea(alphaField);
+                      console.log(`[face-alpha] #${refSeq}`, {
+                        effectivePixels: alphaArea.pixels,
+                        totalPixels: alphaField.length,
+                        ratio: alphaArea.ratio,
+                        threshold: 0.0012,
+                      });
+
+                      if (!hasSufficientEffectiveAlphaArea(alphaField)) {
+                        console.log(
+                          `[sceneGroup] Pass2 跳过 #${refSeq}: 有效换脸区 ${(alphaArea.ratio * 100).toFixed(4)}% < 0.12%，交付 Pass1`,
+                        );
+                      } else if (Date.now() - startTime > REQUEST_SOFT_BUDGET_MS - PASS2_TOTAL_BUDGET_MS) {
+                        console.log(`[sceneGroup] Pass2 跳过 #${refSeq}: 请求预算不足，交付 Pass1`);
                       } else {
-                        console.log(`[sceneGroup] Pass2=faceswap-v2 未产出 #${refSeq}，回退 GPT mask edits`);
-                      }
-
-                      if (!pass2Resolved) {
-                        const lowerFaceOnly = faceAnalysis.occluders.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
-                        const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
-                          lowerFaceOnly,
-                          occluders: faceAnalysis.occluders,
-                        });
-                        const pass2Result = await generateBackendImage({
-                          prompt: faceSwapPrompt,
-                          productImages: [],
-                          sceneRefImages: [{
-                            data: normalizedPass1.data,
-                            mimeType: normalizedPass1.mimeType,
-                            skipNormalization: true,
-                          }],
-                          anchorImage,
-                          maskImage,
-                          sceneAsEditBase: true,
-                          aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-                          quality,
-                        }, engine);
-
-                        if (pass2Result.success && pass2Result.data) {
-                          let finalPass2Data = pass2Result.data;
+                        let pass2Resolved = false;
+                        const lowerFaceOnly = faceAnalysis.occluders.some(
+                          item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item),
+                        );
+                        const swapStart = Date.now();
+                        const swapAnchor = anchorImage;
+                        const faceSwapV2Result = swapAnchor
+                          ? await withPhaseBeat(
+                              push,
+                              '正在替换模特面容',
+                              phaseMeta,
+                              () => swapFaceVia302(normalizedPass1, swapAnchor),
+                            )
+                          : null;
+                        timings.t_swap = Date.now() - swapStart;
+                        if (faceSwapV2Result?.data) {
                           try {
-                            const harmonizedFace = await harmonizeFaceTone(
-                              normalizedPass1.buffer,
-                              Buffer.from(pass2Result.data, 'base64'),
-                              maskImage.geometry,
+                            const swapBuffer = Buffer.from(faceSwapV2Result.data, 'base64');
+                            const alignStart = Date.now();
+                            const alignedFace = await withPhaseBeat(
+                              push,
+                              '正在融合面部',
+                              phaseMeta,
+                              () => alignSwapTone(
+                                normalizedPass1.buffer,
+                                swapBuffer,
+                                maskImage.geometry,
+                              ),
                             );
-                            finalPass2Data = harmonizedFace.toString('base64');
-                          } catch (toneErr) {
-                            console.log('[sceneGroup] Pass2 GPT mask edits 面部调色失败，使用原 Pass2 结果:', toneErr instanceof Error ? toneErr.message : toneErr);
+                            timings.t_align = Date.now() - alignStart;
+                            const compositeStart = Date.now();
+                            const compositedFace = await withPhaseBeat(
+                              push,
+                              '正在融合面部',
+                              phaseMeta,
+                              () => compositeFaceRegion(
+                                normalizedPass1.buffer,
+                                alignedFace,
+                                maskImage.geometry,
+                                alphaField,
+                              ),
+                            );
+                            timings.t_composite = Date.now() - compositeStart;
+                            if (compositedFace) {
+                              result = { ...pass1Result, data: compositedFace.toString('base64') };
+                              prompt = `${prompt}\n\n--- PASS2 FACE SWAP V2 ---\n302 face-swap-v2 + pre-composite tone alignment + single blurred alpha composite.`;
+                              pass2Resolved = true;
+                              console.log(`[sceneGroup] Pass2=faceswap-v2 #${refSeq} (${Date.now() - pass2Start}ms)`);
+                            } else {
+                              console.log(`[sceneGroup] Pass2=faceswap-v2 合成被拒 #${refSeq}，回退 GPT mask edits`);
+                            }
+                          } catch (swapCompositeErr) {
+                            console.log('[sceneGroup] Pass2=faceswap-v2 合成失败，回退 GPT mask edits:', swapCompositeErr instanceof Error ? swapCompositeErr.message : swapCompositeErr);
                           }
-                          result = { ...pass2Result, data: finalPass2Data };
-                          prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
                         } else {
-                          console.log('[sceneGroup] Pass2 GPT mask edits 失败，交付 Pass1 结果:', pass2Result.error);
+                          console.log(`[sceneGroup] Pass2=faceswap-v2 未产出 #${refSeq}，回退 GPT mask edits`);
+                        }
+
+                        if (!pass2Resolved) {
+                          const pass2Elapsed = Date.now() - pass2Start;
+                          const requestElapsed = Date.now() - startTime;
+                          const fallbackBudgetInsufficient = pass2Elapsed > PASS2_FALLBACK_ENTRY_MS
+                            || pass2Elapsed > PASS2_TOTAL_BUDGET_MS - PASS2_FALLBACK_TIMEOUT_MS
+                            || requestElapsed > REQUEST_SOFT_BUDGET_MS - PASS2_FALLBACK_TIMEOUT_MS;
+                          if (fallbackBudgetInsufficient) {
+                            console.log(`[sceneGroup] Pass2 GPT mask edits 预算不足 #${refSeq}，交付 Pass1`, {
+                              pass2Elapsed,
+                              requestElapsed,
+                            });
+                          } else {
+                            const faceSwapPrompt = buildFaceSwapPrompt(faceAnalysis.skinTone, {
+                              lowerFaceOnly,
+                              occluders: faceAnalysis.occluders,
+                            });
+                            const maskEditStart = Date.now();
+                            const pass2Result = await withPhaseBeat(
+                              push,
+                              '正在精修面部',
+                              phaseMeta,
+                              () => generateBackendImage({
+                                prompt: faceSwapPrompt,
+                                productImages: [],
+                                sceneRefImages: [{
+                                  data: normalizedPass1.data,
+                                  mimeType: normalizedPass1.mimeType,
+                                  skipNormalization: true,
+                                }],
+                                anchorImage,
+                                maskImage,
+                                sceneAsEditBase: true,
+                                promptPurpose: 'faceswap',
+                                timeoutMs: PASS2_FALLBACK_TIMEOUT_MS,
+                                allowRetryOn5xx: false,
+                                aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                                quality,
+                              }, engine),
+                            );
+                            timings.t_maskedit = Date.now() - maskEditStart;
+                            if (pass2Result.success && pass2Result.data) {
+                              result = pass2Result;
+                              prompt = `${prompt}\n\n--- PASS2 FACE SWAP PROMPT ---\n${faceSwapPrompt}`;
+                              console.log(`[sceneGroup] Pass2=GPT mask edits #${refSeq}`);
+                            } else {
+                              console.log('[sceneGroup] Pass2 GPT mask edits 失败，交付 Pass1 结果:', pass2Result.error);
+                            }
+                          }
                         }
                       }
                     }
@@ -1016,13 +1173,16 @@ export async function POST(req: NextRequest) {
                 }
                 shotLatency = Date.now() - shotStart;
                 if (result.success && result.data) {
+                  const encodeStart = Date.now();
                   const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
+                  timings.t_encode = Date.now() - encodeStart;
                   result = { ...result, data: normalized.b64 };
                   resultWidth = normalized.width;
                   resultHeight = normalized.height;
                 }
               } catch (innerErr) {
                 const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
+                logTimings();
                 await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
@@ -1036,6 +1196,7 @@ export async function POST(req: NextRequest) {
                 continue; // 组图每张独立，某张异常不整批中止
               }
 
+              logTimings();
               const resultApiModel = result.model || resolveApiModel(result.backend);
               const deliveredButDisconnected = result.success && !!result.data && clientClosed;
               recordGeneration({

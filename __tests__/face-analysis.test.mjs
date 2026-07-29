@@ -65,3 +65,48 @@ test('analyzeFaceRegionAndSkin requests and parses profile pose plus exact eyewe
     else process.env.GEMINI_API_KEY = previousKey;
   }
 });
+
+test('sanitizeOccluderBoxes drops a box covering more than 60 percent of the visible face', async () => {
+  const previousKey = process.env.GEMINI_API_KEY;
+  const previousFetch = globalThis.fetch;
+  const previousLog = console.log;
+  process.env.GEMINI_API_KEY = 'face-analysis-area-test-key';
+  const logs = [];
+  console.log = (...args) => logs.push(args);
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    candidates: [{
+      content: {
+        parts: [{
+          text: JSON.stringify({
+            skinTone: 'medium warm olive tan',
+            faceBox2d: [100, 100, 900, 900],
+            visibleFaceBox2d: [200, 200, 800, 800],
+            eyewearBox2d: null,
+            headPose: 'frontal',
+            occluders: ['hair'],
+            occluderBoxes2d: [
+              { label: 'hair', box2d: [210, 210, 790, 790] },
+              { label: 'hair strand', box2d: [300, 300, 400, 400] },
+            ],
+            visibility: 'partial',
+            confidence: 0.9,
+          }),
+        }],
+      },
+    }],
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  try {
+    const assistant = await import(`../lib/ai-assistant.ts?face-analysis-area-test=${Date.now()}`);
+    const result = await assistant.analyzeFaceRegionAndSkin('ZmFrZQ==', 'image/png');
+    assert.deepEqual(result.occluderBoxes2d, [
+      { label: 'hair strand', box2d: [300, 300, 400, 400] },
+    ]);
+    assert.ok(logs.some(args => String(args[0]).includes('occluder box 过大')));
+  } finally {
+    console.log = previousLog;
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previousKey;
+  }
+});

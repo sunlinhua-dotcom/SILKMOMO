@@ -125,20 +125,14 @@ export function getRandomWaitingMessage(): string {
  * 图像模型默认出对称、无毛孔、磨皮的「AI 美人脸」；不显式要求真实质感就会太假。
  * 复用于肖像卡（route.ts）与产品/场景/换装三个构造器，让生成的模特看着像被真实拍下的活人。
  */
-export const FACE_REALISM_DIRECTIVE = `FACE, SKIN & LIGHT REALISM (critical — the image must look like a REAL photograph of a REAL person taken on a real camera, NOT an AI/CGI or retouched beauty render):
-- Skin: natural film-photograph texture with visible pores, fine texture, tiny blemishes, subtle under-eye shadows, slight uneven tone, and normal skin sheen. Preserve these details; do not invent a porcelain, wax, plastic, or uniformly matte surface.
-- Face: believable fashion-model features with small real asymmetries. Keep the requested expression, makeup language, hair styling, and age feeling from the relevant reference; do not beautify into a fixed flawless face or a generic AI model face.
-- Retouching limits: no airbrushing, no beauty filter, no skin-smoothing, no over-sharpened HDR, no glossy CGI highlights, no heavy digital color grading. Use a film look with subtle analog grain and natural micro-contrast.
-- Lighting: reference first. If any scene, background, anchor, or style reference is provided, match that reference's light direction, softness/hardness, color temperature, contrast, shadow density, filter, and mood. Do not create a new studio lighting setup or glamour light unless the reference itself uses it. Only when no lighting reference exists, use soft natural directional daylight.
-- Overall: authentic editorial lookbook photography with real skin texture and restrained film color, not a polished render, synthetic beauty ad, or over-retouched studio portrait.`;
+export const FACE_REALISM_DIRECTIVE = `REALISM (highest priority — this is a photograph, 35mm film, 85mm lens):
+- Skin renders at pore level: visible pores across the T-zone and cheeks, fine vellus hair along the hairline and jaw, one or two small natural marks, tone that shifts between forehead, cheek and chin, and sheen only where sebum naturally sits — nose bridge, upper cheekbone, chin.
+- The face carries real asymmetry: the two eyes differ slightly in shape and opening, one brow sits higher, the smile pulls further to one side.
+- Every pore, texture break and tonal shift survives at 100% zoom.
+- Grade: restrained analog color, gentle highlight rolloff, soft shadow shoulder, fine film grain visible in the shadow areas of skin and fabric.
+- Lighting comes from the scene or background reference: copy its light direction, hardness, color temperature, contrast, shadow density and mood. With no scene or background reference, use soft directional daylight from one side. An anchor portrait is an identity reference only and never a lighting reference.`;
 
 const SAFE_CROPPED_COMPOSITION_DIRECTIVE = `Cropped composition safety: If the reference or shot calls for a face-outside-frame crop, describe and render it as a standard e-commerce crop: frame cropped at the neck/shoulders or with the head naturally outside the frame. Keep normal human anatomy and garment fit; never interpret it as a "headless" or "no head" body concept.`;
-
-const FACE_SWAP_EYEWEAR_OCCLUDER_RE = /\b(sunglasses?|eyeglasses?|glasses|eyewear|goggles|shades|spectacles)\b/i;
-
-function hasFaceSwapEyewearOccluder(occluders: string[] | undefined): boolean {
-  return !!occluders?.some(item => FACE_SWAP_EYEWEAR_OCCLUDER_RE.test(item));
-}
 
 /**
  * 为产品图模块的单个镜次构建完整的 Prompt
@@ -169,11 +163,11 @@ export function buildProductShotPrompt(options: ShotGenerateOptions): string {
   const garmentDesc = options.garmentDescription
     ? `Garment (AI-analyzed): ${options.garmentDescription}. The product reference image(s) are the ONLY source for garment style, cut, silhouette, proportion, neckline, sleeve style, hem, fabric, color hue, pattern/print motifs, seams, closures, and construction. Reproduce these details faithfully.`
     : `Garment: The product reference image(s) are the ONLY source for clothing style, cut, silhouette, fabric drape, color, neckline, sleeves, hem, seams, and construction. Extract and reproduce them faithfully on the model.`;
-  const fabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
+  const fabricNote = options.garmentDescription && /\bsilk\b(?!-look|-like)/i.test(options.garmentDescription)
     ? `Fabric quality: Premium silk — show the characteristic lustre, smooth drape, and refined texture.`
     : options.garmentDescription
       ? `Fabric quality: Show the authentic material texture and drape as visible in the reference images.`
-      : `Fabric quality: Premium 22momme silk — show the characteristic lustre, smooth drape, and refined texture.`;
+      : `Fabric quality: Render the material texture and drape exactly as the reference shows.`;
   const garmentFocus = `${garmentDesc}\n${fabricNote}`;
 
   // 6. 背景（产品图模块：杜绝纯白底，营造自然真实氛围）
@@ -194,10 +188,10 @@ CRITICAL RULES (follow strictly):
 - Produce a single, clean, photorealistic image. No collage, split-screen, or multiple views.
 - The output must look like a real photograph, not an illustration or 3D render.
 ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
-
+${shot.hasModel ? `
 MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
 - If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME fictional model identity: same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling. The model must look like the SAME PERSON across all shots.
-- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.
+- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.` : ''}
   `.trim();
 
   // 9. 用户额外要求（仅当提供时追加，且不能覆盖 safetyRules / 服装一致性）
@@ -271,21 +265,21 @@ export function buildSceneShotPrompt(options: SceneGenerateOptions): string {
   const sceneGarmentDesc = options.garmentDescription
     ? `Garment (AI-analyzed): ${options.garmentDescription}. The product reference image(s) are the ONLY source for garment style, cut, silhouette, proportion, fabric pattern, color, and construction. Faithfully reproduce ALL product details on the model.`
     : `Garment: The product reference image(s) are the ONLY source for clothing style, cut, silhouette, fabric, color, seams, and construction. Extract all clothing details from them and faithfully reproduce them on the model.`;
-  const sceneFabricNote = options.garmentDescription && options.garmentDescription.toLowerCase().includes('silk')
+  const sceneFabricNote = options.garmentDescription && /\bsilk\b(?!-look|-like)/i.test(options.garmentDescription)
     ? `Show premium silk quality — its natural lustre and fluid drape.`
     : options.garmentDescription
       ? `Show the authentic material texture and drape.`
-      : `Show premium 22momme silk quality — its natural lustre and fluid drape.`;
+      : `Render the material texture and drape exactly as the reference shows.`;
   const garmentFocus = `${sceneGarmentDesc} ${sceneFabricNote}`;
 
   // 5. 场景（由场景参考图完全驱动）
-  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, filter, atmosphere, and background elements from those images. Light the model to MATCH the scene's lighting exactly - same light direction, softness, color temperature, contrast, and shadow character - so the person is naturally integrated into the scene and never lit differently from it. Recreate a similar scene atmosphere for this shot - DO NOT invent a scene or use preset locations.`;
+  const sceneBg = `Scene & Background: Use the provided scene reference image(s) as the definitive environment guide. Extract the spatial structure, lighting direction, ambient color palette, filter, atmosphere, and background elements from those images. Light the model to MATCH the scene's lighting exactly - same light direction, softness, color temperature, contrast, and shadow character - so the person is naturally integrated into the scene and never lit differently from it. Recreate the exact scene atmosphere for this shot - DO NOT invent a scene or use preset locations.`;
 
   // 6. 模特状态（场景图：根据环境解析，主打活人感不摆拍）
-  const modelMood = `Model mood and posture: First, analyze the scene setting. Then, make the model adopt the most natural and relaxed pose that perfectly fits into that environment. Exhibit a candid, raw, and authentic human presence ("活人感", "不摆拍"). Avoid stiff commercial catalog looks entirely. Hair can be slightly messy but elegant.`;
+  const modelMood = `Model mood and posture: Make the model adopt the most natural and relaxed pose that perfectly fits into the scene environment. Exhibit a candid, raw, and authentic human presence ("活人感", "不摆拍"). Avoid stiff commercial catalog looks entirely. Hair can be slightly messy but elegant.`;
 
   // 7. 摄影风格（整体氛围保留）
-  const photography = `Photography style: Lifestyle and editorial fashion photography. Analyze the scene reference to retain its exact atmosphere, camera angle, composition, light, filter, expression, makeup language, and overall photographic language. Preserve everything except the product garment. Film-inspired 35mm analog feel, subtle grain, natural contrast, and restrained color.`;
+  const photography = `Photography style: Lifestyle and editorial fashion photography. Analyze the scene reference to retain its exact atmosphere, camera angle, composition, light, filter, expression, makeup language, and overall photographic language. Film-inspired 35mm analog feel, subtle grain, natural contrast, and restrained color.`;
 
   // 8. 防护指令
   const safetyRules = `
@@ -297,10 +291,10 @@ CRITICAL RULES (follow strictly):
 - Produce a single, clean, photorealistic image. No collage or multi-panel.
 - The output must look like a real analog photograph, not digital art.
 ${SAFE_CROPPED_COMPOSITION_DIRECTIVE}
-
+${hasModel ? `
 MODEL IDENTITY CONSISTENCY (CRITICAL for multi-shot series):
 - If an "Anchor Reference Image" is provided, you MUST use the EXACT SAME fictional model identity: same face shape, eye shape, eyebrow shape, nose bridge, lip shape, hair color, hair length, hairline, makeup feel, skin complexion, and overall age feeling. The model must look like the SAME PERSON across all shots.
-- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.
+- Only the pose, camera angle, and framing should change between shots - the model's identity must remain absolutely identical.` : ''}
   `.trim();
 
   // 用户额外要求
@@ -403,7 +397,7 @@ export function buildSceneGroupPrompt(options: SceneGroupGenerateOptions): strin
 2. Group model consistency second: ${groupModelConsistencyRule}
 3. Reference lighting/filter/atmosphere third: the scene-base image is the ONLY authority for lighting direction, shadow softness, color temperature, color grade, filter, atmosphere, scene, background, environment, and overall photographic language; preserve these pixel-faithfully.
 4. Worn accessories fourth: every non-garment item the scene-base person wears or carries (headwear/hat, sunglasses/eyeglasses, jewelry, belt, bag, watch, scarf, shoes) MUST stay present, worn the same way, in the same position, with the same occlusion of face or body. The garment swap and the identity swap NEVER add, remove, lift, or reposition these items.
-5. Reference expression/makeup/styling fifth: keep the scene-base person's expression, mood, makeup language, hairstyle styling, pose, and body attitude, while changing only facial identity as required. Face visibility must match the base: if the base person's face is partially or fully hidden by headwear, eyewear, hair, or camera angle, keep it hidden the same way.
+5. Reference expression/makeup/styling fifth: keep the scene-base person's expression, mood, makeup language, hairstyle styling, pose, and body attitude${isGarmentOnlyPass ? '' : ', while changing only facial identity as required'}. Face visibility must match the base: if the base person's face is partially or fully hidden by headwear, eyewear, hair, or camera angle, keep it hidden the same way.
 6. Group continuity sixth: ${groupContinuityRule}`;
 
   const regenerationRule = isRegeneration
@@ -468,7 +462,7 @@ Do NOT re-stage, re-pose, re-frame, re-light, or change the filter. The result m
 CRITICAL RULES (follow strictly):
 - Output exactly ONE photorealistic image. No collage, split-screen, grid, or multiple views.
 - Do NOT render any text, watermark, logo, or letters.
-- Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change. Never add, remove, or reposition worn accessories.
+${isGarmentOnlyPass ? '' : "- Do NOT alter the scene, pose, framing, or lighting. Only the garment and the person's identity change. Never add, remove, or reposition worn accessories."}
 - Product reference images are garment references ONLY - ignore any person, face, hairstyle, identity, background, wall, floor, lighting, color tone, filter, prop, or scene element visible in them.
 - The scene-base image is the sole authority for scene, background, lighting, filter, color grade, and atmosphere; preserve them pixel-faithfully.
 - The output must read as the SAME exposure and development as the base photo: same histogram character, same subject-to-background brightness ratio, same white balance, same grain. No added fill light on the face, no brightening, no beauty relighting, no extra saturation or glow in the sky or on skin.
@@ -502,33 +496,22 @@ export function buildFaceSwapPrompt(
   options: FaceSwapPromptOptions = {},
 ): string {
   const skinToneRule = skinToneNote
-    ? `Scene skin tone lock: ${skinToneNote}. The edited face must keep this exact tan depth, warmth/coolness, undertone, and exposure so it matches the person\'s neck/body perfectly.`
-    : 'Scene skin tone lock: the edited face skin must match the person\'s neck/body in the image perfectly: same tan depth, warmth/coolness, undertone, exposure, shadows, and grain.';
-  const lowerFaceOnly = options.lowerFaceOnly || hasFaceSwapEyewearOccluder(options.occluders);
+    ? `The face skin is ${skinToneNote} — this exact tan depth, warmth and undertone, matching her neck and body.`
+    : 'The face skin matches her neck and body exactly: same tan depth, warmth, undertone, exposure, shadows and grain.';
+  const lowerFaceOnly = options.lowerFaceOnly;
   const lowerFaceRule = lowerFaceOnly
-    ? `
-LOWER-FACE IDENTITY MODE (eyewear or face occlusion detected):
-- The identity MUST change through the visible lower face: different lip outline and cupid's bow, different mouth width, different philtrum length, different chin point and jaw angle, different lower-cheek contour.
-- Reproducing the scene-base person's lips, mouth width, jawline, or chin is a FAILURE.
-- Keep sunglasses, eyeglasses, hats, hair, shadows, and every occluder exactly unchanged. Do not invent hidden eyes, uncover the face, or expand the visible face area.`
+    ? `Her eyes are behind eyewear, so the identity reads entirely from the lower face: take the anchor's lip outline and cupid's bow, mouth width, philtrum length, chin point, jaw angle and lower-cheek contour. Reproducing the previous person's lips, mouth width, jawline or chin is a failure. The eyewear itself is untouched, and no eye is drawn behind it.`
     : '';
 
-  return `
-FACE SWAP PASS - single objective:
-Only in the editable area defined by the mask, redraw the visible facial features to match the anchor reference facial structure: face shape, eye shape, eyebrow shape, nose bridge, cheekbone structure, lips, jawline, chin, and facial proportions.
+  return `Replace the face inside the mask with the anchor person's face. The woman in the masked area becomes that individual: her face shape, eye shape and spacing, brow shape, nose bridge and tip, cheekbone structure, lip shape, jawline, chin and facial proportions. Someone who knows the anchor recognizes her here; someone who knew the previous face sees a different woman.
 
-${skinToneRule}
+This photograph lights the new face, not the anchor's: same light direction, same exposure, same shadow density and placement, same color temperature, same film grain and sensor noise as the neck and shoulders directly below it. ${skinToneRule}
+
+The new skin carries visible pores, fine texture and slightly uneven tone at the same level of detail as the neck below it. No retouching, no beauty smoothing.
+
+The mask is the whole edit. Outside it every pixel is final: hair, hairline, eyewear, hat brim, jewelry, hands, garment, background, pose and crop. Where hair, glasses, a hat brim or a shadow covers part of the face, it goes on covering exactly the same area.
 ${lowerFaceRule}
-
-Hard preservation rules:
-- The editable area is ONLY the visible skin/feature area of the face. Do not change hair strands, hairline outside the mask, sunglasses, eyeglasses, hat brim, jewelry, hands, clothing, background, pose, crop, or any occluder.
-- If hair, sunglasses, a hat brim, a shadow, or any object hides part of the face, keep that occlusion exactly; never remove, lift, repaint, or move it to reveal more face.
-- Match the whole image's light direction, exposure, shadow density, color temperature, film grain, sensor noise, and skin micro-texture.
-- Outside the editable area, do not change one pixel. No retouching, no beauty smoothing, no relighting, no color shift, no accessory changes.
-- Product garment, body, hair, styling, expression direction, pose, scene, and crop are already final and must remain unchanged.
-
-Return one photorealistic image, not a collage.
-  `.trim();
+Return one photograph.`;
 }
 
 // 旧版 generateProductShots / generateSceneShots / generateSevenImages 已删除。

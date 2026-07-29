@@ -10,6 +10,10 @@ export const REFERENCE_IMAGE_MAX_DIMENSION = 1920;
 
 const JPEG_QUALITIES = [82, 74, 66, 58, 50, 42] as const;
 
+export interface NormalizeReferenceImageOptions {
+  preserveLossless?: boolean;
+}
+
 function safeMimeType(mimeType: string): string {
   return mimeType.replace(/[\r\n]/g, '').slice(0, 80) || 'unknown';
 }
@@ -54,6 +58,7 @@ async function encodeAtDimension(
 export async function normalizeReferenceImage<T extends ReferenceImageInput>(
   input: T,
   label = 'reference',
+  options: NormalizeReferenceImageOptions = {},
 ): Promise<T> {
   const declaredMime = safeMimeType(input.mimeType);
   let inputBuffer: Buffer | undefined;
@@ -65,6 +70,22 @@ export async function normalizeReferenceImage<T extends ReferenceImageInput>(
     const orientedWidth = metadata.autoOrient?.width ?? metadata.width;
     const orientedHeight = metadata.autoOrient?.height ?? metadata.height;
     inputDimensions = dimensionLabel(orientedWidth, orientedHeight);
+
+    if (options.preserveLossless) {
+      const lossless = await sharp(inputBuffer)
+        .rotate()
+        .png({ compressionLevel: 9, adaptiveFiltering: true })
+        .toBuffer({ resolveWithObject: true });
+      console.info(
+        `[ref-image-normalize] ${label}: ${inputBuffer.length}B ${declaredMime} ${inputDimensions} -> ` +
+        `${lossless.data.length}B image/png ${dimensionLabel(lossless.info.width, lossless.info.height)} (lossless)`,
+      );
+      return {
+        ...input,
+        data: lossless.data.toString('base64'),
+        mimeType: 'image/png',
+      };
+    }
 
     const stats = metadata.hasAlpha ? await sharp(inputBuffer).stats() : undefined;
     const preserveTransparency = metadata.hasAlpha && stats?.isOpaque === false;
