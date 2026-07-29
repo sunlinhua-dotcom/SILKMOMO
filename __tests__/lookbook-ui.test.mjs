@@ -41,3 +41,20 @@ test('pending task parameter panel hides model selectors for follow_scene group 
     'pending ModelSelector must be in the non-follow_scene branch',
   );
 });
+
+test('task generation watchdog isolates stalls to one chunk and consumes phase heartbeats', () => {
+  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const chunkLoop = source.indexOf('for (let chunkIdx = 0; chunkIdx < genChunks.length; chunkIdx++)');
+  const chunkController = source.indexOf('const chunkController = new AbortController()', chunkLoop);
+  const chunkCatch = source.indexOf('if (stalledOut !== null)', chunkController);
+  const nextChunk = source.indexOf('continue;', chunkCatch);
+
+  assert.match(source, /const STALL_BYTES_MS = 120_000/);
+  assert.match(source, /openai: 150_000/);
+  assert.ok(chunkLoop > -1 && chunkController > chunkLoop);
+  assert.ok(chunkCatch > chunkController && nextChunk > chunkCatch);
+  assert.match(source, /doneSoFar \+= chunkShots\.length/);
+  assert.match(source, /payload\.heartbeat === true/);
+  assert.match(source, /setWaitingMessage\(payload\.message\)/);
+  assert.match(source, /compressAnchorBase64\(imageData\)/);
+});

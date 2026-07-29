@@ -223,6 +223,8 @@ export interface FaceOccluderBox2d {
   box2d: [number, number, number, number];
 }
 
+type FaceBox2d = [number, number, number, number];
+
 export interface FaceRegionAnalysis {
   skinTone: string;
   faceBox2d: [number, number, number, number];
@@ -268,9 +270,11 @@ function sanitizeOccluders(value: unknown): string[] {
     .slice(0, 8);
 }
 
-function sanitizeOccluderBoxes(value: unknown): FaceOccluderBox2d[] {
+function sanitizeOccluderBoxes(value: unknown, visibleFaceBox2d: FaceBox2d): FaceOccluderBox2d[] {
   if (!Array.isArray(value)) return [];
   const boxes: FaceOccluderBox2d[] = [];
+  const visibleArea = (visibleFaceBox2d[2] - visibleFaceBox2d[0])
+    * (visibleFaceBox2d[3] - visibleFaceBox2d[1]);
   for (const item of value) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const candidate = item as { label?: unknown; box2d?: unknown };
@@ -279,6 +283,16 @@ function sanitizeOccluderBoxes(value: unknown): FaceOccluderBox2d[] {
       : '';
     const box2d = parseBox2d(candidate.box2d);
     if (!label || !box2d) continue;
+    const boxArea = (box2d[2] - box2d[0]) * (box2d[3] - box2d[1]);
+    if (boxArea > visibleArea * 0.6) {
+      console.log('[face-geom] occluder box 过大，已丢弃', {
+        label,
+        box2d,
+        visibleFaceBox2d,
+        areaRatio: boxArea / visibleArea,
+      });
+      continue;
+    }
     boxes.push({ label, box2d });
     if (boxes.length >= 12) break;
   }
@@ -374,7 +388,6 @@ Rules:
     const faceBox2d = parseBox2d(parsed.faceBox2d);
     const visibleFaceBox2d = parseBox2d(parsed.visibleFaceBox2d);
     const eyewearBox2d = parseBox2d(parsed.eyewearBox2d);
-    const occluderBoxes2d = sanitizeOccluderBoxes(parsed.occluderBoxes2d);
     const headPose = typeof parsed.headPose === 'string' && FACE_HEAD_POSES.has(parsed.headPose)
       ? parsed.headPose as FaceRegionAnalysis['headPose']
       : null;
@@ -383,6 +396,7 @@ Rules:
       : null;
 
     if (!skinTone || !faceBox2d || !visibleFaceBox2d || !headPose || !visibility) return null;
+    const occluderBoxes2d = sanitizeOccluderBoxes(parsed.occluderBoxes2d, visibleFaceBox2d);
 
     return {
       skinTone,

@@ -1,3 +1,5 @@
+import sharp from 'sharp';
+
 export interface FaceSwapImageInput {
   data: string;
   mimeType: string;
@@ -228,7 +230,10 @@ async function pollTaskForImageUrl(taskId: string, apiKey: string, deadline: num
   return null;
 }
 
-async function downloadImageAsBase64(url: string, deadline: number): Promise<string | null> {
+async function downloadImage(
+  url: string,
+  deadline: number,
+): Promise<{ data: string; mimeType: string; width: number; height: number } | null> {
   const response = await fetch(url, {
     method: 'GET',
     signal: timeoutSignal(deadline),
@@ -250,13 +255,24 @@ async function downloadImageAsBase64(url: string, deadline: number): Promise<str
     console.log('[face-swap-v2] download returned empty image');
     return null;
   }
-  return buffer.toString('base64');
+  const metadata = await sharp(buffer).metadata();
+  if (!metadata.width || !metadata.height || !metadata.format) {
+    console.log('[face-swap-v2] download image metadata unavailable');
+    return null;
+  }
+  const mimeType = metadata.format === 'jpg' ? 'image/jpeg' : `image/${metadata.format}`;
+  return {
+    data: buffer.toString('base64'),
+    mimeType,
+    width: metadata.width,
+    height: metadata.height,
+  };
 }
 
 export async function swapFaceVia302(
   base: FaceSwapImageInput,
   face: FaceSwapImageInput,
-): Promise<{ data: string } | null> {
+): Promise<{ data: string; mimeType: string; width: number; height: number } | null> {
   const apiKey = get302ApiKey();
   if (!apiKey) {
     console.log('[face-swap-v2] skip: 302 API key is not configured');
@@ -278,8 +294,7 @@ export async function swapFaceVia302(
       return null;
     }
 
-    const data = await downloadImageAsBase64(imageUrl, deadline);
-    return data ? { data } : null;
+    return await downloadImage(imageUrl, deadline);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(`[face-swap-v2] failed: ${truncateForLog(message)}`);

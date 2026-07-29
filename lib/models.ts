@@ -36,7 +36,7 @@ export const MODELS: ModelConfig[] = [
     description: '经典优雅的白人女性，柔和光感肌',
     gender: 'female',
     ethnicity: 'Caucasian',
-    prompt: 'A sophisticated young Caucasian woman with glowing fair skin. Hair: shoulder-length soft wavy honey-blonde hair with a center part. Elegant posture, classic beauty with natural makeup, soft rosy lips.'
+    prompt: 'A sophisticated young Caucasian woman with fair skin. Hair: shoulder-length soft wavy honey-blonde hair with a center part. Elegant posture, classic beauty with natural makeup, soft rosy lips.'
   },
   {
     id: 'naomi',
@@ -52,7 +52,7 @@ export const MODELS: ModelConfig[] = [
     description: '清冷东方感的亚裔女性，高级感肌',
     gender: 'female',
     ethnicity: 'East Asian',
-    prompt: 'A beautiful East Asian woman with clear porcelain skin, sharp refined features. Hair: long straight jet-black hair past the shoulders, sleek with a slight center part, silky smooth texture. Calm sophisticated aura, high-fashion editorial look, dewy minimal makeup.'
+    prompt: 'A beautiful East Asian woman with fair-medium skin with a neutral undertone, sharp refined features. Hair: long straight jet-black hair past the shoulders, sleek with a slight center part, natural texture. Calm sophisticated aura, high-fashion editorial look, minimal makeup.'
   },
   {
     id: 'julian',
@@ -123,7 +123,7 @@ export const SKIN_TONES: SkinToneConfig[] = [
     id: 'light',
     name: '浅',
     description: '浅肤色，白皙透亮',
-    prompt: 'Light, fair skin tone with a luminous, porcelain complexion.',
+    prompt: 'Light, fair skin tone with fair skin with a cool undertone.',
     hexSample: '#F5E6D3'
   },
   {
@@ -137,7 +137,7 @@ export const SKIN_TONES: SkinToneConfig[] = [
     id: 'deep',
     name: '深',
     description: '深肤色，深邃光泽',
-    prompt: 'Deep, rich dark skin tone with a beautiful, luminous complexion.',
+    prompt: 'Deep, rich dark skin tone with deep skin with a warm undertone.',
     hexSample: '#6B3A2A'
   }
 ];

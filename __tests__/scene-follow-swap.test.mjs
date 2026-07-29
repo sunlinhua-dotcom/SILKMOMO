@@ -20,6 +20,8 @@ test('buildSceneGroupPrompt garment-only pass preserves person and omits anchor 
   assert.doesNotMatch(prompt, /tiny blemishes/i);
   assert.doesNotMatch(prompt, /anchor face shape/i);
   assert.doesNotMatch(prompt, /REPLACE #2 - Person: Replace the person/i);
+  assert.doesNotMatch(prompt, /facial identity/i);
+  assert.doesNotMatch(prompt, /the person's identity change/i);
 });
 
 test('buildSceneGroupPrompt garment-only pass locks newly exposed skin to scene tone', () => {
@@ -41,41 +43,45 @@ test('buildFaceSwapPrompt limits edits to visible face and preserves scene skin 
   assert.equal(typeof api.buildFaceSwapPrompt, 'function');
   const prompt = api.buildFaceSwapPrompt('deep warm olive tan with golden undertone');
 
-  assert.match(prompt, /only in the editable area/i);
+  assert.match(prompt, /inside the mask/i);
   assert.match(prompt, /face shape/i);
-  assert.match(prompt, /neck\/body/i);
-  assert.match(prompt, /do not change hair strands/i);
-  assert.match(prompt, /outside the editable area/i);
+  assert.match(prompt, /neck and shoulders/i);
+  assert.match(prompt, /hair, hairline, eyewear/i);
+  assert.match(prompt, /Outside it every pixel is final/i);
   assert.match(prompt, /deep warm olive tan/i);
+  assert.match(prompt, /visible pores/i);
+  assert.match(prompt, /sees a different woman/i);
 });
 
 test('buildFaceSwapPrompt adds lower-face identity rules for eyewear occlusion', () => {
-  const prompt = api.buildFaceSwapPrompt(undefined, { occluders: ['sunglasses'] });
+  const prompt = api.buildFaceSwapPrompt(undefined, {
+    lowerFaceOnly: true,
+    occluders: ['sunglasses'],
+  });
 
-  assert.match(prompt, /identity MUST change through the visible lower face/);
-  assert.match(prompt, /different lip outline and cupid's bow/);
-  assert.match(prompt, /different mouth width/);
-  assert.match(prompt, /different philtrum length/);
-  assert.match(prompt, /different chin point and jaw angle/);
-  assert.match(prompt, /different lower-cheek contour/);
-  assert.match(prompt, /Reproducing the scene-base person's lips, mouth width, jawline, or chin is a FAILURE/);
+  assert.match(prompt, /identity reads entirely from the lower face/);
+  assert.match(prompt, /anchor's lip outline and cupid's bow/);
+  assert.match(prompt, /mouth width/);
+  assert.match(prompt, /philtrum length/);
+  assert.match(prompt, /chin point/);
+  assert.match(prompt, /jaw angle/);
+  assert.match(prompt, /lower-cheek contour/);
+  assert.match(prompt, /Reproducing the previous person's lips, mouth width, jawline or chin is a failure/);
 });
 
-test('derived follow-scene anchor uses fashion portrait realism instead of global blemish directive', () => {
+test('derived follow-scene anchor uses the final head-and-shoulders identity portrait prompt', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const directiveStart = routeSource.indexOf('const DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE');
   const derivedStart = routeSource.indexOf('function buildDerivedAnchorPortraitPrompt');
   const derivedEnd = routeSource.indexOf('// ═════════════════', derivedStart);
-  const derivedBlock = routeSource.slice(directiveStart, derivedEnd);
+  const derivedBlock = routeSource.slice(derivedStart, derivedEnd);
 
-  assert.ok(directiveStart > -1);
-  assert.match(derivedBlock, /24-28 year old agency-signed high-fashion editorial model/);
-  assert.match(derivedBlock, /striking, camera-ready features/);
-  assert.match(derivedBlock, /fresh rested skin/);
-  assert.match(derivedBlock, /professional clean retouching/);
-  assert.match(derivedBlock, /no heavy freckles/);
-  assert.match(derivedBlock, /\$\{DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE\}/);
-  assert.doesNotMatch(derivedBlock, /\$\{FACE_REALISM_DIRECTIVE\}/);
+  assert.ok(derivedStart > -1);
+  assert.match(derivedBlock, /Head and shoulders/);
+  assert.match(derivedBlock, /85mm lens/);
+  assert.match(derivedBlock, /face filling roughly 40%/);
+  assert.match(derivedBlock, /rendered at pore level/);
+  assert.doesNotMatch(derivedBlock, /infrastructure facial identity anchor/);
+  assert.doesNotMatch(derivedBlock, /DERIVED_ANCHOR_PORTRAIT_REALISM_DIRECTIVE/);
 });
 
 test('follow_scene two-pass activates per image only when a derived anchor exists', () => {
@@ -95,4 +101,27 @@ test('follow_scene two-pass activates per image only when a derived anchor exist
   assert.match(routeSource, /if \(useFollowSceneTwoPass && !twoPassActive\)/);
   assert.match(routeSource, /派生锚缺失，回退单步换脸/);
   assert.doesNotMatch(routeSource, /if \(useFollowSceneTwoPass && pass1Result\.success && pass1Result\.data\)/);
+});
+
+test('follow_scene route heartbeats every long phase and gates Pass2 budgets and alpha area', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  for (const phase of [
+    '正在核对余额',
+    '正在分析场景肤色',
+    '正在生成场景换装',
+    '正在定位面部区域',
+    '正在替换模特面容',
+    '正在融合面部',
+    '正在精修面部',
+  ]) {
+    assert.match(routeSource, new RegExp(phase));
+  }
+  assert.match(routeSource, /REQUEST_SOFT_BUDGET_MS = 540_000/);
+  assert.match(routeSource, /PASS2_TOTAL_BUDGET_MS = 240_000/);
+  assert.match(routeSource, /PASS2_FALLBACK_ENTRY_MS = 60_000/);
+  assert.match(routeSource, /PASS2_FALLBACK_TIMEOUT_MS = 180_000/);
+  assert.match(routeSource, /hasSufficientEffectiveAlphaArea\(alphaField\)/);
+  assert.match(routeSource, /promptPurpose: 'faceswap'/);
+  assert.match(routeSource, /allowRetryOn5xx: false/);
+  assert.doesNotMatch(routeSource, /harmonizeFaceTone/);
 });

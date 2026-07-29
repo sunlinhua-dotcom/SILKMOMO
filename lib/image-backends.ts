@@ -33,6 +33,9 @@ export interface BackendInput {
   // 组图（换装）模式：把 sceneRefImages 当作可编辑底图，放在参考图队首（GPT edit 的
   // image[] 首图 = 主底图），并在 Gemini parts 里前置，指令要求「保留底图、只换服装+人物」。
   sceneAsEditBase?: boolean;
+  promptPurpose?: 'compose' | 'faceswap';
+  timeoutMs?: number;
+  allowRetryOn5xx?: boolean;
 }
 
 export interface BackendResult {
@@ -95,7 +98,6 @@ const GEMINI_TIMEOUT_SEC = Math.round(GEMINI_TIMEOUT_MS / 1000);
 // 报「超时已退款」，且超时还会自动重试再等一轮，用户实际要等 ~360s 才看到失败。
 // 提到 280s（覆盖正常上限 + 余量），并停止对「超时」的自动重试（见下方 catch）。
 const OPENAI_TIMEOUT_MS = 280_000;
-const OPENAI_TIMEOUT_SEC = Math.round(OPENAI_TIMEOUT_MS / 1000);
 
 // 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
 // TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）。
@@ -105,6 +107,20 @@ function sanitizeError(msg: string): string {
   if (API_KEY) out = out.split(API_KEY).join('***');
   if (OPENAI_API_KEY && OPENAI_API_KEY !== API_KEY) out = out.split(OPENAI_API_KEY).join('***');
   return out;
+}
+
+function upstreamErrorCategory(error: unknown): string {
+  const err = error as Error & { cause?: { code?: unknown }; code?: unknown };
+  const message = err instanceof Error ? err.message : String(error);
+  if (/abort|timeout/i.test(message)) return 'timeout';
+  const code = err.cause?.code ?? err.code;
+  if (typeof code === 'string' && code) return code;
+  return err instanceof Error ? err.name : 'unknown';
+}
+
+function logUpstreamError(backend: ImageBackend, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.log(`[upstream-error] backend=${backend} category=${upstreamErrorCategory(error)} raw=${sanitizeError(message)}`);
 }
 
 // ═══════════════════════════════════════════════
@@ -179,6 +195,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
   } catch (err) {
     const msg = err instanceof Error ? err.message : '网络连接失败';
     const isTimeout = /abort|timeout/i.test(msg);
+    logUpstreamError('gemini', err);
     if (isTimeout && retryCount < MAX_RETRIES) {
       console.log(`[gemini] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithGemini(input, retryCount + 1);
@@ -188,6 +205,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
+    console.log(`[upstream-error] backend=gemini category=HTTP_${response.status} raw=${sanitizeError(errorText.slice(0, 300))}`);
     if ((response.status === 503 || response.status === 429) && retryCount < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 3000));
       return generateWithGemini(input, retryCount + 1);
@@ -203,6 +221,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
   } catch (err) {
     const msg = err instanceof Error ? err.message : '读取响应失败';
     const isTimeout = /abort|timeout/i.test(msg);
+    logUpstreamError('gemini', err);
     if (isTimeout && retryCount < MAX_RETRIES) {
       console.log(`[gemini] 读取响应超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithGemini(input, retryCount + 1);
@@ -243,7 +262,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
   return { success: false, error: `生成结果中未找到图片数据（finishReason: ${finishReason}）`, backend: 'gemini' };
 }
 
-function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
+export function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ text: input.prompt }];
 
   // 组图模式：底图（场景参考图）必须排在最前，作为「要保留并编辑的底图」
@@ -264,10 +283,12 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
   }
-  parts.push({ text: '\n\nProduct Reference Images (garment reference ONLY - extract style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures, and construction; ignore any person/face/pose/identity):' });
-  input.productImages.forEach(img =>
-    parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
-  );
+  if (input.productImages.length) {
+    parts.push({ text: '\n\nProduct Reference Images — the garment: style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures. Nothing else in these frames applies:' });
+    input.productImages.forEach(img =>
+      parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
+    );
+  }
   if (input.bgRefImages?.length) {
     parts.push({ text: '\n\nBackground Reference Images (use tones, filter, atmosphere, and lighting only; ignore any clothing or person as product/identity references):' });
     input.bgRefImages.forEach(img =>
@@ -281,7 +302,7 @@ function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
     );
   }
   if (input.accessoryImages?.length) {
-    parts.push({ text: '\n\nAccessory Reference Images (subtle props):' });
+    parts.push({ text: '\n\nAccessory Reference Images — reproduce these items faithfully:' });
     input.accessoryImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
@@ -331,20 +352,26 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   const limited = refImages.slice(0, 16);
 
   // 在 prompt 里给参考图分组打标，弥补 multipart 不能传图标签的限制
-  const roleText = (tag: string) => {
+  const roleText = (tag: string, purpose: 'compose' | 'faceswap' = 'compose') => {
     switch (tag) {
       case 'product':
-        return 'product (garment reference ONLY: style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures; ignore person/face/pose/identity)';
+        return 'product — the garment: style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures. Nothing else in these frames applies.';
       case 'anchor':
-        return 'anchor (the ONLY identity reference for the same fictional model in this set)';
+        return purpose === 'faceswap'
+          ? 'anchor — facial structure only. Not a source of skin tone, hair, body, lighting or styling.'
+          : 'anchor — the ONLY identity reference for the same fictional model in this set.';
       case 'scene-base':
-        return 'scene-base (pose/composition/crop/lighting/scene/expression/makeup/photographic language ONLY; preserve those exactly, including every accessory worn by the person (headwear, sunglasses, jewelry, bag) and any face occlusion it causes, and the person\'s exact exposure/lighting; original clothing is not a garment design reference)';
+        return purpose === 'faceswap'
+          ? 'scene-base — the photograph being edited. Only the masked face area changes; every other pixel is final.'
+          : 'scene-base (pose/composition/crop/lighting/scene/expression/makeup/photographic language ONLY; preserve those exactly, including every accessory worn by the person (headwear, sunglasses, jewelry, bag) and any face occlusion it causes, and the person\'s exact exposure/lighting; original clothing is not a garment design reference)';
       case 'model':
         return 'model (hairstyle/makeup/mood/age feeling/expression style only; not garment or identity reference unless explicitly anchored)';
       case 'bg':
         return 'background (tones/filter/atmosphere/lighting only; ignore clothing/person)';
       case 'scene':
         return 'scene (spatial structure, lighting, filter, pose/composition, expression/makeup, photographic language; clothing is not product design)';
+      case 'accessory':
+        return 'accessory — reproduce this item faithfully where accessories sit in the scene-base.';
       default:
         return tag;
     }
@@ -352,7 +379,7 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   const taggedPrompt = `${input.prompt}
 
 Reference image roles (in order of upload):
-${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
+${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).join('\n')}`;
 
   const formData = new FormData();
   formData.append('model', OPENAI_MODEL);
@@ -380,12 +407,13 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
       method: 'POST',
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: formData,
-      signal: AbortSignal.timeout(OPENAI_TIMEOUT_MS), // gpt-image 比 Gemini 慢得多，给足超时
+      signal: AbortSignal.timeout(input.timeoutMs ?? OPENAI_TIMEOUT_MS),
       cache: 'no-store',
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : '网络连接失败';
     const isTimeout = /abort|timeout/i.test(msg);
+    logUpstreamError('openai', err);
     // 超时不重试：已经等满一整个超时窗口，上游多半是拥塞/令牌偏慢，
     // 再等一轮只会把用户的等待时间翻倍且大概率还是失败（让用户用「重试」按钮自行再试）。
     // 仅对非超时的网络错误（如连接重置/拒绝，通常是瞬时抖动）重试一次。
@@ -393,12 +421,16 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
       console.log(`[openai] 网络错误重试 ${retryCount + 1}/${MAX_RETRIES}`);
       return generateWithOpenAI(input, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${OPENAI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
   }
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
-    if ((response.status === 503 || response.status === 429) && retryCount < MAX_RETRIES) {
+    console.log(`[upstream-error] backend=openai category=HTTP_${response.status} raw=${sanitizeError(errorText.slice(0, 300))}`);
+    if ((response.status === 503 || response.status === 429)
+      && input.allowRetryOn5xx !== false
+      && retryCount < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 3000));
       return generateWithOpenAI(input, retryCount + 1);
     }
@@ -413,7 +445,9 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag)}`).join('\n')}`;
   } catch (err) {
     const msg = err instanceof Error ? err.message : '读取响应失败';
     const isTimeout = /abort|timeout/i.test(msg);
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${OPENAI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    logUpstreamError('openai', err);
+    const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
   }
 
   let data: Record<string, unknown>;

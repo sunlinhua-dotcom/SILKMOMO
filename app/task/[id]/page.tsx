@@ -30,7 +30,7 @@ import { Logo } from '@/components/Logo';
 import { ImageLightbox } from '@/components/ImageLightbox';
 import { AIChatSidebar } from '@/components/AIChatBox';
 import Link from 'next/link';
-import type { CompressedImage } from '@/lib/image-compressor';
+import { compressImage, type CompressedImage } from '@/lib/image-compressor';
 
 // ═══ SSE 事件类型 ═══
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
@@ -107,11 +107,22 @@ function getDisplayErrorMessage(message: string, successCount: number, remaining
 //   ② 兜底检测：字节还在来（服务端活着）但迟迟没有实质事件 → 服务端卡死在某个无超时的调用上。
 //      阈值必须大于服务端单张最坏耗时（GPT：280s 超时 + 3s + 280s 重试；Gemini：120s×2 + 3s），
 //      否则会误伤正常的慢请求。
-const STALL_BYTES_MS = 70_000;
+const STALL_BYTES_MS = 120_000;
 const STALL_EVENT_MS: Record<ImageEngine, number> = {
-  openai: 600_000,
+  openai: 150_000,
   gemini: 320_000,
 };
+
+async function compressAnchorBase64(
+  imageData: string,
+  mimeType = 'image/png',
+): Promise<{ data: string; mimeType: string }> {
+  const binary = atob(imageData);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  const compressed = await compressImage(new File([bytes], 'scene-group-anchor', { type: mimeType }));
+  return { data: compressed.base64, mimeType: compressed.mimeType };
+}
 
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
   const grouped = new Map<number, ImageItem[]>();
@@ -469,29 +480,14 @@ export default function TaskDetailPage() {
     }, 1000);
 
     // —— AbortController（取消用）——
-    const ac = new AbortController();
-    abortControllerRef.current = ac;
+    const cancelController = new AbortController();
+    abortControllerRef.current = cancelController;
 
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
     let lastFatalError: string | null = null;
     let wasCancelled = false;
     const grandTotal = isGroup ? groupTotal : (moduleType === 'product' ? selectedShotIndexes.length : 1);
-
-    // —— SSE 停滞看门狗（见文件顶部 STALL_* 注释）——
-    // stalledOut 让 catch 能把「看门狗主动 abort」和「用户点取消」区分开：
-    // 两者都抛 AbortError，但前者是失败、后者不是。
-    let stalledOut: 'bytes' | 'event' | null = null;
-    let lastByteAt = Date.now();
-    let lastEventAt = Date.now();
-    const stallEventLimit = STALL_EVENT_MS[newEngine];
-    const stallTimer = setInterval(() => {
-      if (ac.signal.aborted) return;
-      const now = Date.now();
-      if (now - lastByteAt > STALL_BYTES_MS) stalledOut = 'bytes';
-      else if (now - lastEventAt > stallEventLimit) stalledOut = 'event';
-      if (stalledOut) ac.abort();
-    }, 5_000);
 
     try {
       // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
@@ -559,13 +555,30 @@ export default function TaskDetailPage() {
       const chunkShots = genChunks[chunkIdx];
       // 恰好在两块之间取消:此时没有在途 fetch 会抛 AbortError,必须在这里标记为取消,
       // 否则会掉进"统一定稿"分支显示"已完成"。fatal 则直接停止后续块。
-      if (ac.signal.aborted) { wasCancelled = true; setGenerationPhase('cancelled'); break; }
+      if (cancelController.signal.aborted) { wasCancelled = true; setGenerationPhase('cancelled'); break; }
       if (fatalStop) break;
 
+      // 每块独立 controller：看门狗只终止当前块；用户取消则由外层 controller 广播。
+      const chunkController = new AbortController();
+      const abortChunkForUserCancel = () => chunkController.abort();
+      cancelController.signal.addEventListener('abort', abortChunkForUserCancel, { once: true });
+      let stalledOut: 'bytes' | 'event' | null = null;
+      let lastByteAt = Date.now();
+      let lastEventAt = Date.now();
+      const stallEventLimit = STALL_EVENT_MS[newEngine];
+      const stallTimer = setInterval(() => {
+        if (chunkController.signal.aborted) return;
+        const now = Date.now();
+        if (now - lastByteAt > STALL_BYTES_MS) stalledOut = 'bytes';
+        else if (now - lastEventAt > stallEventLimit) stalledOut = 'event';
+        if (stalledOut) chunkController.abort();
+      }, 5_000);
+
+      try {
       const response = await fetch('/api/generate/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: ac.signal,
+        signal: chunkController.signal,
         body: JSON.stringify({
           taskId,
           moduleType,
@@ -646,6 +659,10 @@ export default function TaskDetailPage() {
             console.log(`[SSE] 事件: ${eventType}`, eventType === 'result' ? '(有图片数据)' : payload);
 
             if (eventType === 'status') {
+              if (payload.heartbeat === true) {
+                if (typeof payload.message === 'string') setWaitingMessage(payload.message);
+                continue;
+              }
               const phase = payload.phase as string;
               // 只在"本次运行还没产出任何图"时进入"分析中"相位。两种回跳都要 gate:
               // ① 后续块(chunkIdx>0)的请求也会推 analyzing;② products 模式每个产品组开头
@@ -665,13 +682,19 @@ export default function TaskDetailPage() {
             } else if (eventType === 'anchor') {
               const imageData = payload.imageData as string | undefined;
               if (shouldUseSceneGroupAnchor && imageData) {
-                groupAnchorForChunk = { data: imageData, mimeType: 'image/png' };
+                let compressedAnchor = { data: imageData, mimeType: 'image/png' };
+                try {
+                  compressedAnchor = await compressAnchorBase64(imageData);
+                } catch (error) {
+                  console.error('[anchor 压缩] 失败，沿用原图:', error);
+                }
+                groupAnchorForChunk = compressedAnchor;
                 try {
                   const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
                   if (existingAnchor?.id) {
-                    await db.images.update(existingAnchor.id, { data: imageData, mimeType: 'image/png' });
+                    await db.images.update(existingAnchor.id, compressedAnchor);
                   } else {
-                    await db.images.add({ projectId: taskId, type: 'anchor', data: imageData, mimeType: 'image/png' });
+                    await db.images.add({ projectId: taskId, type: 'anchor', ...compressedAnchor });
                   }
                 } catch (e) {
                   console.error('[anchor 落库] 失败:', e);
@@ -792,6 +815,42 @@ export default function TaskDetailPage() {
           }
         } catch { /* 抓不到 anchor 不阻塞，服务端会回退首张成功图 */ }
       }
+      } catch (err) {
+        console.error('[生图前端] 分块 catch:', {
+          error: err,
+          stalledOut,
+          sinceLastEventMs: Date.now() - lastEventAt,
+          sinceLastByteMs: Date.now() - lastByteAt,
+          chunkIdx,
+        });
+        if (cancelController.signal.aborted) {
+          wasCancelled = true;
+          setGenerationPhase('cancelled');
+          setErrorMessage(successCount > 0 ? `已取消生成（保留已生成的 ${successCount} 张）` : '已取消生成');
+          break;
+        }
+        if (stalledOut !== null) {
+          doneSoFar += chunkShots.length;
+          const remainingCount = Math.max(0, grandTotal - successCount);
+          const message = buildFriendlyConnectionErrorMessage(successCount, remainingCount);
+          for (const shotIndex of chunkShots) {
+            setGenerationErrors(prev => [...prev, { shotIndex, message, fatal: false }]);
+          }
+          setErrorMessage(message);
+          lastFatalError = message;
+          setGenerationPhase('generating');
+          setProgress({
+            current: Math.min(doneSoFar, grandTotal),
+            total: grandTotal,
+            shotIndex: chunkShots.at(-1) ?? 0,
+          });
+          continue;
+        }
+        throw err;
+      } finally {
+        clearInterval(stallTimer);
+        cancelController.signal.removeEventListener('abort', abortChunkForUserCancel);
+      }
       } // ← 关闭分块 for 循环
 
       // 全部分块跑完,统一定稿(不在每块 done 里定稿,否则多块状态会被后一块覆盖)。
@@ -815,7 +874,7 @@ export default function TaskDetailPage() {
 
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
-      if ((err as Error).name === 'AbortError' && !stalledOut) {
+      if ((err as Error).name === 'AbortError' && cancelController.signal.aborted) {
         // 用户主动取消 ≠ 失败：不能把任务标成 failed + "生成失败（catch）"。
         // 最终状态在 finally 的备份还原之后按实际产出决定（见 wasCancelled 分支）。
         wasCancelled = true;
@@ -827,7 +886,7 @@ export default function TaskDetailPage() {
         const remainingCount = Math.max(0, grandTotal - successCount);
         const knownMessage = getKnownUserFacingErrorMessage(err);
         const msg = knownMessage
-          ?? (stalledOut || isConnectionLayerError(err)
+          ?? (isConnectionLayerError(err)
             ? buildFriendlyConnectionErrorMessage(successCount, remainingCount)
             : buildFriendlyUnexpectedErrorMessage(successCount, remainingCount));
         console.error('[生图前端] 原始错误详情:', err);
@@ -839,7 +898,6 @@ export default function TaskDetailPage() {
         setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }
     } finally {
-      clearInterval(stallTimer);
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setSecondsLeft(0);
       setGenerating(false);
