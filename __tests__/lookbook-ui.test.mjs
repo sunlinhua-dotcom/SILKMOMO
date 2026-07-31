@@ -58,5 +58,34 @@ test('task generation watchdog isolates stalls to one chunk and consumes phase h
   assert.match(source, /doneSoFar \+= chunkShots\.length/);
   assert.match(source, /payload\.heartbeat === true/);
   assert.match(source, /setWaitingMessage\(payload\.message\)/);
-  assert.match(source, /compressAnchorBase64\(imageData\)/);
+  // anchor 事件到手后必须先压再当作后续块的锚（具体覆盖面见下方
+  // 「every anchor source is compressed」一条）
+  assert.match(source, /toCompressedAnchor\(\{ data: imageData, mimeType: 'image\/png' \}\)/);
+});
+
+test('every anchor source is compressed before it is re-uploaded per shot', () => {
+  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // 锚图在每一张请求里都要重传。0731 线上实测：补齐路径（「生成剩余 N 张」）
+  // 直接拿全尺寸结果图当锚，服务端收到 2926199B image/png 1792x2400，
+  // 压完只剩 241KB——即每张白背约 3.9MB base64 上行，把请求拖长到撞看门狗，
+  // 用户再点「生成剩余」又走同一条路，越点越糟。
+  assert.match(source, /const ANCHOR_COMPRESS_THRESHOLD_CHARS = 700_000/);
+  assert.match(source, /async function toCompressedAnchor/);
+  // 幂等：已经压过的直接原样返回，避免每次跑都重新编码一次
+  assert.match(source, /if \(source\.data\.length < ANCHOR_COMPRESS_THRESHOLD_CHARS\) return source;/);
+
+  const assignments = source
+    .split('\n')
+    .filter(line => /\b(anchorForChunk|groupAnchor|groupAnchorForChunk)\s*=\s*[^=]/.test(line))
+    .filter(line => !/^\s*(let|const)\s/.test(line.trim()) || /=\s*\{/.test(line));
+
+  for (const line of assignments) {
+    const assignsPayload = /\{\s*data:/.test(line);
+    if (!assignsPayload) continue;
+    assert.ok(
+      /toCompressedAnchor/.test(line),
+      `锚图赋值必须过压缩，漏网的一行: ${line.trim()}`,
+    );
+  }
 });
