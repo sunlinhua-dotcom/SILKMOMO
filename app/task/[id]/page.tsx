@@ -131,6 +131,31 @@ async function compressAnchorBase64(
   return { data: compressed.base64, mimeType: compressed.mimeType };
 }
 
+/**
+ * 锚图在「每一张」请求里都要重传，所以任何来源的锚都必须先压。
+ * 0731 线上实测：补齐路径（「生成剩余 N 张」）直接拿一张全尺寸结果图当锚，
+ * 服务端收到的是 2926199B image/png 1792x2400，压完只有 241KB —— 也就是每张
+ * 请求白背约 3.9MB base64 上行。国内上行慢时，光上传就吃掉几十秒，请求被拖长、
+ * 更容易撞上停滞看门狗；用户按提示再点「生成剩余」，又走同一条不压缩的路径，
+ * 于是越点越糟。这里统一兜底：拿不准的来源一律过一次压缩，失败才沿用原图。
+ */
+// 已经压过的锚约 240KB（base64 ≈32 万字符）；没压过的全尺寸结果图约 2.9MB（≈390 万字符）。
+// 用这个阈值把两者分开，让本函数幂等——老任务里存着的锚可以放心地反复过一遍，
+// 不会每跑一次就被重新编码一次。
+const ANCHOR_COMPRESS_THRESHOLD_CHARS = 700_000;
+
+async function toCompressedAnchor(
+  source: { data: string; mimeType: string },
+): Promise<{ data: string; mimeType: string }> {
+  if (source.data.length < ANCHOR_COMPRESS_THRESHOLD_CHARS) return source;
+  try {
+    return await compressAnchorBase64(source.data, source.mimeType || 'image/png');
+  } catch (error) {
+    console.error('[anchor 压缩] 失败，沿用原图:', error);
+    return source;
+  }
+}
+
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
   const grouped = new Map<number, ImageItem[]>();
   for (const img of images) {
@@ -434,7 +459,7 @@ export default function TaskDetailPage() {
     if (shouldUseSceneGroupAnchor) {
       const savedAnchor = allImgs.find(i => i.type === 'anchor');
       if (savedAnchor) {
-        groupAnchor = { data: savedAnchor.data, mimeType: savedAnchor.mimeType };
+        groupAnchor = await toCompressedAnchor({ data: savedAnchor.data, mimeType: savedAnchor.mimeType });
       }
     }
     if (shouldUseSceneGroupAnchor && !groupAnchor && overrideShotIndexes && overrideShotIndexes.length > 0) {
@@ -442,7 +467,11 @@ export default function TaskDetailPage() {
         .filter(i => i.type === 'result' && typeof i.shotIndex === 'number' && !overrideShotIndexes.includes(i.shotIndex))
         .sort((a, b) => (a.shotIndex as number) - (b.shotIndex as number));
       if (doneSiblings.length > 0) {
-        groupAnchor = { data: doneSiblings[0].data, mimeType: doneSiblings[0].mimeType };
+        // 结果图是全尺寸 PNG，必须压缩后再当锚，否则每张请求都要重传数 MB
+        groupAnchor = await toCompressedAnchor({
+          data: doneSiblings[0].data,
+          mimeType: doneSiblings[0].mimeType,
+        });
       }
     }
 
@@ -689,12 +718,7 @@ export default function TaskDetailPage() {
             } else if (eventType === 'anchor') {
               const imageData = payload.imageData as string | undefined;
               if (shouldUseSceneGroupAnchor && imageData) {
-                let compressedAnchor = { data: imageData, mimeType: 'image/png' };
-                try {
-                  compressedAnchor = await compressAnchorBase64(imageData);
-                } catch (error) {
-                  console.error('[anchor 压缩] 失败，沿用原图:', error);
-                }
+                const compressedAnchor = await toCompressedAnchor({ data: imageData, mimeType: 'image/png' });
                 groupAnchorForChunk = compressedAnchor;
                 try {
                   const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
@@ -807,18 +831,19 @@ export default function TaskDetailPage() {
         try {
           const a = await db.images.where('projectId').equals(taskId)
             .filter(i => i.type === 'result' && i.hasModel === true).first();
-          if (a) anchorForChunk = { data: a.data, mimeType: 'image/png' };
+          // 结果图是全尺寸 PNG，压缩后再当锚，避免后续每块都重传数 MB
+          if (a) anchorForChunk = await toCompressedAnchor({ data: a.data, mimeType: 'image/png' });
         } catch { /* 抓不到 anchor 不阻塞,后续块会各自锚定 */ }
       }
       if (shouldUseSceneGroupAnchor && !groupAnchorForChunk) {
         try {
           const savedAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
           if (savedAnchor) {
-            groupAnchorForChunk = { data: savedAnchor.data, mimeType: savedAnchor.mimeType };
+            groupAnchorForChunk = await toCompressedAnchor({ data: savedAnchor.data, mimeType: savedAnchor.mimeType });
           } else {
             const a = await db.images.where('projectId').equals(taskId)
               .filter(i => i.type === 'result' && i.hasModel === true).first();
-            if (a) groupAnchorForChunk = { data: a.data, mimeType: 'image/png' };
+            if (a) groupAnchorForChunk = await toCompressedAnchor({ data: a.data, mimeType: 'image/png' });
           }
         } catch { /* 抓不到 anchor 不阻塞，服务端会回退首张成功图 */ }
       }
