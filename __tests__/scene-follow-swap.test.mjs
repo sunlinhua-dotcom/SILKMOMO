@@ -121,3 +121,44 @@ test('every remaining long phase still heartbeats', () => {
   }
   assert.doesNotMatch(routeSource, /harmonizeFaceTone/);
 });
+
+// 0731 客户「一直出错」的三条修复，各自锁一个不变量
+test('no long upstream await is left without a data: heartbeat', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+
+  // 裸调用（不经 withPhaseBeat）会造成一段只有 `: keep-alive` 注释行、没有 `data:` 事件的
+  // 真空窗，客户端事件看门狗喂不到 → 慢的那一张被主动 abort。
+  assert.doesNotMatch(routeSource, /await generateBackendImage\(/);
+  assert.doesNotMatch(routeSource, /await analyzeProductImage\(/);
+  for (const phase of [
+    '正在分析服装特征',
+    '正在创建新模特身份锚',
+    '正在生成场景图',
+  ]) {
+    assert.match(routeSource, new RegExp(`'${phase}'`));
+  }
+});
+
+test('client event watchdog stays above the server single-shot ceiling', () => {
+  const backendSource = fs.readFileSync('lib/image-backends.ts', 'utf8');
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  const serverMs = Number(backendSource.match(/const OPENAI_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''));
+  const clientMs = Number(taskSource.match(/openai: ([\d_]+),/)[1].replace(/_/g, ''));
+
+  // 客户端若先于服务端超时，正常的慢请求会被误杀成「连接中断」，
+  // 服务端随后记成 client disconnected before delivery（0731 客户实例 166.7s）。
+  assert.ok(
+    clientMs > serverMs,
+    `客户端事件看门狗 ${clientMs}ms 必须大于服务端单张超时 ${serverMs}ms`,
+  );
+});
+
+test('finalization recomputes the remaining count instead of reusing a mid-run snapshot', () => {
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  assert.match(taskSource, /const finalRemaining = Math\.max\(0, grandTotal - successCount\)/);
+  // 全部出齐时红条要被清掉，而不是继续挂着中途那条过期文案
+  assert.match(taskSource, /setErrorMessage\(persistedError \?\? null\)/);
+  assert.match(taskSource, /buildFriendlyConnectionErrorMessage\(successCount, finalRemaining\)/);
+});

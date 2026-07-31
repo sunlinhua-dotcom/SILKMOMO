@@ -107,9 +107,16 @@ function getDisplayErrorMessage(message: string, successCount: number, remaining
 //   ② 兜底检测：字节还在来（服务端活着）但迟迟没有实质事件 → 服务端卡死在某个无超时的调用上。
 //      阈值必须大于服务端单张最坏耗时（GPT：280s 超时 + 3s + 280s 重试；Gemini：120s×2 + 3s），
 //      否则会误伤正常的慢请求。
+// 0731：openai 档原为 150_000，比服务端单张上限（OPENAI_TIMEOUT_MS 280s，现 360s）还小，
+// 与上面这条注释自相矛盾。只要服务端有任何一段长等待没被 withPhaseBeat 覆盖（`data:` 事件
+// 才喂得到这道看门狗，25s 的 `: keep-alive` 注释行只喂上面的字节看门狗），慢的那一张就会
+// 在 150s 被客户端主动 abort，服务端随后记成 "client disconnected before delivery"——
+// 客户 0731 反馈的那张 166.7s 正是这个形状（同批 64~83s 的都成功）。
+// 现在服务端所有长阶段都补齐了心跳，同时把这里抬到高于服务端上限，双保险。
+// 真死连接由字节看门狗（120s，keep-alive 每 25s）兜住，检测速度不受影响。
 const STALL_BYTES_MS = 120_000;
 const STALL_EVENT_MS: Record<ImageEngine, number> = {
-  openai: 150_000,
+  openai: 400_000,
   gemini: 320_000,
 };
 
@@ -857,11 +864,20 @@ export default function TaskDetailPage() {
       // 若在块间被取消(wasCancelled),不在这里定稿——交给 finally 的取消分支按实际产出回写。
       if (!wasCancelled) {
         const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        // 失败时持久化失败原因;部分成功(如中途余额不足)也持久化提示,
-        // 否则任务显示"已完成"而 fatal 信息在 UI 任何地方看不到
+        // 定稿必须按「最终产出」重算，不能沿用中途某一块失败时的那条快照。
+        // 0731 客户实例：6 张里第 2 块抖了一下，后面 3 张全部成功，页面却一直挂着
+        // 那一刻写下的「连接中断…生成剩余 5 张」——剩余数早已过期，且被写进
+        // project.lastError，刷新后仍然显示「生成失败」，用户读成"一直出错"。
+        const finalRemaining = Math.max(0, grandTotal - successCount);
+        // 定稿分支只在 for 循环正常跑完时到达；能到这里的非致命错误只有停滞重连那一类，
+        // 所以按连接中断口径重建文案。致命错误（余额不足/扣费失败）原样保留。
         const persistedError = finalStatus === 'failed'
           ? (lastFatalError || '生成失败（未捕获具体原因）')
-          : (lastFatalError ?? undefined);
+          : finalRemaining > 0 && lastFatalError
+            ? (fatalStop ? lastFatalError : buildFriendlyConnectionErrorMessage(successCount, finalRemaining))
+            : undefined;
+        // 全部出齐就把红条彻底清掉，别让一次已被后续块补回来的抖动继续吓用户
+        setErrorMessage(persistedError ?? null);
         await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
         setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
         setGenerationPhase(successCount > 0 ? 'done' : 'error');

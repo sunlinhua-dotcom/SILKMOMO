@@ -455,7 +455,12 @@ export async function POST(req: NextRequest) {
           push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
           try {
             const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+            const analysis = await withPhaseBeat(
+              push,
+              '正在分析服装特征',
+              {},
+              () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+            );
             if (analysis.description) {
               garmentDescription = analysis.description;
             }
@@ -550,18 +555,23 @@ export async function POST(req: NextRequest) {
                 customPrompt: safeCustomPrompt,
               });
               const shotStart = Date.now();
-              result = await generateBackendImage({
-                prompt,
-                productImages,
-                modelRefImages,
-                bgRefImages,
-                accessoryImages,
-                // 无模特镜次（如面料特写）不能附 anchor：
-                // anchor 的指令是"使用完全相同的模特"，与 "Do NOT include any human figure" 直接打架
-                anchorImage: shot.hasModel ? anchorImage : undefined,
-                aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-                ...(engine === 'openai' ? { quality } : {}),
-              }, engine);
+              result = await withPhaseBeat(
+                push,
+                `正在生成镜次 #${shot.index}`,
+                { current: i + 1, total, shotIndex: shot.index },
+                () => generateBackendImage({
+                  prompt,
+                  productImages,
+                  modelRefImages,
+                  bgRefImages,
+                  accessoryImages,
+                  // 无模特镜次（如面料特写）不能附 anchor：
+                  // anchor 的指令是"使用完全相同的模特"，与 "Do NOT include any human figure" 直接打架
+                  anchorImage: shot.hasModel ? anchorImage : undefined,
+                  aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                  ...(engine === 'openai' ? { quality } : {}),
+                }, engine),
+              );
               shotLatency = Date.now() - shotStart;
               if (result.success && result.data) {
                 const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);
@@ -758,7 +768,14 @@ export async function POST(req: NextRequest) {
               push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
               try {
                 const { analyzeProductImage } = await import('@/lib/ai-assistant');
-                const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+                // 必须带心跳：视觉分析是上游调用，慢起来会几十秒无事件，
+                // 客户端事件看门狗只认 `data:` 行，注释行喂不到它（批次H 已踩过一次）。
+                const analysis = await withPhaseBeat(
+                  push,
+                  '正在分析服装特征',
+                  {},
+                  () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+                );
                 if (analysis.description) sharedGarmentDescription = analysis.description;
               } catch { /* skip */ }
             }
@@ -801,11 +818,18 @@ export async function POST(req: NextRequest) {
                 const anchorPrompt = modelIdentityMode === 'follow_scene'
                   ? buildDerivedAnchorPortraitPrompt(derivedAnchorSkinTone)
                   : buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig);
-                const anchorResult = await generateBackendImage({
-                  prompt: anchorPrompt,
-                  productImages: [],
-                  aspectRatio: '3:4',
-                }, 'gemini');
+                // 同样必须带心跳：Gemini 单次最长 120s，超时还会重试一次（≈243s），
+                // 这整段此前只有一条起始 status，是全链路最大的一个「无事件真空窗」。
+                const anchorResult = await withPhaseBeat(
+                  push,
+                  '正在创建新模特身份锚',
+                  {},
+                  () => generateBackendImage({
+                    prompt: anchorPrompt,
+                    productImages: [],
+                    aspectRatio: '3:4',
+                  }, 'gemini'),
+                );
                 if (anchorResult.success && anchorResult.data) {
                   anchorImage = { data: anchorResult.data, mimeType: 'image/png' };
                   push('anchor', { imageData: anchorResult.data });
@@ -842,7 +866,12 @@ export async function POST(req: NextRequest) {
                 });
                 try {
                   const { analyzeProductImage } = await import('@/lib/ai-assistant');
-                  const analysis = await analyzeProductImage(currentProductImages[0].data, currentProductImages[0].mimeType);
+                  const analysis = await withPhaseBeat(
+                    push,
+                    `正在分析产品组 #${refSeq} 的服装特征`,
+                    { current: i + 1, total, shotIndex: refSeq },
+                    () => analyzeProductImage(currentProductImages[0].data, currentProductImages[0].mimeType),
+                  );
                   if (analysis.description) garmentDescription = analysis.description;
                 } catch { /* skip */ }
               }
@@ -1049,7 +1078,12 @@ export async function POST(req: NextRequest) {
           push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
           try {
             const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await analyzeProductImage(productImages[0].data, productImages[0].mimeType);
+            const analysis = await withPhaseBeat(
+              push,
+              '正在分析服装特征',
+              {},
+              () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+            );
             if (analysis.description) garmentDescription = analysis.description;
           } catch { /* skip */ }
 
@@ -1125,15 +1159,20 @@ export async function POST(req: NextRequest) {
               customPrompt: safeCustomPrompt,
             });
             const sceneShotStart = Date.now();
-            result = await generateBackendImage({
-              prompt,
-              productImages,
-              modelRefImages,
-              sceneRefImages,
-              accessoryImages,
-              aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
-              ...(engine === 'openai' ? { quality } : {}),
-            }, engine);
+            result = await withPhaseBeat(
+              push,
+              '正在生成场景图',
+              { current: 1, total: 1, shotIndex: 0 },
+              () => generateBackendImage({
+                prompt,
+                productImages,
+                modelRefImages,
+                sceneRefImages,
+                accessoryImages,
+                aspectRatio: aspectRatio as '1:1' | '3:4' | '4:3' | '9:16' | '16:9',
+                ...(engine === 'openai' ? { quality } : {}),
+              }, engine),
+            );
             sceneShotLatency = Date.now() - sceneShotStart;
             if (result.success && result.data) {
               const normalized = await normalizeGeneratedImage(result.data, declaredWidth, declaredHeight);

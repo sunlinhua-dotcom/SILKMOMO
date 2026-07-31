@@ -97,7 +97,11 @@ const GEMINI_TIMEOUT_SEC = Math.round(GEMINI_TIMEOUT_MS / 1000);
 // 旧值 180s 卡在「正常区间」中段，令牌偏慢或上游拥塞时正常调用也会被中途 abort →
 // 报「超时已退款」，且超时还会自动重试再等一轮，用户实际要等 ~360s 才看到失败。
 // 提到 280s（覆盖正常上限 + 余量），并停止对「超时」的自动重试（见下方 catch）。
-const OPENAI_TIMEOUT_MS = 280_000;
+// 0731 再提到 360s：客户实拍反馈里出现单张 280.7s 正好撞顶被 abort（成功的同批是
+// 115.8s），说明 280s 只压住正常区间上限、没留抖动余量；一次成型后单次调用要带
+// 场景底图+锚脸+产品图，参考图更多、耗时分布本就右移。单张一块、maxDuration=800，
+// 提到 360s 仍有充裕空间。注意：客户端事件看门狗必须同步高于此值。
+const OPENAI_TIMEOUT_MS = 360_000;
 
 // 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
 // TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）。

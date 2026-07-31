@@ -50,7 +50,9 @@ test('task generation watchdog isolates stalls to one chunk and consumes phase h
   const nextChunk = source.indexOf('continue;', chunkCatch);
 
   assert.match(source, /const STALL_BYTES_MS = 120_000/);
-  assert.match(source, /openai: 150_000/);
+  // 事件看门狗的具体数值不写死：它必须跟着服务端单张超时走，
+  // 该不变量由 scene-follow-swap.test.mjs 的「client event watchdog」一条守住。
+  assert.match(source, /openai: [\d_]+,/);
   assert.ok(chunkLoop > -1 && chunkController > chunkLoop);
   assert.ok(chunkCatch > chunkController && nextChunk > chunkCatch);
   assert.match(source, /doneSoFar \+= chunkShots\.length/);
