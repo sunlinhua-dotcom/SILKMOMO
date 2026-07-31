@@ -60,7 +60,9 @@ test('task generation watchdog isolates stalls to one chunk and consumes phase h
   assert.match(source, /setWaitingMessage\(payload\.message\)/);
   // anchor 事件到手后必须先压再当作后续块的锚（具体覆盖面见下方
   // 「every anchor source is compressed」一条）
-  assert.match(source, /toCompressedAnchor\(\{ data: imageData, mimeType: 'image\/png' \}\)/);
+  assert.match(source, /toCompressedAnchor\(\{ data: imageData, mimeType: anchorMime \}\)/);
+  // 服务端已先压过一版并给出真实类型，不能再写死 png
+  assert.match(source, /payload\.mimeType === 'string'/);
 });
 
 test('every anchor source is compressed before it is re-uploaded per shot', () => {

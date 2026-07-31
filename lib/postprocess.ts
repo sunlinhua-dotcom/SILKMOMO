@@ -90,3 +90,31 @@ export async function normalizeGeneratedImage(
     return unchanged(b64);
   }
 }
+
+/**
+ * 把身份锚肖像压小之后再推给客户端。
+ *
+ * 锚图只是身份参考：客户端拿到后会在后续每一张请求里回传，而服务端收到时本来就会
+ * 归一化成 1434x1920 JPEG（见 lib/reference-image-normalizer）。原样推送等于让客户端
+ * 白下载一条 2.9MB 的 `data:` 行（0731 线上实测值），且它落地后还要自己再压一遍。
+ * 这里提前做同一件事：下行少 ~2.6MB，SSE 上也少一条巨行——大 data: 行会让客户端的
+ * 事件看门狗在下载期间收不到完整事件（见 app/task/[id]/page.tsx 的 buffer 复位注释）。
+ *
+ * 同样是 fail-open：任何异常都返回原图，绝不影响出图链路。
+ */
+export async function shrinkAnchorForClient(
+  b64: string,
+): Promise<{ data: string; mimeType: string }> {
+  try {
+    const input = Buffer.from(b64, 'base64');
+    const out = await sharp(input)
+      .resize({ height: 1920, withoutEnlargement: true })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    // 反而变大就不换（本来就很小的锚没必要重编码）
+    if (out.length >= input.length) return { data: b64, mimeType: 'image/png' };
+    return { data: out.toString('base64'), mimeType: 'image/jpeg' };
+  } catch {
+    return { data: b64, mimeType: 'image/png' };
+  }
+}

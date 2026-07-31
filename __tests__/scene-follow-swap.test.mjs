@@ -162,3 +162,30 @@ test('finalization recomputes the remaining count instead of reusing a mid-run s
   assert.match(taskSource, /setErrorMessage\(persistedError \?\? null\)/);
   assert.match(taskSource, /buildFriendlyConnectionErrorMessage\(successCount, finalRemaining\)/);
 });
+
+test('anchor pushed to the client is shrunk server-side first', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const postSource = fs.readFileSync('lib/postprocess.ts', 'utf8');
+
+  // 锚图会被客户端在「每一张」请求里回传，服务端收到时本来就会归一化成 1434x1920 JPEG。
+  // 原样推送 = 客户端白下载一条 2.9MB 的大 data: 行（0731 实测），且大 data: 行会让
+  // 事件看门狗在下载期间收不到完整事件。
+  assert.match(postSource, /export async function shrinkAnchorForClient/);
+  assert.match(routeSource, /const anchorForClient = await shrinkAnchorForClient\(anchorResult\.data\)/);
+  assert.match(routeSource, /push\('anchor', \{ imageData: anchorForClient\.data, mimeType: anchorForClient\.mimeType \}\)/);
+  // fail-open：压缩异常绝不能影响出图链路
+  assert.match(postSource, /\} catch \{\s*\n\s*return \{ data: b64, mimeType: 'image\/png' \};/);
+});
+
+test('garment analysis failure is no longer swallowed silently', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const aiSource = fs.readFileSync('lib/ai-assistant.ts', 'utf8');
+
+  // 分析挂掉时 prompt 会少一整段服装描述，出图保真度下降而前端完全无感；
+  // 线上必须留痕，否则只能靠猜。
+  assert.doesNotMatch(routeSource, /\} catch \{ \/\* skip \*\/ \}/);
+  assert.match(routeSource, /缺 garmentDescription/);
+  // 上游拥塞时 30s 不够（0731 实测反复超时）；心跳补齐后放宽是安全的
+  const lite = Number(aiSource.match(/const LITE_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''));
+  assert.ok(lite >= 60_000, `AI Lite 超时 ${lite}ms 过短`);
+});
