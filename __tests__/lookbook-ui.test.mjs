@@ -89,3 +89,18 @@ test('every anchor source is compressed before it is re-uploaded per shot', () =
     );
   }
 });
+
+test('event watchdog does not count down while a large data: line is still arriving', () => {
+  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // result 事件是一张 4~5MB base64 图，整张就是一条 data: 行。下载期间解析不出完整
+  // 事件，lastEventAt 会冻住，事件看门狗就在「下载一张图」的过程中把连接掐了——
+  // 服务端记成 client disconnected before delivery，而图其实已经生成成功。
+  // 0731 线上实测：t_generate=56.3s 就完成，客户端 105s 后才收到图。
+  assert.match(source, /if \(buffer\.length > 0\) lastEventAt = Date\.now\(\);/);
+
+  // 该复位必须发生在「切完整行、把残行放回 buffer」之后，否则判断的是上一轮的残留
+  const splitAt = source.indexOf("buffer = lines.pop() ?? '';");
+  const resetAt = source.indexOf('if (buffer.length > 0) lastEventAt = Date.now();');
+  assert.ok(splitAt > -1 && resetAt > splitAt, '半条事件的进度复位必须排在 buffer 重切之后');
+});

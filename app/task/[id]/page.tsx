@@ -680,6 +680,15 @@ export default function TaskDetailPage() {
         const lines = buffer.split('\n');
         buffer = lines.pop() ?? '';
 
+        // 缓冲区里还留着半条事件 = 服务端正在推一条大 data:（result 事件是一张
+        // 4~5MB 的 base64 图，整张就是一行），下载期间一次 JSON.parse 都跑不到，
+        // lastEventAt 会一直冻住 → 事件看门狗在「下载一张图」的过程中倒计时并掐断连接。
+        // 0731 线上实测：生成 23:08:01 就完成了（t_generate=56.3s），客户端 23:09:46
+        // 才收到图，中间 105s 全在传这一行。这正是服务端记的
+        // "client disconnected before delivery" —— 图生成成功了，是在下行路上被掐的。
+        // 只要还在收半条事件，就说明服务端在推进，不能判停滞；连接真死了由字节看门狗兜。
+        if (buffer.length > 0) lastEventAt = Date.now();
+
         for (const line of lines) {
           if (line.startsWith('event: ')) {
             currentEventType = line.slice(7).trim();
