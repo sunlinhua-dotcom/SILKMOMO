@@ -23,7 +23,7 @@ import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
-import { normalizeGeneratedImage } from '@/lib/postprocess';
+import { normalizeGeneratedImage, shrinkAnchorForClient } from '@/lib/postprocess';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -777,7 +777,11 @@ export async function POST(req: NextRequest) {
                   () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
                 );
                 if (analysis.description) sharedGarmentDescription = analysis.description;
-              } catch { /* skip */ }
+                else console.log('[sceneGroup] 服装分析未返回描述，本轮 prompt 缺 garmentDescription（出图对衣服的还原会变差）');
+              } catch (err) {
+                // 不能静默：分析挂掉时 prompt 会少一整段服装描述，出图保真度下降而前端无感
+                console.log('[sceneGroup] 服装分析异常，本轮 prompt 缺 garmentDescription:', err instanceof Error ? err.message : err);
+              }
             }
 
             const sceneSkinToneCache = new Map<string, string | null>();
@@ -832,7 +836,11 @@ export async function POST(req: NextRequest) {
                 );
                 if (anchorResult.success && anchorResult.data) {
                   anchorImage = { data: anchorResult.data, mimeType: 'image/png' };
-                  push('anchor', { imageData: anchorResult.data });
+                  // 推给客户端的那份先压小：客户端每张请求都要回传它，而服务端收到时
+                  // 本来就会归一化成同样的 1434x1920 JPEG。原样推＝白下载一条 2.9MB 的
+                  // 大 data: 行（0731 实测），客户端落地后还得再压一次。
+                  const anchorForClient = await shrinkAnchorForClient(anchorResult.data);
+                  push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
                 } else {
                   console.log('[sceneGroup] 肖像卡生成失败，回退首张成功图作锚:', anchorResult.error);
                 }
@@ -873,7 +881,10 @@ export async function POST(req: NextRequest) {
                     () => analyzeProductImage(currentProductImages[0].data, currentProductImages[0].mimeType),
                   );
                   if (analysis.description) garmentDescription = analysis.description;
-                } catch { /* skip */ }
+                  else console.log(`[sceneGroup] 产品组 #${refSeq} 服装分析未返回描述，prompt 缺 garmentDescription`);
+                } catch (err) {
+                  console.log(`[sceneGroup] 产品组 #${refSeq} 服装分析异常，prompt 缺 garmentDescription:`, err instanceof Error ? err.message : err);
+                }
               }
 
               push('status', {
@@ -1085,7 +1096,10 @@ export async function POST(req: NextRequest) {
               () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
             );
             if (analysis.description) garmentDescription = analysis.description;
-          } catch { /* skip */ }
+            else console.log('[scene] 服装分析未返回描述，本次 prompt 缺 garmentDescription（出图对衣服的还原会变差）');
+          } catch (err) {
+            console.log('[scene] 服装分析异常，本次 prompt 缺 garmentDescription:', err instanceof Error ? err.message : err);
+          }
 
           push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
 

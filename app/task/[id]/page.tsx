@@ -522,6 +522,9 @@ export default function TaskDetailPage() {
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
     let lastFatalError: string | null = null;
+    // 定稿时要按错误的真实来源选文案：停滞＝连接中断，服务端报错＝原样保留
+    // （后者已经带了「已自动退款」，套成「连接中断」会误导用户去点重连）。
+    let lastErrorWasStall = false;
     let wasCancelled = false;
     const grandTotal = isGroup ? groupTotal : (moduleType === 'product' ? selectedShotIndexes.length : 1);
 
@@ -727,7 +730,12 @@ export default function TaskDetailPage() {
             } else if (eventType === 'anchor') {
               const imageData = payload.imageData as string | undefined;
               if (shouldUseSceneGroupAnchor && imageData) {
-                const compressedAnchor = await toCompressedAnchor({ data: imageData, mimeType: 'image/png' });
+                // 服务端已经先压过一版（shrinkAnchorForClient），类型以它给的为准；
+                // 压过的体积落在阈值以下，toCompressedAnchor 会原样放行、不会二次编码。
+                const anchorMime = typeof payload.mimeType === 'string' && payload.mimeType
+                  ? payload.mimeType
+                  : 'image/png';
+                const compressedAnchor = await toCompressedAnchor({ data: imageData, mimeType: anchorMime });
                 groupAnchorForChunk = compressedAnchor;
                 try {
                   const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
@@ -818,10 +826,12 @@ export default function TaskDetailPage() {
                 const msg = payload.message as string;
                 setErrorMessage(msg);
                 lastFatalError = msg;
+                lastErrorWasStall = false;
                 fatalStop = true; // fatal(余额不足/扣费失败)→ 循环外的 guard 会停掉后续块,避免多发请求
               } else {
                 // 非 fatal 也记录最后一条 SSE 错误（成功生成 0 张时作为兜底原因）
                 lastFatalError = payload.message as string;
+                lastErrorWasStall = false;
               }
 
             } else if (eventType === 'done') {
@@ -879,6 +889,7 @@ export default function TaskDetailPage() {
           }
           setErrorMessage(message);
           lastFatalError = message;
+          lastErrorWasStall = true;
           setGenerationPhase('generating');
           setProgress({
             current: Math.min(doneSoFar, grandTotal),
@@ -908,7 +919,7 @@ export default function TaskDetailPage() {
         const persistedError = finalStatus === 'failed'
           ? (lastFatalError || '生成失败（未捕获具体原因）')
           : finalRemaining > 0 && lastFatalError
-            ? (fatalStop ? lastFatalError : buildFriendlyConnectionErrorMessage(successCount, finalRemaining))
+            ? (lastErrorWasStall ? buildFriendlyConnectionErrorMessage(successCount, finalRemaining) : lastFatalError)
             : undefined;
         // 全部出齐就把红条彻底清掉，别让一次已被后续块补回来的抖动继续吓用户
         setErrorMessage(persistedError ?? null);

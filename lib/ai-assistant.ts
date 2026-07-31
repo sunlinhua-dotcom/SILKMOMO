@@ -13,7 +13,11 @@ const LITE_CONFIG = {
 
 // 上游单次调用超时：没有超时的话 undici 默认要挂 ~300s，
 // 扣费后挂死期间用户干等、资金被悬置
-const LITE_TIMEOUT_MS = 30_000;
+// 0731 线上日志实测：`[AI Lite] 产品分析异常 / 脸部区域分析异常: aborted due to timeout`
+// 在客户那轮里反复出现。30s 在上游拥塞时不够，而分析失败是被 catch 静默吞掉的 ——
+// 结果 prompt 里少了 garmentDescription，出图对衣服的还原悄悄变差，用户完全看不出。
+// 现在服务端所有长阶段都带心跳了（withPhaseBeat），放宽到 60s 不会再撞客户端看门狗。
+const LITE_TIMEOUT_MS = 60_000;
 
 /** AI 分析服务是否已配置（调用方可据此在扣费前短路） */
 export function isAiAssistantConfigured(): boolean {
