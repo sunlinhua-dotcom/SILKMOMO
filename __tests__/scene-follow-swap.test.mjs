@@ -238,3 +238,22 @@ test('garment analysis is reused across chunks instead of re-run every time', ()
   assert.match(routeSource, /clientGarmentDescription\.trim\(\)\.slice\(0, 2000\)/);
   assert.match(taskSource, /garmentDescription: garmentDescriptionForChunk \|\| undefined/);
 });
+
+test('mixed-garment warning rides on the existing analysis call (no extra upstream cost)', () => {
+  const aiSource = fs.readFileSync('lib/ai-assistant.ts', 'utf8');
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // 关键约束：不新增上游调用、不额外扣费 —— 其余产品图搭在已有的那次分析里一起送
+  assert.match(aiSource, /extraImages: Array<\{ data: string; mimeType: string \}> = \[\]/);
+  assert.match(aiSource, /extraImages\.slice\(0, 3\)\.map/);
+  assert.match(routeSource, /productImages\.slice\(1\)\.map/);
+
+  // 单图无从比对，必须恒为 false，避免凭空吓用户
+  assert.match(aiSource, /const mixed = extraImages\.length > 0 && parsed\.mixed === true;/);
+
+  // 是告警不是失败：黄条、不打断生成，且与错误提示分开渲染
+  assert.match(routeSource, /push\('warning', \{ kind: 'mixed-garment'/);
+  assert.match(taskSource, /setWarningMessage\(msg\.trim\(\)\)/);
+  assert.match(taskSource, /这次上传的产品图像是不止一件单品/);
+});

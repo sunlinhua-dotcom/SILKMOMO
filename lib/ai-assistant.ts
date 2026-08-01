@@ -33,17 +33,34 @@ export function isAiAssistantConfigured(): boolean {
  *
  * ok=false 表示上游失败（而非"分析结果为空"），付费调用方应据此退款
  */
-export async function analyzeProductImage(
-  imageBase64: string,
-  mimeType: string = 'image/jpeg'
-): Promise<{
+export interface ProductAnalysis {
   ok: boolean;
   description: string;
   keywords: string[];
   category: string;
-}> {
+  /** 上传的这几张产品图看起来是不是不止一件单品（混款）。单图时恒为 false。 */
+  mixed: boolean;
+  /** 混款时的中文说明，直接展示给用户 */
+  mixedReason: string;
+}
+
+/**
+ * 分析产品图。
+ *
+ * 传多张时会一并判断「混款」：卖家有时把两件不同的单品混在一次上传里，出图会串味，
+ * 但以前没有任何提示。这里搭在**已有的**那次分析上顺带判断，不增加上游调用、不额外扣费。
+ * 只有第一张会被当作描述来源，其余仅用于混款比对。
+ */
+export async function analyzeProductImage(
+  imageBase64: string,
+  mimeType: string = 'image/jpeg',
+  extraImages: Array<{ data: string; mimeType: string }> = [],
+): Promise<ProductAnalysis> {
+  const empty: ProductAnalysis = {
+    ok: false, description: '', keywords: [], category: 'garment', mixed: false, mixedReason: '',
+  };
   if (!LITE_CONFIG.apiKey) {
-    return { ok: false, description: '', keywords: [], category: 'garment' };
+    return empty;
   }
 
   try {
@@ -63,8 +80,13 @@ Return format:
 {
   "description": "A concise English description of the garment (material, color, cut, neckline, sleeve, length, texture, pattern). Max 50 words.",
   "keywords": ["keyword1", "keyword2", ...],
-  "category": "dress|top|blouse|pants|skirt|suit|outerwear|other"
+  "category": "dress|top|blouse|pants|skirt|suit|outerwear|other",
+  "mixed": false,
+  "mixedReason": ""
 }
+
+If MORE THAN ONE image is provided, they are supposed to be different photos of ONE single product (or one coordinated set worn together, e.g. a top + its matching shorts). Judge whether they actually show DIFFERENT products that a seller mixed into one upload by mistake — e.g. two unrelated dresses, or two different colourways of the same style. If so set "mixed": true and put a SHORT CHINESE explanation in "mixedReason" naming what differs (例如「第 2 张是另一条裙子，颜色和领口都不同」). If all images are the same product/set, set "mixed": false and leave "mixedReason" empty. With a single image always return false.
+Describe ONLY the first image in "description".
 
 Be extremely precise about:
 - Fabric type (silk, cotton, linen, wool, chiffon, satin, etc.)
@@ -84,7 +106,11 @@ JSON only, no explanation.`
                 mimeType: mimeType || 'image/jpeg',
                 data: imageBase64,
               }
-            }
+            },
+            // 其余产品图只用于混款比对；抽样 3 张足够，避免 payload 过大拖慢这次分析
+            ...extraImages.slice(0, 3).map(img => ({
+              inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.data },
+            })),
           ]
         }],
         generationConfig: {
@@ -97,25 +123,31 @@ JSON only, no explanation.`
 
     if (!response.ok) {
       console.warn('[AI Lite] 产品分析失败:', response.status);
-      return { ok: false, description: '', keywords: [], category: 'garment' };
+      return empty;
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-      return { ok: false, description: '', keywords: [], category: 'garment' };
+      return empty;
     }
 
     const parsed = JSON.parse(text);
+    // 单图时无从比对，无论模型说什么都按「不混款」处理
+    const mixed = extraImages.length > 0 && parsed.mixed === true;
     return {
       ok: true,
       description: parsed.description || '',
       keywords: parsed.keywords || [],
       category: parsed.category || 'garment',
+      mixed,
+      mixedReason: mixed && typeof parsed.mixedReason === 'string'
+        ? parsed.mixedReason.slice(0, 200)
+        : '',
     };
   } catch (error) {
     console.warn('[AI Lite] 产品分析异常:', sanitizeUpstreamError(error));
-    return { ok: false, description: '', keywords: [], category: 'garment' };
+    return empty;
   }
 }
 

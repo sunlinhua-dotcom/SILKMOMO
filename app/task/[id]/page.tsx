@@ -276,6 +276,8 @@ export default function TaskDetailPage() {
   const [progress, setProgress] = useState({ current: 0, total: 1, shotIndex: 0 });
   const [waitingMessage, setWaitingMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // 混款告警：黄条，不是失败，不打断生成
+  const [warningMessage, setWarningMessage] = useState<string | null>(null);
   const [trialDone, setTrialDone] = useState(false);
 
   // ═══ SSE 实时状态 ═══
@@ -589,6 +591,7 @@ export default function TaskDetailPage() {
     // —— 重置状态 ——
     setGenerating(true);
     setErrorMessage(null);
+    setWarningMessage(null);
     setGenerationErrors([]);
     setGenerationPhase('analyzing');
     setElapsedSeconds(0);
@@ -854,6 +857,15 @@ export default function TaskDetailPage() {
                 } catch (e) {
                   console.error('[anchor 落库] 失败:', e);
                 }
+              }
+
+            } else if (eventType === 'warning') {
+              // 目前只有混款告警：卖家把两件不同单品混在一次上传里，出图会串味。
+              // 不是错误，不打断生成，用黄条提示，让用户下次拆开传。
+              const msg = payload.message;
+              if (typeof msg === 'string' && msg.trim()) {
+                setWarningMessage(msg.trim());
+                console.warn('[SSE] 混款告警:', msg);
               }
 
             } else if (eventType === 'garment') {
@@ -2090,6 +2102,22 @@ export default function TaskDetailPage() {
         {/* 结果展示 */}
         {images.length > 0 && (
           <div ref={resultsRef}>
+            {/* 混款告警：卖家把两件不同单品混在一次上传里，出图会串味。
+                不是失败、不打断生成，所以单独一条黄条，和错误提示区分开。 */}
+            {warningMessage && (
+              <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-sm text-amber-800 font-medium">这次上传的产品图像是不止一件单品</p>
+                    <p className="text-sm text-amber-700 break-words mt-1">{warningMessage}</p>
+                    <p className="text-xs text-amber-600 mt-1.5">
+                      混在一起会让出图串味。建议每件单品单独建一个任务重新生成。
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             {/* 部分成功提示：任务"已完成"但中途有镜次失败 / 余额不足。
                 不渲染的话余额不足等 fatal 信息在已完成任务上完全不可见 */}
             {!generating && project.status === 'completed' && displayErrorMessage && (
