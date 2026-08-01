@@ -156,6 +156,90 @@ async function toCompressedAnchor(
   }
 }
 
+/**
+ * 从「交接缓冲」取一张图。
+ *
+ * 服务端不再把 4~5MB 的图塞进 SSE 的一条 data: 行（那正是 0731 客户「生成失败」的根因：
+ * 下载期间解析不出完整事件，看门狗误判服务端卡死并掐断），改为只推一个 id，这里用普通
+ * HTTP GET 取。普通请求由浏览器自己管重试和超时，不受 SSE 看门狗影响。
+ *
+ * 取不到不代表图没了 —— 它还在服务端等着，任务页重进时的补拉会捡回来。
+ */
+async function fetchPendingImage(
+  pendingId: string,
+  attempts = 3,
+): Promise<{ data: string; mimeType: string; width: number; height: number } | null> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(`/api/generation/pending/${pendingId}`, { cache: 'no-store' });
+      if (res.status === 404) return null; // 已被取走/不存在，重试无意义
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json?.image?.data) return json.image;
+      throw new Error('响应缺少图片数据');
+    } catch (err) {
+      console.error(`[交接缓冲] 取图失败(${i + 1}/${attempts}):`, err);
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  return null;
+}
+
+/** 客户端已落 IndexedDB，通知服务端删掉缓冲行。删不掉也无妨，服务端有 TTL 兜底。 */
+async function releasePendingImage(pendingId: string): Promise<void> {
+  try {
+    await fetch(`/api/generation/pending/${pendingId}`, { method: 'DELETE' });
+  } catch { /* 删不掉由 TTL 兜底，不影响用户 */ }
+}
+
+/**
+ * 补拉：把服务端还留着、本地却没有的图捡回来。
+ *
+ * 这条路径专治「图已生成成功但没送达」：以前那种情况图就永久丢了（用户只能重新生成并再付
+ * 一次钱），现在服务端会把图留在交接缓冲里，进任务页就能补回来。
+ * 幂等：同一 shotIndex 本地已有 result 就跳过，不会重复插入。
+ */
+async function recoverPendingImages(taskId: number): Promise<number> {
+  try {
+    const res = await fetch(`/api/generation/pending?taskId=${taskId}`, { cache: 'no-store' });
+    if (!res.ok) return 0;
+    const { images } = await res.json() as {
+      images: Array<{ id: string; shotIndex: number; width: number; height: number }>;
+    };
+    if (!Array.isArray(images) || images.length === 0) return 0;
+
+    const local = await db.images.where('projectId').equals(taskId).toArray();
+    let recovered = 0;
+    for (const meta of images) {
+      const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
+      const already = local.some(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
+      if (already) {
+        // 本地已有：缓冲行是上次没删干净的残留，顺手清掉
+        void releasePendingImage(meta.id);
+        continue;
+      }
+      const fetched = await fetchPendingImage(meta.id);
+      if (!fetched) continue;
+      await db.images.add({
+        projectId: taskId,
+        type: 'result',
+        data: fetched.data,
+        mimeType: fetched.mimeType || 'image/png',
+        shotIndex: persistedShotIndex,
+        imageType: 'hero',
+        index: meta.shotIndex,
+      });
+      void releasePendingImage(meta.id);
+      recovered++;
+    }
+    if (recovered > 0) console.log(`[交接缓冲] 补回 ${recovered} 张此前未送达的图`);
+    return recovered;
+  } catch (err) {
+    console.error('[交接缓冲] 补拉失败:', err);
+    return 0;
+  }
+}
+
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
   const grouped = new Map<number, ImageItem[]>();
   for (const img of images) {
@@ -208,6 +292,10 @@ export default function TaskDetailPage() {
   // 主生成入口同样有窗口期：guard 检查后还有两次 IndexedDB await 才 setGenerating(true)，
   // 双击"全部生成/先试1张/重试"会并行跑两条 SSE 流 → 双倍扣费。同步 ref 锁先行置位。
   const startLockRef = useRef(false);
+  // 断线自动补齐：整轮只补一次（autoRetried），补的动作排到本轮彻底收尾之后（pendingAutoRetry），
+  // 因为 handleStartGeneration 开头有 generating / startLockRef 双重闸门，同步递归会被自己挡回去。
+  const autoRetriedRef = useRef(false);
+  const pendingAutoRetryRef = useRef(false);
   // "调整参数重新生成"（含 AI 聊天整任务重做）的同步锁
   const regenParamsLockRef = useRef(false);
 
@@ -237,6 +325,10 @@ export default function TaskDetailPage() {
         router.push('/');
         return;
       }
+      // 断网丢图的根治点：生成成功但没送达客户端的图，服务端还在交接缓冲里留着。
+      // 进任务页时先补拉一次，把它们捡回本地 —— 用户不必重新生成、也不必再付一次钱。
+      await recoverPendingImages(taskId);
+
       const allImages = await db.images.where('projectId').equals(taskId).toArray();
       const results = allImages.filter(img => img.type === 'result');
       const backups = allImages.filter(img => img.type === 'result_backup');
@@ -311,6 +403,17 @@ export default function TaskDetailPage() {
       resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   }, [loading, images.length]);
+
+  // 断线自动补齐：等本轮 generating 落回 false（闸门全部释放、state 已刷新）再触发，
+  // 复用「生成剩余」那套缺口计算，保证只补真缺的那几张。
+  // 计费安全：每张图服务端独立扣费、失败自动退款，补的是用户没拿到的那几张，不会重复扣。
+  useEffect(() => {
+    if (generating || !pendingAutoRetryRef.current) return;
+    pendingAutoRetryRef.current = false;
+    void handleGenerateRemaining();
+    // handleGenerateRemaining 依赖当前渲染的 state，故不进依赖数组（每次渲染都是新闭包）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generating]);
 
   // 组件卸载时清理 SSE 连接和计时器，避免泄漏
   useEffect(() => {
@@ -587,6 +690,9 @@ export default function TaskDetailPage() {
           : [targetIndexesForChunking];
       let anchorForChunk: { data: string; mimeType: string } | undefined;
       let groupAnchorForChunk: { data: string; mimeType: string } | undefined = groupAnchor;
+      // 服装分析结果跨块复用：swap 模式下每块都会重跑一次同一张产品图的分析
+      // （6 张图＝6 次上游调用）。首块通过 garment 事件下发，之后回传即可。
+      let garmentDescriptionForChunk = '';
       let doneSoFar = 0; // 已完成(成功或失败)的镜次数,用于跨块累计进度显示
       let fatalStop = false; // 某块出现 fatal(余额不足/扣费失败)→ 不再向后续块发请求
 
@@ -647,6 +753,7 @@ export default function TaskDetailPage() {
           sceneGroupAnchor: shouldUseSceneGroupAnchor ? groupAnchorForChunk : undefined,
           sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
+          garmentDescription: garmentDescriptionForChunk || undefined,
         }),
       });
 
@@ -749,10 +856,29 @@ export default function TaskDetailPage() {
                 }
               }
 
+            } else if (eventType === 'garment') {
+              const desc = payload.description;
+              if (typeof desc === 'string' && desc.trim()) {
+                garmentDescriptionForChunk = desc.trim();
+                console.log('[SSE] 收到服装分析，后续分块复用，不再重复调用上游');
+              }
+
             } else if (eventType === 'result') {
               const shotIndex = payload.shotIndex as number;
-              const imageData = payload.imageData as string;
               const currentN = payload.current as number;
+              const pendingId = typeof payload.pendingId === 'string' ? payload.pendingId : '';
+              // 新链路：SSE 只推 id，图走普通 HTTP 取；服务端交接缓冲不可用时才回退直推。
+              let imageData = payload.imageData as string;
+              if (!imageData && pendingId) {
+                const fetched = await fetchPendingImage(pendingId);
+                if (!fetched) {
+                  // 图仍在服务端等着，重进任务页时的补拉会捡回来；这里不计成功，
+                  // 免得 UI 显示已出图而本地其实没有。
+                  console.error(`[交接缓冲] #${shotIndex} 取图未成功，留待补拉`);
+                  continue;
+                }
+                imageData = fetched.data;
+              }
               successCount++;
               console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
               // 跨块累计进度(用 grandTotal 作分母,doneSoFar 作偏移)
@@ -790,6 +916,8 @@ export default function TaskDetailPage() {
                   : 'hero',
                 index: shotIndex,
               });
+              // 已落 IndexedDB，通知服务端删掉交接缓冲行（删不掉由 TTL 兜底）
+              if (pendingId) void releasePendingImage(pendingId);
               // 如果这是单张重做产生的新图，对应位置可能已有 result_backup（旧版图） —
               // 关联起来，让实时画廊也能立刻显示 "对比旧版 / 还原旧版" 工具条
               const existingBackup = await db.images
@@ -921,6 +1049,14 @@ export default function TaskDetailPage() {
           : finalRemaining > 0 && lastFatalError
             ? (lastErrorWasStall ? buildFriendlyConnectionErrorMessage(successCount, finalRemaining) : lastFatalError)
             : undefined;
+        // 断线自动补齐：只补「连接抖动」造成的缺口，且整轮只补一次。
+        // 不补致命错误（余额不足/扣费失败）——那是补不出来的，重试只会再撞一次。
+        // 每张图服务端都独立扣费+失败自动退款，所以补的是「用户没拿到的那几张」，不会重复扣。
+        if (finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef.current) {
+          autoRetriedRef.current = true;
+          pendingAutoRetryRef.current = true;
+          console.log(`[自动补齐] 连接抖动导致缺 ${finalRemaining} 张，本轮结束后自动补一次`);
+        }
         // 全部出齐就把红条彻底清掉，别让一次已被后续块补回来的抖动继续吓用户
         setErrorMessage(persistedError ?? null);
         await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
@@ -1004,6 +1140,8 @@ export default function TaskDetailPage() {
       // 刷新最终图片列表
       await loadTaskData();
       startLockRef.current = false;
+      // 自动补齐不在这里触发：本函数闭包里的 generating 仍是旧值，
+      // 直接递归会被 handleStartGeneration 自己的闸门挡回去。交给下面的 effect。
     }
   };
 

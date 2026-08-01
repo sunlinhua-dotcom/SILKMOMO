@@ -24,6 +24,7 @@ import { generateImage as generateBackendImage, normalizeBackend, resolveApiMode
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage, shrinkAnchorForClient } from '@/lib/postprocess';
+import { storePendingImage } from '@/lib/pending-image';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -70,11 +71,15 @@ interface GenerateStreamRequest {
   sceneGroupAnchor?: ImageInput;      // 重做/补齐时带上已有一张结果图作「新模特身份锚」，保证与全组同一新人
   sceneGroupGarmentCategories?: string[]; // 用户上传替换的主品品类（top/pants/dress…），点明换哪几件
   customPrompt?: string; // 用户文字描述的额外要求（如"模特表情更柔和"）
+  // 服装分析结果由客户端在后续分块里带回来：swap 模式下每块都会重跑一次同一张产品图的
+  // 分析（6 张图＝6 次上游调用，纯浪费时间和钱）。首块分析完通过 garment 事件下发，
+  // 之后原样回传即可复用。
   engine?: 'gemini' | 'openai' | string; // 生图引擎：gemini / openai (gpt-image-2-all)
   quality?: GenerationQuality | string; // GPT 图像质量：low / medium / high（Gemini 忽略）
   // 客户端分块生成时,把首块「有模特」镜次的产出回传作为锚点,
   // 让后续分块的镜次仍复用同一个模特身份(跨请求保持模特一致性)。
   anchorImage?: ImageInput;
+  garmentDescription?: string;
 }
 
 // ═══ 入参防线：参考图数量 / 单图体积 / MIME 白名单 ═══
@@ -250,6 +255,49 @@ async function withPhaseBeat<T>(
   }
 }
 
+/**
+ * 交付一张已生成的图。
+ *
+ * 优先走「交接缓冲」：落库拿到 id，SSE 上只推几十字节的 id，客户端再用普通 HTTP GET 取图。
+ * 这样 SSE 上不再有 4~5MB 的单条 data: 行 —— 那正是 0731 客户「生成失败」的根因
+ * （下载期间客户端解析不出完整事件，看门狗误判服务端卡死并掐断，图在下行路上丢掉）。
+ *
+ * fail-open：落库失败就退回原来的直推。宁可冒一次大行的风险，也不能让一张已经扣过费的图
+ * 因为交接缓冲不可用而丢掉。
+ */
+async function deliverResult(
+  push: StreamPush,
+  userId: string,
+  taskId: number,
+  payload: {
+    shotIndex: number;
+    data: string;
+    width: number;
+    height: number;
+    current: number;
+    total: number;
+  },
+): Promise<void> {
+  const pendingId = await storePendingImage({
+    userId,
+    taskId,
+    shotIndex: payload.shotIndex,
+    data: payload.data,
+    width: payload.width,
+    height: payload.height,
+  });
+
+  push('result', {
+    shotIndex: payload.shotIndex,
+    // 拿到 id 就不带 imageData；没拿到才回退直推
+    ...(pendingId ? { pendingId } : { imageData: payload.data }),
+    width: payload.width,
+    height: payload.height,
+    current: payload.current,
+    total: payload.total,
+  });
+}
+
 // 旧版内联实现 callGeminiApi / buildParts 已删除。
 // 实际生图调用全部走 lib/image-backends.ts 的 generateBackendImage（双 backend：gemini / openai）。
 
@@ -295,6 +343,7 @@ export async function POST(req: NextRequest) {
     sceneGroupTargetIndexes,
     sceneGroupAnchor,
     sceneGroupGarmentCategories,
+    garmentDescription: clientGarmentDescription,
     customPrompt,
     engine: rawEngine,
     quality: rawQuality,
@@ -331,6 +380,11 @@ export async function POST(req: NextRequest) {
   if (clientAnchorError) {
     return new Response(JSON.stringify({ error: clientAnchorError }), { status: 400 });
   }
+  // 客户端回传的服装分析：限长防止被塞超长文本进 prompt
+  const reusableGarmentDescription = typeof clientGarmentDescription === 'string'
+    && clientGarmentDescription.trim()
+    ? clientGarmentDescription.trim().slice(0, 2000)
+    : '';
   const sceneGroupAnchorError = validateOptionalAnchor(sceneGroupAnchor, '组图锚点图');
   if (sceneGroupAnchorError) {
     return new Response(JSON.stringify({ error: sceneGroupAnchorError }), { status: 400 });
@@ -638,9 +692,9 @@ export async function POST(req: NextRequest) {
               if (!anchorImage && shot.hasModel) {
                 anchorImage = { data: result.data, mimeType: 'image/png' };
               }
-              push('result', {
+              await deliverResult(push, auth.userId, taskId, {
                 shotIndex: shot.index,
-                imageData: result.data,
+                data: result.data,
                 width: resultWidth,
                 height: resultHeight,
                 current: i + 1,
@@ -764,7 +818,11 @@ export async function POST(req: NextRequest) {
 
             // swap 模式的产品图整批共用一份服装分析；products 模式每组在循环内单独分析。
             let sharedGarmentDescription: string | undefined;
-            if (sceneGroupMode === 'swap') {
+            if (sceneGroupMode === 'swap' && reusableGarmentDescription) {
+              // 客户端带回了首块的分析结果，直接复用，省掉一次上游视觉调用
+              sharedGarmentDescription = reusableGarmentDescription;
+              console.log('[sceneGroup] 复用客户端回传的服装分析，跳过本块分析');
+            } else if (sceneGroupMode === 'swap') {
               push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
               try {
                 const { analyzeProductImage } = await import('@/lib/ai-assistant');
@@ -776,7 +834,11 @@ export async function POST(req: NextRequest) {
                   {},
                   () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
                 );
-                if (analysis.description) sharedGarmentDescription = analysis.description;
+                if (analysis.description) {
+                  sharedGarmentDescription = analysis.description;
+                  // 下发给客户端，后续分块原样回传即可复用，不必每块重跑
+                  push('garment', { description: analysis.description });
+                }
                 else console.log('[sceneGroup] 服装分析未返回描述，本轮 prompt 缺 garmentDescription（出图对衣服的还原会变差）');
               } catch (err) {
                 // 不能静默：分析挂掉时 prompt 会少一整段服装描述，出图保真度下降而前端无感
@@ -1034,9 +1096,9 @@ export async function POST(req: NextRequest) {
                 if (shouldUseSceneGroupAnchor && !anchorImage) {
                   anchorImage = { data: result.data, mimeType: 'image/png' };
                 }
-                push('result', {
+                await deliverResult(push, auth.userId, taskId, {
                   shotIndex: refSeq,
-                  imageData: result.data,
+                  data: result.data,
                   width: resultWidth,
                   height: resultHeight,
                   current: i + 1,
@@ -1236,9 +1298,9 @@ export async function POST(req: NextRequest) {
               await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
               failedCount = 1;
             } else {
-              push('result', {
+              await deliverResult(push, auth.userId, taskId, {
                 shotIndex: 0,
-                imageData: result.data,
+                data: result.data,
                 width: resultWidth,
                 height: resultHeight,
                 current: 1,

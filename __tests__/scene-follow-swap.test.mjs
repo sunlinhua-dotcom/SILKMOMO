@@ -189,3 +189,52 @@ test('garment analysis failure is no longer swallowed silently', () => {
   const lite = Number(aiSource.match(/const LITE_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''));
   assert.ok(lite >= 60_000, `AI Lite 超时 ${lite}ms 过短`);
 });
+
+test('generated images are handed off by id, not pushed through SSE', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // 4~5MB 的图作为一条 data: 行是 0731 客户「生成失败」的根因；改为只推 id。
+  assert.doesNotMatch(routeSource, /push\('result', \{[\s\S]{0,120}imageData: result\.data/);
+  assert.match(routeSource, /async function deliverResult/);
+  assert.match(routeSource, /\.\.\.\(pendingId \? \{ pendingId \} : \{ imageData: payload\.data \}\)/);
+  // fail-open：交接缓冲写失败必须回退直推，不能让已扣费的图丢掉
+  assert.match(routeSource, /storePendingImage/);
+
+  // 客户端：按 id 取图 → 落库 → 释放
+  assert.match(taskSource, /async function fetchPendingImage/);
+  assert.match(taskSource, /if \(pendingId\) void releasePendingImage\(pendingId\)/);
+  // 断网丢图的根治点：进任务页先补拉
+  assert.match(taskSource, /await recoverPendingImages\(taskId\)/);
+});
+
+test('pending image API scopes every read and delete to the owner', () => {
+  const libSource = fs.readFileSync('lib/pending-image.ts', 'utf8');
+
+  // 越权取别人的图是这条链路最直接的风险，读和删都必须带 userId
+  assert.match(libSource, /findFirst\(\{\s*\n\s*where: \{ id, userId \}/);
+  assert.match(libSource, /deleteMany\(\{ where: \{ id, userId \} \}\)/);
+  // 只在客户端确认落库后才删，避免响应中途断掉就永久丢图
+  assert.match(libSource, /TTL/);
+});
+
+test('disconnect auto-continues once, only for stalls, and never for fatal errors', () => {
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  assert.match(taskSource, /if \(finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef\.current\)/);
+  // 必须等 generating 落回 false 再触发：同步递归会被 handleStartGeneration 自己的闸门挡回去
+  assert.match(taskSource, /if \(generating \|\| !pendingAutoRetryRef\.current\) return;/);
+  assert.match(taskSource, /void handleGenerateRemaining\(\);/);
+});
+
+test('garment analysis is reused across chunks instead of re-run every time', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // swap 模式原本每块都对同一张产品图重跑一次分析（6 张图＝6 次上游调用）
+  assert.match(routeSource, /if \(sceneGroupMode === 'swap' && reusableGarmentDescription\)/);
+  assert.match(routeSource, /push\('garment', \{ description: analysis\.description \}\)/);
+  // 入参限长，防止被塞超长文本进 prompt
+  assert.match(routeSource, /clientGarmentDescription\.trim\(\)\.slice\(0, 2000\)/);
+  assert.match(taskSource, /garmentDescription: garmentDescriptionForChunk \|\| undefined/);
+});

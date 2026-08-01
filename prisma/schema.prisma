@@ -9,30 +9,30 @@ datasource db {
 // ═══ 用户表 ═══
 model User {
   id           String   @id @default(cuid())
-  username     String   @unique           // 用户名登录
-  passwordHash String                     // bcrypt 哈希
-  name         String   @default("")      // 昵称
-  role         String   @default("user")  // "user" | "admin"
-  balanceFen   Int      @default(0)       // 余额（单位：分），¥1.00 = 100分
+  username     String   @unique // 用户名登录
+  passwordHash String // bcrypt 哈希
+  name         String   @default("") // 昵称
+  role         String   @default("user") // "user" | "admin"
+  balanceFen   Int      @default(0) // 余额（单位：分），¥1.00 = 100分
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  transactions Transaction[]
+  transactions  Transaction[]
   brandProfiles BrandProfile[]
-  generations  GenerationRecord[]
+  generations   GenerationRecord[]
 }
 
 // ═══ 交易流水表（Ledger 模式）═══
 model Transaction {
-  id          String   @id @default(cuid())
-  userId      String
-  type        String                     // "recharge" | "consume" | "refund" | "bonus"
-  amountFen   Int                        // 金额（分）：正数=入账，负数=扣费
-  balanceAfter Int                       // 交易后余额快照
-  description String   @default("")     // 描述
-  apiModel    String?                    // API 模型名
-  projectId   Int?                       // 关联的项目 ID
-  createdAt   DateTime @default(now())
+  id           String   @id @default(cuid())
+  userId       String
+  type         String // "recharge" | "consume" | "refund" | "bonus"
+  amountFen    Int // 金额（分）：正数=入账，负数=扣费
+  balanceAfter Int // 交易后余额快照
+  description  String   @default("") // 描述
+  apiModel     String? // API 模型名
+  projectId    Int? // 关联的项目 ID
+  createdAt    DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -49,29 +49,29 @@ model SystemConfig {
 
 // ═══ 品牌 DNA 记忆（Phase 4A）═══
 model BrandProfile {
-  id              String   @id @default(cuid())
-  userId          String
-  name            String   @default("默认品牌")  // 品牌名称
-  isDefault       Boolean  @default(true)        // 是否为用户默认品牌
+  id        String  @id @default(cuid())
+  userId    String
+  name      String  @default("默认品牌") // 品牌名称
+  isDefault Boolean @default(true) // 是否为用户默认品牌
 
   // 模特偏好
-  defaultModelId  String   @default("elena")
-  defaultBodyType String   @default("standard")
-  defaultSkinTone String   @default("light")
+  defaultModelId  String @default("elena")
+  defaultBodyType String @default("standard")
+  defaultSkinTone String @default("light")
 
   // 视觉风格
-  lightingStyle   String   @default("soft_studio")   // 光影风格
-  bgPreference    String   @default("warm_cream")     // 背景偏好
-  colorPalette    String   @default("[]")             // JSON: 品牌调色板
-  promptSuffix    String   @default("")               // 品牌专属 prompt 后缀
+  lightingStyle String @default("soft_studio") // 光影风格
+  bgPreference  String @default("warm_cream") // 背景偏好
+  colorPalette  String @default("[]") // JSON: 品牌调色板
+  promptSuffix  String @default("") // 品牌专属 prompt 后缀
 
   // 输出偏好
-  defaultModule   String   @default("product")        // "product" | "scene"
-  defaultAspectRatio String @default("3:4")           // 默认比例
-  defaultEngine   String   @default("gemini")         // 默认生图引擎: "gemini" | "openai"
+  defaultModule      String @default("product") // "product" | "scene"
+  defaultAspectRatio String @default("3:4") // 默认比例
+  defaultEngine      String @default("gemini") // 默认生图引擎: "gemini" | "openai"
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id])
 
@@ -80,33 +80,33 @@ model BrandProfile {
 
 // ═══ 生成记录 + 反馈（Phase 4B）═══
 model GenerationRecord {
-  id           String   @id @default(cuid())
-  userId       String
-  taskId       Int?                           // Dexie Project.id（前端任务关联，便于反查"任务 X 为啥失败"）
-  module       String   @default("product")  // "product" | "scene"
-  shotIndex    Int?                           // 镜次编号（产品图）
-  promptHash   String                         // prompt 的 hash（去重统计）
-  promptText   String                         // 完整 prompt（truncated if needed）
+  id         String @id @default(cuid())
+  userId     String
+  taskId     Int? // Dexie Project.id（前端任务关联，便于反查"任务 X 为啥失败"）
+  module     String @default("product") // "product" | "scene"
+  shotIndex  Int? // 镜次编号（产品图）
+  promptHash String // prompt 的 hash（去重统计）
+  promptText String // 完整 prompt（truncated if needed）
 
   // 参数快照
-  modelId      String?
-  bodyType     String?
-  skinTone     String?
-  aspectRatio  String   @default("3:4")
-  apiModel     String   @default("")
+  modelId     String?
+  bodyType    String?
+  skinTone    String?
+  aspectRatio String  @default("3:4")
+  apiModel    String  @default("")
 
   // 结果
-  success      Boolean  @default(true)
-  apiLatencyMs Int      @default(0)           // API 耗时（毫秒）
-  errorMessage String?                        // 失败原因
+  success      Boolean @default(true)
+  apiLatencyMs Int     @default(0) // API 耗时（毫秒）
+  errorMessage String? // 失败原因
 
   // 用户反馈
-  rating       Int      @default(0)           // -1=差, 0=未评, 1=好
-  feedback     String   @default("")          // 用户文字反馈
-  feedbackTags String   @default("[]")        // JSON: 标签 ["服装错误","光影差","构图好"]
-  downloaded   Boolean  @default(false)       // 是否下载过
+  rating       Int     @default(0) // -1=差, 0=未评, 1=好
+  feedback     String  @default("") // 用户文字反馈
+  feedbackTags String  @default("[]") // JSON: 标签 ["服装错误","光影差","构图好"]
+  downloaded   Boolean @default(false) // 是否下载过
 
-  createdAt    DateTime @default(now())
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -118,3 +118,28 @@ model GenerationRecord {
   @@index([createdAt])
 }
 
+/// 生成结果的「交接缓冲」——不是长期存储。
+///
+/// 背景：原来服务端把整张 4~5MB 的图作为**一条** SSE `data:` 行推给客户端。0731 线上实测
+/// 一张图传了 105 秒，期间客户端解析不出完整事件，事件看门狗误判服务端卡死并掐断连接
+/// （服务端记 "client disconnected before delivery"）——图早就生成好了，是在下行路上丢的。
+///
+/// 现在改为：服务端写这张表 → SSE 只推一个 id（几十字节）→ 客户端用普通 HTTP GET 取图
+/// （浏览器自己管重试，不经过看门狗）→ 存进 IndexedDB 后删掉这条。
+/// 所以行的生命周期只有「生成完 → 客户端取走」这一小段，峰值＝在途张数，不会撑大库；
+/// 断网重连后还能按 taskId 把没取走的补拉回来，根治断网丢图。
+/// 遗留未取走的由 TTL 清理（见 lib/pending-image.ts）。
+model PendingImage {
+  id        String   @id @default(cuid())
+  userId    String // 取图时校验归属，防越权
+  taskId    Int // Dexie Project.id
+  shotIndex Int      @default(0)
+  data      String // base64（交接用，取走即删）
+  mimeType  String   @default("image/png")
+  width     Int      @default(0)
+  height    Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([userId, taskId])
+  @@index([createdAt])
+}
