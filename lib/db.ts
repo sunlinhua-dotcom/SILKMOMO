@@ -44,6 +44,9 @@ export interface Project {
   sceneGroupMode?: string;           // swap=N景1品；products=1景N品（非索引字段，不 bump Dexie version）
   modelIdentityMode?: string;        // fresh=全新模特；follow_scene=贴近场景模特（非索引字段，不 bump Dexie version）
   sceneGroupCategories?: string;     // JSON: 分析出的主品品类（用于展示/回显）
+  modelFaceChosen?: boolean;         // 用户在脸库里自己挑了模特脸（非索引字段，不 bump Dexie version）
+                                     // 用来区分「用户选的脸」和「单张重做时回传的锚」——
+                                     // 后者会让服务端加上"补齐已有组图"的提示词，对新任务是错的
 
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
   lastError?: string;

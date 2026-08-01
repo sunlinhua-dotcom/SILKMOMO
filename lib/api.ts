@@ -472,3 +472,37 @@ ${rules}${userAddon}
 // 旧版 generateProductShots / generateSceneShots / generateSevenImages 已删除。
 // 所有生图调用都已迁移到 POST /api/generate/stream（SSE 流式接口，避免 Server Action
 // 路径上"扣费成功但不退款"的资金安全 bug）。
+
+/**
+ * 派生锚肖像（白底身份卡）提示词。
+ *
+ * 从 app/api/generate/stream/route.ts 挪到这里，让「生成流程自动创建的锚」和
+ * 「模特脸库让用户自己挑的脸」共用同一份提示词 —— 两处各写一份必然随时间漂移。
+ *
+ * faceVariation：脸库需要一次生成多张**互不相同**的脸；不传则保持原行为。
+ */
+export function buildDerivedAnchorPortraitPrompt(skinToneNote?: string, faceVariation?: string): string {
+  const skinToneLine = skinToneNote
+    ? `Her skin tone is ${skinToneNote} — this exact tan depth and warm/cool undertone. This portrait sets her face and her skin tone; hair, body, pose, styling and lighting come from each scene later.`
+    : 'This portrait sets her face only. Hair, body, pose, styling and lighting come from each scene later.';
+
+  const variationLine = faceVariation
+    ? `\n\nMake this particular woman distinct from other candidates: ${faceVariation}`
+    : '';
+
+  return `
+A studio identity portrait of one fictional woman, newly invented — not any real person, celebrity, or anyone in an uploaded image.
+
+She is a 24-28 year old agency fashion model: almond eyes with a subtle East-Asian eyelid, softly defined brows, a gentle nose bridge with a natural tip, high cheekbones over a full midface, a tapered jawline and chin, naturally full and precisely drawn lips. Her face is specific and memorable, with the small asymmetries a real face has — one eye opening slightly wider, one brow a little higher.
+
+${skinToneLine}
+
+Head and shoulders, shot on an 85mm lens from about two metres, her face filling roughly 40% of the frame. Facing camera, chin level, a neutral expression easing toward a faint smile. Plain light grey seamless behind her. One large soft source from the front left, a weak fill on the right, so the light rakes gently across her cheek and reveals the texture of the skin.
+
+Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
+
+Skin: rested and healthy, rendered at pore level — pores across the T-zone and cheeks, fine vellus hair at the hairline, faint natural tonal shifts between forehead, cheek and chin, sheen only on the nose bridge, upper cheekbone and chin. The retouching is a good retoucher's: texture intact, nothing sanded away.
+
+Grade: restrained analog color, gentle highlight rolloff, fine film grain in the shadow areas of the skin. A photograph.${variationLine}
+  `.trim();
+}

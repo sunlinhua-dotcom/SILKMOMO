@@ -18,7 +18,7 @@ import {
   normalizeGenerationQuality,
   type GenerationQuality,
 } from '@/lib/billing-constants';
-import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
+import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, buildDerivedAnchorPortraitPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
@@ -80,6 +80,7 @@ interface GenerateStreamRequest {
   // 让后续分块的镜次仍复用同一个模特身份(跨请求保持模特一致性)。
   anchorImage?: ImageInput;
   garmentDescription?: string;
+  anchorIsUserChosen?: boolean; // true=用户在脸库里挑的脸（新任务），false/缺省=单张重做回传的锚
 }
 
 // ═══ 入参防线：参考图数量 / 单图体积 / MIME 白名单 ═══
@@ -193,28 +194,6 @@ Head and shoulders, shot on an 85mm lens from about two metres, her face filling
 Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
 
 ${FACE_REALISM_DIRECTIVE}
-  `.trim();
-}
-
-function buildDerivedAnchorPortraitPrompt(skinToneNote?: string): string {
-  const skinToneLine = skinToneNote
-    ? `Her skin tone is ${skinToneNote} — this exact tan depth and warm/cool undertone. This portrait sets her face and her skin tone; hair, body, pose, styling and lighting come from each scene later.`
-    : 'This portrait sets her face only. Hair, body, pose, styling and lighting come from each scene later.';
-
-  return `
-A studio identity portrait of one fictional woman, newly invented — not any real person, celebrity, or anyone in an uploaded image.
-
-She is a 24-28 year old agency fashion model: almond eyes with a subtle East-Asian eyelid, softly defined brows, a gentle nose bridge with a natural tip, high cheekbones over a full midface, a tapered jawline and chin, naturally full and precisely drawn lips. Her face is specific and memorable, with the small asymmetries a real face has — one eye opening slightly wider, one brow a little higher.
-
-${skinToneLine}
-
-Head and shoulders, shot on an 85mm lens from about two metres, her face filling roughly 40% of the frame. Facing camera, chin level, a neutral expression easing toward a faint smile. Plain light grey seamless behind her. One large soft source from the front left, a weak fill on the right, so the light rakes gently across her cheek and reveals the texture of the skin.
-
-Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
-
-Skin: rested and healthy, rendered at pore level — pores across the T-zone and cheeks, fine vellus hair at the hairline, faint natural tonal shifts between forehead, cheek and chin, sheen only on the nose bridge, upper cheekbone and chin. The retouching is a good retoucher's: texture intact, nothing sanded away.
-
-Grade: restrained analog color, gentle highlight rolloff, fine film grain in the shadow areas of the skin. A photograph.
   `.trim();
 }
 
@@ -344,6 +323,7 @@ export async function POST(req: NextRequest) {
     sceneGroupAnchor,
     sceneGroupGarmentCategories,
     garmentDescription: clientGarmentDescription,
+    anchorIsUserChosen,
     customPrompt,
     engine: rawEngine,
     quality: rawQuality,
@@ -1035,7 +1015,8 @@ export async function POST(req: NextRequest) {
                   productLabel: currentProductLabel,
                   hasAnchor: shouldUseSceneGroupAnchor && !!anchorImage,
                   hasReplacementAccessory,
-                  isRegeneration: requestHasSceneGroupAnchor,
+                  // 用户自己挑的脸不是「补齐已有组图」，不能套用重做口径的提示词
+                  isRegeneration: requestHasSceneGroupAnchor && anchorIsUserChosen !== true,
                   customPrompt: safeCustomPrompt,
                 });
                 const shotStart = Date.now();
