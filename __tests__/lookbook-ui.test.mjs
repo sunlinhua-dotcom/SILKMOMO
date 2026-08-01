@@ -106,3 +106,33 @@ test('event watchdog does not count down while a large data: line is still arriv
   const resetAt = source.indexOf('if (buffer.length > 0) lastEventAt = Date.now();');
   assert.ok(splitAt > -1 && resetAt > splitAt, '半条事件的进度复位必须排在 buffer 重切之后');
 });
+
+test('model face library lets the user pick the identity, and stays optional', () => {
+  const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const faceRoute = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
+  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+
+  // 一次一张、串行生成：满足「生图串行」约束，且单次请求短、进度可见
+  assert.match(faceRoute, /export async function POST/);
+  assert.match(lookbook, /for \(const variation of FACE_VARIATIONS\)/);
+  // 10 张必须互不相同，否则同一条提示词会出一批雷同的脸
+  assert.match(lookbook, /FACE_VARIATIONS = \[/);
+  assert.match(apiSource, /faceVariation\?: string/);
+
+  // 选填：不挑也能生成，行为与以前一致
+  assert.match(lookbook, /选一张模特脸（选填）/);
+  assert.match(lookbook, /chosenFaceIndex !== null && faceCandidates\[chosenFaceIndex\]/);
+
+  // 免费但限流，防止被反复点
+  assert.match(faceRoute, /isRateLimited/);
+  assert.match(faceRoute, /bumpRateLimit/);
+});
+
+test('a user-chosen face is not mistaken for a redo anchor', () => {
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+
+  // 单张重做回传的锚会让服务端加上「贴合已通过组图」的口径，对新任务是错的
+  assert.match(routeSource, /isRegeneration: requestHasSceneGroupAnchor && anchorIsUserChosen !== true/);
+  assert.match(taskSource, /anchorIsUserChosen: freshProject\.modelFaceChosen === true/);
+});

@@ -188,6 +188,12 @@ export default function LookbookStudio() {
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
   const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('follow_scene');
+  // 模特脸库：先生成一批候选脸让用户挑，挑中的那张贯穿整组。
+  // 不挑也能用 —— 服务端照旧自动创建一张派生锚，行为与以前一致。
+  const [faceCandidates, setFaceCandidates] = useState<Array<{ data: string; mimeType: string }>>([]);
+  const [chosenFaceIndex, setChosenFaceIndex] = useState<number | null>(null);
+  const [facesLoading, setFacesLoading] = useState(false);
+  const [faceError, setFaceError] = useState<string | null>(null);
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -236,6 +242,50 @@ export default function LookbookStudio() {
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
+  // 十张脸串行生成：单次请求短、进度可见，也满足「生图串行」的约束。
+  // 每张带一个不同的变化提示，否则同一条提示词会出一批高度雷同的脸。
+  const FACE_VARIATIONS = [
+    'rounder face with softer jaw',
+    'longer oval face with defined cheekbones',
+    'wider-set eyes and a fuller lower lip',
+    'narrower nose bridge and a pointed chin',
+    'stronger straight brows and a square jaw',
+    'heart-shaped face with a delicate chin',
+    'monolid eyes and flatter midface',
+    'fuller cheeks and a short philtrum',
+    'deeper-set eyes and a longer nose',
+    'petite features with a small mouth',
+  ];
+
+  const handleGenerateFaces = async () => {
+    if (facesLoading) return;
+    setFacesLoading(true);
+    setFaceError(null);
+    setFaceCandidates([]);
+    setChosenFaceIndex(null);
+    try {
+      for (const variation of FACE_VARIATIONS) {
+        const res = await fetch('/api/model-face', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variation }),
+        });
+        if (!res.ok) {
+          const { error } = await res.json().catch(() => ({ error: '' }));
+          // 已经出了几张就保留几张，不整批丢弃
+          setFaceError(error || '模特脸生成失败，已保留已生成的几张');
+          break;
+        }
+        const { face } = await res.json();
+        if (face?.data) setFaceCandidates(prev => [...prev, face]);
+      }
+    } catch {
+      setFaceError('模特脸生成失败，请稍后重试');
+    } finally {
+      setFacesLoading(false);
+    }
+  };
+
   // ── 生成：写同一 SilkMomoDB 再跳 /task/[id]（复用已建好的组图 SSE 内核） ──
   const handleGenerate = async () => {
     if (!canGenerate || isGenerating || !currentUser) return;
@@ -271,6 +321,15 @@ export default function LookbookStudio() {
         customWidth: sceneOutputSize === 'custom' ? sceneCustomW : undefined,
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
       });
+
+      // 用户挑了脸就落成 anchor，并标记来源；没挑则维持原行为（服务端自动创建派生锚）
+      if (modelIdentityMode === 'follow_scene' && chosenFaceIndex !== null && faceCandidates[chosenFaceIndex]) {
+        const chosen = faceCandidates[chosenFaceIndex];
+        await db.images.add({
+          projectId, type: 'anchor', data: chosen.data, mimeType: chosen.mimeType,
+        });
+        await db.projects.update(projectId as number, { modelFaceChosen: true });
+      }
 
       await prepareProjectImageSlot(projectId as number);
 
@@ -471,6 +530,63 @@ export default function LookbookStudio() {
                 onChange={setModelIdentityMode}
                 radioName="swapModelIdentityMode"
               />
+
+              {/* 模特脸库：先出一批候选脸让用户挑，挑中的那张贯穿整组。
+                  不挑也能生成 —— 服务端照旧自动创建一张，行为与以前一致。 */}
+              {modelIdentityMode === 'follow_scene' && (
+                <div className="mt-4 pt-4 border-t border-[var(--color-border-light)]">
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div>
+                      <p className="text-sm font-medium text-[var(--color-text)]">选一张模特脸（选填）</p>
+                      <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
+                        挑中的脸会贯穿整组图。不挑就由系统自动生成一张，效果与以前一致。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleGenerateFaces}
+                      disabled={facesLoading}
+                      className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
+                    >
+                      {facesLoading ? `生成中 ${faceCandidates.length}/10` : faceCandidates.length > 0 ? '换一批' : '生成备选脸'}
+                    </button>
+                  </div>
+
+                  {faceCandidates.length > 0 && (
+                    <div className="grid grid-cols-5 gap-2">
+                      {faceCandidates.map((face, index) => (
+                        <button
+                          key={index}
+                          type="button"
+                          onClick={() => setChosenFaceIndex(chosenFaceIndex === index ? null : index)}
+                          className={`relative aspect-[3/4] rounded-lg overflow-hidden border-2 transition ${
+                            chosenFaceIndex === index
+                              ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/30'
+                              : 'border-transparent hover:border-[var(--color-border-light)]'
+                          }`}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={`data:${face.mimeType};base64,${face.data}`}
+                            alt={`备选模特脸 ${index + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {facesLoading && faceCandidates.length === 0 && (
+                    <p className="text-xs text-[var(--color-text-muted)]">正在生成第 1 张，共 10 张（逐张出现，可随时先挑）…</p>
+                  )}
+                  {faceError && <p className="mt-2 text-xs text-amber-600">{faceError}</p>}
+                  {chosenFaceIndex !== null && (
+                    <p className="mt-2 text-xs text-[var(--color-accent)]">
+                      已选第 {chosenFaceIndex + 1} 张，整组图都会用这张脸。再点一次可取消。
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">

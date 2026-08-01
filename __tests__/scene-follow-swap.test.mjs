@@ -102,10 +102,11 @@ test('follow_scene generates in a single backend call with the anchor attached',
 });
 
 test('derived follow-scene anchor uses the final head-and-shoulders identity portrait prompt', () => {
-  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const derivedStart = routeSource.indexOf('function buildDerivedAnchorPortraitPrompt');
-  const derivedEnd = routeSource.indexOf('// ═════════════════', derivedStart);
-  const derivedBlock = routeSource.slice(derivedStart, derivedEnd);
+  // 提示词已从 route 挪到 lib/api.ts，让「自动创建的锚」与「脸库让用户挑的脸」共用同一份，
+  // 避免两处各写一份随时间漂移。
+  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+  const derivedStart = apiSource.indexOf('export function buildDerivedAnchorPortraitPrompt');
+  const derivedBlock = apiSource.slice(derivedStart);
 
   assert.ok(derivedStart > -1);
   assert.match(derivedBlock, /Head and shoulders/);

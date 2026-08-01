@@ -754,6 +754,8 @@ export default function TaskDetailPage() {
           modelIdentityMode: isGroup ? modelIdentityMode : undefined,
           sceneGroupTargetIndexes: isGroup ? chunkShots : undefined,
           sceneGroupAnchor: shouldUseSceneGroupAnchor ? groupAnchorForChunk : undefined,
+          // 用户在脸库里挑的脸 ≠ 单张重做回传的锚：后者才需要「贴合已通过组图」的口径
+          anchorIsUserChosen: freshProject.modelFaceChosen === true,
           sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
           garmentDescription: garmentDescriptionForChunk || undefined,
