@@ -832,8 +832,18 @@ export async function POST(req: NextRequest) {
                   push,
                   '正在分析服装特征',
                   {},
-                  () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+                  // 把其余产品图一并送进这次分析：不增加上游调用，顺带判断混款
+                  () => analyzeProductImage(
+                    productImages[0].data,
+                    productImages[0].mimeType,
+                    productImages.slice(1).map(img => ({ data: img.data, mimeType: img.mimeType })),
+                  ),
                 );
+                if (analysis.mixed) {
+                  // 卖家把两件不同单品混在一次上传里，出图必然串味 —— 以前完全没有提示
+                  console.log(`[sceneGroup] 检测到混款上传: ${analysis.mixedReason}`);
+                  push('warning', { kind: 'mixed-garment', message: analysis.mixedReason });
+                }
                 if (analysis.description) {
                   sharedGarmentDescription = analysis.description;
                   // 下发给客户端，后续分块原样回传即可复用，不必每块重跑
