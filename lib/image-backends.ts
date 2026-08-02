@@ -334,6 +334,88 @@ function mapAspectToOpenAISize(aspect: BackendInput['aspectRatio']): string {
   }
 }
 
+/**
+ * GPT 通道的纯文生图分支（/v1/images/generations）。
+ *
+ * 为什么需要：本文件的 openai 通道原本只实现了图生图（/v1/images/edits），而 edits 端点
+ * **必须带至少一张输入图**。0802 脸库改用 GPT Image 2 时踩到：候选脸是纯文生图、没有任何
+ * 参考图，image[] 为空 → 302 直接返回 403 err_code:-10003「参数错误」。
+ * 这也是当初派生锚肖像走 Gemini 而不走 GPT 的原因 —— 没人从 GPT 通道做过文生图。
+ */
+async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Promise<BackendResult> {
+  let response: Response;
+  try {
+    response = await fetch(`${OPENAI_BASE}/v1/images/generations`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        prompt: input.prompt,
+        size: mapAspectToOpenAISize(input.aspectRatio),
+        quality: normalizeGenerationQuality(input.quality),
+        n: 1,
+      }),
+      signal: AbortSignal.timeout(input.timeoutMs ?? OPENAI_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '网络连接失败';
+    const isTimeout = /abort|timeout/i.test(msg);
+    logUpstreamError('openai', err);
+    // 与 edits 分支同口径：超时不重试（已等满整个窗口），仅瞬时网络错误重试一次
+    if (!isTimeout && retryCount < MAX_RETRIES) {
+      return generateWithOpenAIText(input, retryCount + 1);
+    }
+    const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
+    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    console.log(`[upstream-error] backend=openai category=HTTP_${response.status} raw=${sanitizeError(errorText.slice(0, 300))}`);
+    if ((response.status === 503 || response.status === 429) && retryCount < MAX_RETRIES) {
+      await new Promise(r => setTimeout(r, 3000));
+      return generateWithOpenAIText(input, retryCount + 1);
+    }
+    return { success: false, error: `OpenAI API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'openai' };
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(await response.text());
+  } catch (err) {
+    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
+  }
+
+  const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
+  const b64 = items?.[0]?.b64_json;
+  if (b64) return { success: true, data: b64, backend: 'openai', model: OPENAI_MODEL };
+
+  // 兜底：部分中转返回 url 而不是 b64
+  const imgUrl = items?.[0]?.url;
+  if (imgUrl) {
+    try {
+      const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(60_000) });
+      if (!imgRes.ok) {
+        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, backend: 'openai' };
+      }
+      const contentType = imgRes.headers.get('content-type') || '';
+      if (contentType && !contentType.startsWith('image/')) {
+        return { success: false, error: `图片 URL 返回了非图片内容 (${contentType.slice(0, 50)})`, backend: 'openai' };
+      }
+      const buf = Buffer.from(await imgRes.arrayBuffer());
+      return { success: true, data: buf.toString('base64'), backend: 'openai', model: OPENAI_MODEL };
+    } catch (err) {
+      return { success: false, error: `下载图片失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
+    }
+  }
+
+  return { success: false, error: 'OpenAI 未返回图片数据', backend: 'openai' };
+}
+
 async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<BackendResult> {
   // 收集所有参考图（OpenAI 上限 16 张）
   const refImages: Array<{ img: ImageInput; tag: string }> = [];
@@ -354,6 +436,12 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   }
 
   const limited = refImages.slice(0, 16);
+
+  // 没有任何参考图 = 纯文生图。edits 端点要求至少一张输入图，走这里会被上游判参数错误
+  // （0802 脸库实测 403 err_code:-10003），必须改走 generations。
+  if (limited.length === 0) {
+    return generateWithOpenAIText(input, retryCount);
+  }
 
   // 在 prompt 里给参考图分组打标，弥补 multipart 不能传图标签的限制
   const roleText = (tag: string, purpose: 'compose' | 'faceswap' = 'compose') => {
