@@ -30,3 +30,18 @@ test('buildGeminiParts omits the product label when no product image exists', ()
   const text = parts.flatMap(part => typeof part.text === 'string' ? [part.text] : []).join('\n');
   assert.doesNotMatch(text, /Product Reference Images/);
 });
+
+test('openai backend falls back to /v1/images/generations when there is no reference image', () => {
+  const source = fs.readFileSync('lib/image-backends.ts', 'utf8');
+
+  // edits 端点必须带至少一张输入图；纯文生图（脸库候选脸）走它会被上游判参数错误
+  // ——0802 线上实测 403 err_code:-10003。
+  assert.match(source, /async function generateWithOpenAIText/);
+  assert.match(source, /\/v1\/images\/generations/);
+  assert.match(source, /if \(limited\.length === 0\) \{\s*\n\s*return generateWithOpenAIText\(input, retryCount\);/);
+
+  // 与 edits 分支同口径：超时不重试，只有瞬时网络错误/503/429 才重试
+  const textBranch = source.slice(source.indexOf('async function generateWithOpenAIText'));
+  assert.match(textBranch, /!isTimeout && retryCount < MAX_RETRIES/);
+  assert.match(textBranch, /response\.status === 503 \|\| response\.status === 429/);
+});
