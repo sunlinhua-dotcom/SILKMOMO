@@ -243,19 +243,9 @@ export default function LookbookStudio() {
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
   // 十张脸串行生成：单次请求短、进度可见，也满足「生图串行」的约束。
-  // 每张带一个不同的变化提示，否则同一条提示词会出一批高度雷同的脸。
-  const FACE_VARIATIONS = [
-    'rounder face with softer jaw',
-    'longer oval face with defined cheekbones',
-    'wider-set eyes and a fuller lower lip',
-    'narrower nose bridge and a pointed chin',
-    'stronger straight brows and a square jaw',
-    'heart-shaped face with a delicate chin',
-    'monolid eyes and flatter midface',
-    'fuller cheeks and a short philtrum',
-    'deeper-set eyes and a longer nose',
-    'petite features with a small mouth',
-  ];
+  // 配方（3 亚欧混血 + 7 欧美、脸型两两拉开）固定在服务端 MODEL_FACE_SPECS，
+  // 这里只传下标 —— 免费接口不开放自由 prompt。
+  const MODEL_FACE_COUNT = 10;
 
   const handleGenerateFaces = async () => {
     if (facesLoading) return;
@@ -264,11 +254,11 @@ export default function LookbookStudio() {
     setFaceCandidates([]);
     setChosenFaceIndex(null);
     try {
-      for (const variation of FACE_VARIATIONS) {
+      for (let specIndex = 0; specIndex < MODEL_FACE_COUNT; specIndex++) {
         const res = await fetch('/api/model-face', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variation }),
+          body: JSON.stringify({ specIndex }),
         });
         if (!res.ok) {
           const { error } = await res.json().catch(() => ({ error: '' }));
@@ -539,7 +529,8 @@ export default function LookbookStudio() {
                     <div>
                       <p className="text-sm font-medium text-[var(--color-text)]">选一张模特脸（选填）</p>
                       <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
-                        挑中的脸会贯穿整组图。不挑就由系统自动生成一张，效果与以前一致。
+                        3 张亚欧混血 + 7 张欧美，脸型各不相同。挑中的脸会贯穿整组图；
+                        不挑就由系统自动生成一张，效果与以前一致。走 GPT Image 2，十张约需十几分钟。
                       </p>
                     </div>
                     <button
@@ -548,7 +539,7 @@ export default function LookbookStudio() {
                       disabled={facesLoading}
                       className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
                     >
-                      {facesLoading ? `生成中 ${faceCandidates.length}/10` : faceCandidates.length > 0 ? '换一批' : '生成备选脸'}
+                      {facesLoading ? `生成中 ${faceCandidates.length}/${MODEL_FACE_COUNT}` : faceCandidates.length > 0 ? '换一批' : '生成备选脸'}
                     </button>
                   </div>
 
@@ -577,7 +568,7 @@ export default function LookbookStudio() {
                   )}
 
                   {facesLoading && faceCandidates.length === 0 && (
-                    <p className="text-xs text-[var(--color-text-muted)]">正在生成第 1 张，共 10 张（逐张出现，可随时先挑）…</p>
+                    <p className="text-xs text-[var(--color-text-muted)]">正在生成第 1 张，共 10 张（逐张出现，可随时先挑）。GPT Image 2 出脸较慢，整批约十几分钟…</p>
                   )}
                   {faceError && <p className="mt-2 text-xs text-amber-600">{faceError}</p>}
                   {chosenFaceIndex !== null && (
