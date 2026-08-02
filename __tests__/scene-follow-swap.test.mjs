@@ -258,3 +258,24 @@ test('mixed-garment warning rides on the existing analysis call (no extra upstre
   assert.match(taskSource, /setWarningMessage\(msg\.trim\(\)\)/);
   assert.match(taskSource, /这次上传的产品图像是不止一件单品/);
 });
+
+test('face library ships 3 eurasian + 7 western with genuinely distinct face shapes', () => {
+  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+
+  const specsBlock = apiSource.slice(apiSource.indexOf('export const MODEL_FACE_SPECS'));
+  const eurasian = (specsBlock.match(/ethnicity: 'eurasian'/g) || []).length;
+  const western = (specsBlock.match(/ethnicity: 'western'/g) || []).length;
+  assert.equal(eurasian, 3, '亚欧混血应为 3 张');
+  assert.equal(western, 7, '欧美应为 7 张');
+
+  // 「完全不一样的脸型」：每张必须写死脸型，只说「换一张脸」实测会出一批雷同的脸
+  for (const shape of ['round face', 'long oval face', 'heart-shaped face', 'square face', 'diamond face']) {
+    assert.ok(specsBlock.includes(shape), `缺少脸型：${shape}`);
+  }
+  // 欧美档必须明确排除东亚长相，否则底模会漂回混血脸
+  assert.match(apiSource, /must NOT read as East Asian or mixed-Asian/);
+
+  // 自动创建的派生锚不受影响：它那份「美亚混血」方向是 A.3.3 真图验证后定死的
+  assert.match(apiSource, /export function buildDerivedAnchorPortraitPrompt/);
+  assert.match(apiSource, /subtle East-Asian eyelid/);
+});

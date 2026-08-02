@@ -110,14 +110,16 @@ test('event watchdog does not count down while a large data: line is still arriv
 test('model face library lets the user pick the identity, and stays optional', () => {
   const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
   const faceRoute = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
-  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
 
   // 一次一张、串行生成：满足「生图串行」约束，且单次请求短、进度可见
   assert.match(faceRoute, /export async function POST/);
-  assert.match(lookbook, /for \(const variation of FACE_VARIATIONS\)/);
-  // 10 张必须互不相同，否则同一条提示词会出一批雷同的脸
-  assert.match(lookbook, /FACE_VARIATIONS = \[/);
-  assert.match(apiSource, /faceVariation\?: string/);
+  assert.match(lookbook, /for \(let specIndex = 0; specIndex < MODEL_FACE_COUNT; specIndex\+\+\)/);
+  // 配方固定在服务端，客户端只传下标 —— 免费接口不能变成任意 prompt 的入口
+  assert.match(faceRoute, /MODEL_FACE_SPECS\[specIndex\]/);
+  assert.doesNotMatch(faceRoute, /rawVariation/);
+  // 走 GPT Image 2（老板指定），画质 medium 压时间与成本
+  assert.match(faceRoute, /\}, 'openai'\)/);
+  assert.match(faceRoute, /quality: 'medium'/);
 
   // 选填：不挑也能生成，行为与以前一致
   assert.match(lookbook, /选一张模特脸（选填）/);
