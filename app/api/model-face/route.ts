@@ -26,6 +26,8 @@ import { isRateLimited, bumpRateLimit } from '@/lib/rate-limit';
 // 一次挑脸最多 10 张，留一倍余量给重挑；窗口 10 分钟
 const MAX_FACES_PER_WINDOW = 20;
 const RATE_WINDOW_MS = 10 * 60 * 1000;
+// 比通用 GPT 上游 360s 更早收口，给路由序列化错误响应和客户端接收留出余量。
+const MODEL_FACE_UPSTREAM_TIMEOUT_MS = 330_000;
 
 export async function POST(req: Request) {
   const auth = await getCurrentUser();
@@ -54,6 +56,7 @@ export async function POST(req: Request) {
     productImages: [],
     aspectRatio: '3:4',
     quality: 'medium',
+    timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS,
   }, 'openai');
 
   if (!result.success || !result.data) {
