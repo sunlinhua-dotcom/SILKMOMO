@@ -1,9 +1,34 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import prisma from '@/lib/prisma';
-import { MODEL_FACE_PUBLIC_SELECT } from '@/lib/model-face-library';
+import {
+  MODEL_FACE_PUBLIC_SELECT,
+  getModelFaceImage,
+  getModelFaceThumbnail,
+} from '@/lib/model-face-library';
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+export async function GET(req: Request, { params }: RouteContext) {
+  const auth = await getCurrentUser();
+  if (!auth) return NextResponse.json({ error: '未登录' }, { status: 401 });
+  const { id } = await params;
+  const thumbnail = new URL(req.url).searchParams.get('variant') === 'thumbnail';
+  if (thumbnail) {
+    const result = await getModelFaceThumbnail(auth.userId, id);
+    if (!result) return NextResponse.json({ error: '模特脸不存在' }, { status: 404 });
+    return new NextResponse(Buffer.from(result.data, 'base64'), {
+      headers: {
+        'Content-Type': result.mimeType,
+        'Cache-Control': 'private, max-age=86400',
+      },
+    });
+  }
+
+  const face = await getModelFaceImage(auth.userId, id);
+  if (!face) return NextResponse.json({ error: '模特脸不存在' }, { status: 404 });
+  return NextResponse.json({ image: face.image, mimeType: face.mimeType });
+}
 
 export async function PATCH(req: Request, { params }: RouteContext) {
   const auth = await getCurrentUser();
