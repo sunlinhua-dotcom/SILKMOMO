@@ -48,7 +48,7 @@ test('model face mutations are owner-scoped and support favorite name and delete
   assert.doesNotMatch(route, /delete\(\{\s*where: \{ id \}/);
 });
 
-test('model face images are normalized to quality-88 JPEG with a 256px thumbnail', async () => {
+test('model face images are normalized to quality-88 JPEG with a 256px thumbnail and no library total cap', async () => {
   assert.equal(typeof libraryModule.prepareModelFaceImage, 'function');
   const png = await sharp({
     create: { width: 800, height: 1000, channels: 3, background: '#c9a86c' },
@@ -65,8 +65,7 @@ test('model face images are normalized to quality-88 JPEG with a 256px thumbnail
 
   const library = fs.readFileSync('lib/model-face-library.ts', 'utf8');
   const imageHelper = fs.readFileSync('lib/model-face-image.ts', 'utf8');
-  assert.match(library, /export const MODEL_FACE_LIBRARY_LIMIT = 200/);
-  assert.match(library, /storedFaces >= MODEL_FACE_LIBRARY_LIMIT/);
+  assert.doesNotMatch(library, /MODEL_FACE_LIBRARY_LIMIT|storedFaces|最多保存/);
   assert.match(imageHelper, /\.jpeg\(\{ quality: MODEL_FACE_JPEG_QUALITY \}\)/);
   assert.match(imageHelper, /resize\(\{ width: MODEL_FACE_THUMBNAIL_WIDTH/);
   assert.match(library, /thumbnail: normalized\.thumbnail/);

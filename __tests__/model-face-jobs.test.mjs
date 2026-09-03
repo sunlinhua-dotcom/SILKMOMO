@@ -155,7 +155,7 @@ test('model face jobs persist per-item state and enforce one active job per acco
   assert.match(schema, /leaseUntil\s+DateTime\?/);
 });
 
-test('job API recovers interrupted work and caps each UTC+8 day at 200 requested faces', () => {
+test('job API recovers interrupted work, has no library total cap, and caps real upstream attempts at 200 per UTC+8 day', () => {
   const route = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
   const jobs = fs.readFileSync('lib/model-face-jobs.ts', 'utf8');
   const policySource = fs.readFileSync('lib/model-face-job-policy.ts', 'utf8');
@@ -166,7 +166,7 @@ test('job API recovers interrupted work and caps each UTC+8 day at 200 requested
   assert.match(jobs, /hasModelFaceAttemptCapacity/);
   assert.match(jobs, /startOfShanghaiDay/);
   assert.match(jobs, /recoverInterruptedModelFaceJobs/);
-  assert.match(jobs, /assertModelFaceLibraryCapacity/);
+  assert.doesNotMatch(jobs, /MODEL_FACE_LIBRARY_LIMIT|assertModelFaceLibraryCapacity|最多保存/);
   assert.match(jobs, /leaseUntil/);
   assert.match(jobs, /attemptedAt: \{ gte: startOfShanghaiDay/);
   assert.match(jobs, /retryPendingModelFaceRefunds/);
