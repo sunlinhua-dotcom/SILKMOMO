@@ -47,6 +47,7 @@ export interface Project {
   modelFaceChosen?: boolean;         // 用户在脸库里自己挑了模特脸（非索引字段，不 bump Dexie version）
                                      // 用来区分「用户选的脸」和「单张重做时回传的锚」——
                                      // 后者会让服务端加上"补齐已有组图"的提示词，对新任务是错的
+  modelFaceId?: string;              // 被用户选中的账号脸库记录，用于标记身份锚来源
 
   // 失败原因（status='failed' 时记录最后一次失败的具体错误，刷新页面也能看到）
   lastError?: string;

@@ -18,13 +18,21 @@ import {
   normalizeGenerationQuality,
   type GenerationQuality,
 } from '@/lib/billing-constants';
-import { buildProductShotPrompt, buildSceneShotPrompt, buildSceneGroupPrompt, buildDerivedAnchorPortraitPrompt, FACE_REALISM_DIRECTIVE } from '@/lib/api';
+import {
+  MODEL_FACE_SPECS,
+  buildDerivedAnchorPortraitPrompt,
+  buildModelFacePortraitPrompt,
+  buildProductShotPrompt,
+  buildSceneGroupPrompt,
+  buildSceneShotPrompt,
+} from '@/lib/api';
 import { autoSaveBrandPreference } from '@/lib/brand-memory';
 import { generateImage as generateBackendImage, normalizeBackend, resolveApiModel } from '@/lib/image-backends';
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage, shrinkAnchorForClient } from '@/lib/postprocess';
 import { storePendingImage } from '@/lib/pending-image';
+import { getRandomFavoriteModelFace } from '@/lib/model-face-library';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -166,35 +174,6 @@ function validateOptionalAnchor(anchor: ImageInput | undefined, label: string): 
     return `${label}数据非法`;
   }
   return null;
-}
-
-function buildSceneGroupPortraitPrompt(
-  modelConfig: (typeof MODELS)[number] | undefined,
-  bodyTypeConfig: (typeof BODY_TYPES)[number] | undefined,
-  skinToneConfig: (typeof SKIN_TONES)[number] | undefined,
-): string {
-  const modelLine = modelConfig
-    ? modelConfig.prompt
-    : 'A fictional premium fashion model with refined, memorable facial features, suitable for silk and luxury apparel lookbook photography.';
-  const bodyLine = bodyTypeConfig?.prompt || 'Balanced fashion model build with natural proportions.';
-  const skinLine = skinToneConfig?.prompt || 'Natural luminous skin tone.';
-
-  return `
-Create ONE photorealistic fictional model identity portrait card.
-
-The person must be fictional and newly invented. Do NOT reference, copy, or resemble any uploaded image, real person, celebrity, previous lookbook model, or product reference model.
-
-Model direction:
-${modelLine}
-${bodyLine}
-${skinLine}
-
-Head and shoulders, shot on an 85mm lens from about two metres, her face filling roughly 40% of the frame. Facing camera, chin level, a neutral expression easing toward a faint smile. Plain light grey seamless behind her. One large soft source from the front left, a weak fill on the right, so the light rakes gently across her cheek and reveals the texture of the skin.
-
-Her hair is simple and pulled clear of the face so the jawline, hairline and ears read cleanly. The frame is free of text, letters, watermarks and logos.
-
-${FACE_REALISM_DIRECTIVE}
-  `.trim();
 }
 
 // ═══════════════════════════════════════
@@ -796,6 +775,17 @@ export async function POST(req: NextRequest) {
                 ? { data: sceneGroupAnchor.data, mimeType: sceneGroupAnchor.mimeType || 'image/png' }
                 : undefined;
 
+            // fresh 新任务未显式选脸时，优先复用账号的御用脸。只在 fresh 分支读取脸库，
+            // follow_scene 仍严格走场景派生锚，不会消费用户收藏的完整身份。
+            if (modelIdentityMode === 'fresh' && !anchorImage && !clientClosed) {
+              const favorite = await getRandomFavoriteModelFace(auth.userId);
+              if (favorite) {
+                anchorImage = { data: favorite.image, mimeType: favorite.mimeType };
+                const anchorForClient = await shrinkAnchorForClient(favorite.image);
+                push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
+              }
+            }
+
             // swap 模式的产品图整批共用一份服装分析；products 模式每组在循环内单独分析。
             let sharedGarmentDescription: string | undefined;
             if (sceneGroupMode === 'swap' && reusableGarmentDescription) {
@@ -871,9 +861,15 @@ export async function POST(req: NextRequest) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
-                const anchorPrompt = modelIdentityMode === 'follow_scene'
-                  ? buildDerivedAnchorPortraitPrompt(derivedAnchorSkinTone)
-                  : buildSceneGroupPortraitPrompt(modelConfig, bodyTypeConfig, skinToneConfig);
+                // 没有御用脸时从同一份 3 亚欧混血 + 7 欧美配方随机取一项；族裔与脸型
+                // 都由 buildModelFacePortraitPrompt 明写，不再交给底模自行猜测。
+                let anchorPrompt: string;
+                if (modelIdentityMode === 'follow_scene') {
+                  anchorPrompt = buildDerivedAnchorPortraitPrompt(derivedAnchorSkinTone);
+                } else {
+                  const specIndex = Math.floor(Math.random() * MODEL_FACE_SPECS.length);
+                  anchorPrompt = buildModelFacePortraitPrompt(MODEL_FACE_SPECS[specIndex]);
+                }
                 // 同样必须带心跳：Gemini 单次最长 120s，超时还会重试一次（≈243s），
                 // 这整段此前只有一条起始 status，是全链路最大的一个「无事件真空窗」。
                 const anchorResult = await withPhaseBeat(
