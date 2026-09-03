@@ -21,6 +21,7 @@ model User {
   brandProfiles BrandProfile[]
   generations   GenerationRecord[]
   modelFaces    ModelFace[]
+  modelFaceJobs ModelFaceGenerationJob[]
 }
 
 // ═══ 交易流水表（Ledger 模式）═══
@@ -159,7 +160,52 @@ model ModelFace {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generationItem ModelFaceGenerationItem?
 
   @@index([userId, favorite, createdAt])
+}
+
+/// 「再出 3 张」后台任务。activeKey 在活动时等于 userId，结束后置空，借唯一约束
+/// 保证一个账号同一时刻只有一个任务，避免多进程并发重复生图/扣费。
+model ModelFaceGenerationJob {
+  id             String    @id @default(cuid())
+  userId         String
+  status         String    @default("queued")
+  activeKey      String?   @unique
+  requestedCount Int
+  completedCount Int       @default(0)
+  failedCount    Int       @default(0)
+  startSpecIndex Int
+  costFen        Int
+  runnerId       String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  finishedAt     DateTime?
+
+  user  User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items ModelFaceGenerationItem[]
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+model ModelFaceGenerationItem {
+  id        String   @id @default(cuid())
+  jobId     String
+  position  Int
+  specIndex Int
+  status    String   @default("pending")
+  faceId    String?  @unique
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  job  ModelFaceGenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  face ModelFace?             @relation(fields: [faceId], references: [id], onDelete: SetNull)
+
+  @@unique([jobId, position])
+  @@index([jobId, status])
+  @@index([createdAt])
 }

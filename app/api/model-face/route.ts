@@ -1,70 +1,59 @@
 /**
- * 模特脸库 API
- * POST /api/model-face  { variation?: string }
- *
- * 生成一张白底身份肖像，供用户在「组图·换装」里挑选固定模特脸。
- * 一次只出一张：客户端要 10 张就串行调 10 次 —— 单次请求短、进度可见，
- * 也天然满足「生图串行」的约束。
- *
- * 走 GPT Image 2（不是 Gemini）：老板要求，出脸质量更好。代价是慢（单张 60-170s，
- * 十张要十几到二十几分钟）且是收费通道，故画质用 medium 压时间与成本 ——
- * 候选脸只用来挑，选中后服务端还会归一化成 1434x1920。
- *
- * 配方固定在 lib/api.ts 的 MODEL_FACE_SPECS：3 亚欧混血 + 7 欧美，脸型两两拉开。
- * 客户端只传下标，不传自由文本 —— 避免这个免费接口变成任意 prompt 的入口。
- *
- * 不计费：生成流程本来就会免费创建一张派生锚（属于身份一致性的基础设施），
- * 用户自己挑脸只是把那次生成提前并可视化，收费口径保持一致。
- * 代价是可被反复点，故按用户限流。
+ * 御用 AI 模特脸后台任务入口。
+ * POST 只持久化任务并立即返回 jobId；实际生图由服务端逐张串行执行。
+ * GET 用于刷新页面后找回活动任务，或找回因进程重启而可继续的任务。
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { MODEL_FACE_SPECS, buildModelFacePortraitPrompt } from '@/lib/api';
-import { generateImage } from '@/lib/image-backends';
-import { isRateLimited, bumpRateLimit } from '@/lib/rate-limit';
+import {
+  DAILY_MODEL_FACE_LIMIT,
+  MODEL_FACE_BATCH_SIZE,
+  MODEL_FACE_PRICE_FEN,
+  ModelFaceJobError,
+  createModelFaceJob,
+  getReconnectableModelFaceJob,
+  resumeModelFaceJob,
+  startModelFaceJobRunner,
+} from '@/lib/model-face-jobs';
 
-// 一次挑脸最多 10 张，留一倍余量给重挑；窗口 10 分钟
-const MAX_FACES_PER_WINDOW = 20;
-const RATE_WINDOW_MS = 10 * 60 * 1000;
-// 比通用 GPT 上游 360s 更早收口，给路由序列化错误响应和客户端接收留出余量。
-const MODEL_FACE_UPSTREAM_TIMEOUT_MS = 330_000;
+function jobErrorResponse(error: unknown) {
+  if (error instanceof ModelFaceJobError) {
+    return NextResponse.json(
+      { error: error.message, jobId: error.jobId },
+      { status: error.statusCode },
+    );
+  }
+  console.error('[model-face] task API failed:', error);
+  return NextResponse.json({ error: '模特脸任务创建失败' }, { status: 500 });
+}
+
+export async function GET() {
+  const auth = await getCurrentUser();
+  if (!auth) return NextResponse.json({ error: '未登录' }, { status: 401 });
+
+  const job = await getReconnectableModelFaceJob(auth.userId);
+  if (job?.status === 'queued') startModelFaceJobRunner(job.id);
+  return NextResponse.json({
+    job,
+    priceFen: MODEL_FACE_PRICE_FEN,
+    batchSize: MODEL_FACE_BATCH_SIZE,
+    dailyLimit: DAILY_MODEL_FACE_LIMIT,
+  });
+}
 
 export async function POST(req: Request) {
   const auth = await getCurrentUser();
-  if (!auth) {
-    return NextResponse.json({ error: '未登录' }, { status: 401 });
+  if (!auth) return NextResponse.json({ error: '未登录' }, { status: 401 });
+  const body = await req.json().catch(() => ({})) as { count?: unknown; resumeJobId?: unknown };
+
+  try {
+    const job = typeof body.resumeJobId === 'string'
+      ? await resumeModelFaceJob(auth.userId, body.resumeJobId)
+      : await createModelFaceJob(auth.userId, Number(body.count));
+    if (!job) throw new ModelFaceJobError('任务不存在', 404);
+    startModelFaceJobRunner(job.id);
+    return NextResponse.json({ jobId: job.id }, { status: 202 });
+  } catch (error) {
+    return jobErrorResponse(error);
   }
-
-  const rateKey = `model-face:${auth.userId}`;
-  const gate = isRateLimited(rateKey, MAX_FACES_PER_WINDOW, RATE_WINDOW_MS);
-  if (!gate.allowed) {
-    return NextResponse.json(
-      { error: `生成模特脸太频繁，请 ${gate.retryAfterSec} 秒后再试` },
-      { status: 429 },
-    );
-  }
-  bumpRateLimit(rateKey, RATE_WINDOW_MS);
-
-  const body = await req.json().catch(() => ({}));
-  const rawIndex = (body as { specIndex?: unknown }).specIndex;
-  const specIndex = Number.isInteger(rawIndex)
-    ? Math.min(Math.max(rawIndex as number, 0), MODEL_FACE_SPECS.length - 1)
-    : 0;
-
-  const result = await generateImage({
-    prompt: buildModelFacePortraitPrompt(MODEL_FACE_SPECS[specIndex]),
-    productImages: [],
-    aspectRatio: '3:4',
-    quality: 'medium',
-    timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS,
-  }, 'openai');
-
-  if (!result.success || !result.data) {
-    return NextResponse.json(
-      { error: result.error || '模特脸生成失败' },
-      { status: 502 },
-    );
-  }
-
-  return NextResponse.json({ face: { data: result.data, mimeType: 'image/png' } });
 }

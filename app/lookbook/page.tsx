@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
+import { History, Pencil, Plus, Sparkles, Star, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { UserNav } from '@/components/UserNav';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
@@ -19,11 +19,32 @@ import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib
 const LOOKBOOK_MAX = 20;
 const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
-// 必须大于 /api/model-face 的 330s 上游截止线，避免重演 0731 客户端先掐断。
-const MODEL_FACE_CLIENT_TIMEOUT_MS = 390_000;
+const MODEL_FACE_BATCH_SIZE = 3;
+const MODEL_FACE_PRICE_FEN = getGenerationCostFen('openai', 'medium');
 
 type LookbookMode = 'swap' | 'products';
 type ModelIdentityMode = 'fresh' | 'follow_scene';
+
+interface ModelFaceRecord {
+  id: string;
+  image: string;
+  mimeType: string;
+  specIndex: number;
+  recipeLabel: string;
+  favorite: boolean;
+  name: string;
+  createdAt: string;
+}
+
+interface ModelFaceJob {
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  requestedCount: number;
+  completedCount: number;
+  failedCount: number;
+  error?: string | null;
+  items: Array<{ id: string; status: string; error?: string | null }>;
+}
 
 const MODEL_IDENTITY_OPTIONS: Array<{
   id: ModelIdentityMode;
@@ -190,15 +211,11 @@ export default function LookbookStudio() {
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
   const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('follow_scene');
-  // 模特脸库：先生成一批候选脸让用户挑，挑中的那张贯穿整组。
-  // 不挑也能用 —— 服务端照旧自动创建一张派生锚，行为与以前一致。
-  const [faceCandidates, setFaceCandidates] = useState<Array<{ data: string; mimeType: string }>>([]);
-  const [chosenFaceIndex, setChosenFaceIndex] = useState<number | null>(null);
-  const [facesLoading, setFacesLoading] = useState(false);
+  const [faceCandidates, setFaceCandidates] = useState<ModelFaceRecord[]>([]);
+  const [chosenFaceId, setChosenFaceId] = useState<string | null>(null);
+  const [faceJob, setFaceJob] = useState<ModelFaceJob | null>(null);
   const [faceError, setFaceError] = useState<string | null>(null);
-  const [faceRetryIndex, setFaceRetryIndex] = useState<number | null>(null);
-  const [activeFaceIndex, setActiveFaceIndex] = useState(0);
-  const [faceWaitSeconds, setFaceWaitSeconds] = useState(0);
+  const lastSyncedCompletedCount = useRef(0);
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -247,65 +264,95 @@ export default function LookbookStudio() {
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
-  // 十张脸串行生成：单次请求短、进度可见，也满足「生图串行」的约束。
-  // 配方（3 亚欧混血 + 7 欧美、脸型两两拉开）固定在服务端 MODEL_FACE_SPECS，
-  // 这里只传下标 —— 免费接口不开放自由 prompt。
-  const MODEL_FACE_COUNT = 10;
+  const refreshModelFaces = useCallback(async () => {
+    const res = await fetch('/api/model-faces');
+    if (!res.ok) throw new Error('脸库读取失败');
+    const data = await res.json();
+    const faces = Array.isArray(data.faces) ? data.faces as ModelFaceRecord[] : [];
+    setFaceCandidates(faces);
+  }, []);
 
-  const handleGenerateFaces = async () => {
-    if (facesLoading) return;
-    setFacesLoading(true);
-    setFaceError(null);
-    const startSpecIndex = faceRetryIndex ?? (faceCandidates.length % MODEL_FACE_COUNT);
-    try {
-      for (let specIndex = 0; specIndex < MODEL_FACE_COUNT; specIndex++) {
-        if (specIndex < startSpecIndex) continue;
-        setActiveFaceIndex(specIndex);
-        setFaceWaitSeconds(0);
-        const startedAt = Date.now();
-        const waitTimer = window.setInterval(() => {
-          setFaceWaitSeconds(Math.floor((Date.now() - startedAt) / 1000));
-        }, 1000);
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), MODEL_FACE_CLIENT_TIMEOUT_MS);
-        try {
-          const res = await fetch('/api/model-face', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ specIndex }),
-            signal: controller.signal,
-          });
-          if (!res.ok) {
-            const { error } = await res.json().catch(() => ({ error: '' }));
-            setFaceRetryIndex(specIndex);
-            // 已经出了几张就保留几张，不整批丢弃
-            setFaceError(error || `第 ${specIndex + 1} 张生成失败，已保留成功的脸`);
-            break;
-          }
-          const { face } = await res.json();
-          if (!face?.data) {
-            setFaceRetryIndex(specIndex);
-            setFaceError(`第 ${specIndex + 1} 张没有返回图片，可单独重试`);
-            break;
-          }
-          setFaceCandidates(prev => [...prev, face]);
-          setFaceRetryIndex(null);
-        } catch (error) {
-          setFaceRetryIndex(specIndex);
-          setFaceError(
-            error instanceof DOMException && error.name === 'AbortError'
-              ? `第 ${specIndex + 1} 张等待超时，可单独重试；已保留成功的脸`
-              : `第 ${specIndex + 1} 张生成失败，可单独重试；已保留成功的脸`,
-          );
-          break;
-        } finally {
-          window.clearInterval(waitTimer);
-          clearTimeout(timeoutId);
-        }
-      }
-    } finally {
-      setFacesLoading(false);
+  const pollModelFaceJob = useCallback(async (jobId: string) => {
+    const res = await fetch(`/api/model-face/jobs/${jobId}`);
+    if (!res.ok) throw new Error('任务状态读取失败');
+    const data = await res.json();
+    const job = data.job as ModelFaceJob;
+    setFaceJob(job);
+    if (typeof data.balanceFen === 'number') {
+      setCurrentUser(current => current ? { ...current, balanceFen: data.balanceFen } : current);
     }
+    if (job.completedCount > lastSyncedCompletedCount.current) {
+      await refreshModelFaces();
+      lastSyncedCompletedCount.current = job.completedCount;
+    }
+    if (job.error) setFaceError(job.error);
+    return job;
+  }, [refreshModelFaces]);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      fetch('/api/model-faces').then(res => res.ok ? res.json() : Promise.reject()),
+      fetch('/api/model-face').then(res => res.ok ? res.json() : Promise.reject()),
+    ]).then(([libraryData, jobData]) => {
+      if (!alive) return;
+      const faces = Array.isArray(libraryData.faces) ? libraryData.faces as ModelFaceRecord[] : [];
+      setFaceCandidates(faces);
+      if (jobData.job) {
+        setFaceJob(jobData.job);
+        lastSyncedCompletedCount.current = jobData.job.completedCount;
+      }
+    }).catch(() => { if (alive) setFaceError('脸库读取失败，请刷新重试'); });
+    return () => { alive = false; };
+  }, []);
+
+  const facesLoading = faceJob?.status === 'queued' || faceJob?.status === 'running';
+
+  useEffect(() => {
+    if (!faceJob || !facesLoading) return;
+    const intervalId = window.setInterval(() => {
+      void pollModelFaceJob(faceJob.id).catch(() => setFaceError('任务状态暂时无法读取，稍后自动重试'));
+    }, 2000);
+    return () => window.clearInterval(intervalId);
+  }, [faceJob, facesLoading, pollModelFaceJob]);
+
+  const submitFaceJob = async (body: { count: number } | { resumeJobId: string }) => {
+    if (facesLoading) return;
+    setFaceError(null);
+    if ('count' in body) lastSyncedCompletedCount.current = 0;
+    const res = await fetch('/api/model-face', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (data.jobId) await pollModelFaceJob(data.jobId).catch(() => undefined);
+      setFaceError(data.error || '模特脸任务创建失败');
+      return;
+    }
+    await pollModelFaceJob(data.jobId);
+  };
+
+  const handleGenerateFaces = () => submitFaceJob({ count: MODEL_FACE_BATCH_SIZE });
+  const handleResumeFaceJob = () => faceJob && submitFaceJob({ resumeJobId: faceJob.id });
+
+  const updateModelFace = async (id: string, patch: { favorite?: boolean; name?: string }) => {
+    const res = await fetch(`/api/model-faces/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error('模特脸更新失败');
+    await refreshModelFaces();
+  };
+
+  const deleteModelFace = async (id: string) => {
+    if (!window.confirm('确定从御用脸库删除这张脸吗？')) return;
+    const res = await fetch(`/api/model-faces/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('模特脸删除失败');
+    if (chosenFaceId === id) setChosenFaceId(null);
+    await refreshModelFaces();
   };
 
   // ── 生成：写同一 SilkMomoDB 再跳 /task/[id]（复用已建好的组图 SSE 内核） ──
@@ -344,11 +391,11 @@ export default function LookbookStudio() {
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
       });
 
-      // 用户挑了脸就落成 anchor，并标记来源；没挑则维持原行为（服务端自动创建派生锚）
-      if (modelIdentityMode === 'follow_scene' && chosenFaceIndex !== null && faceCandidates[chosenFaceIndex]) {
-        const chosen = faceCandidates[chosenFaceIndex];
+      // 阶段 4 会把脸库限定到 fresh；此处先接入持久化记录，替换旧的内存下标。
+      const chosen = faceCandidates.find(face => face.id === chosenFaceId);
+      if (modelIdentityMode === 'follow_scene' && chosen) {
         await db.images.add({
-          projectId, type: 'anchor', data: chosen.data, mimeType: chosen.mimeType,
+          projectId, type: 'anchor', data: chosen.image, mimeType: chosen.mimeType,
         });
         await db.projects.update(projectId as number, { modelFaceChosen: true });
       }
@@ -553,65 +600,104 @@ export default function LookbookStudio() {
                 radioName="swapModelIdentityMode"
               />
 
-              {/* 模特脸库：先出一批候选脸让用户挑，挑中的那张贯穿整组。
-                  不挑也能生成 —— 服务端照旧自动创建一张，行为与以前一致。 */}
+              {/* 阶段 4 会把该块移到 fresh 卡片内部；阶段 3 先完成持久化任务与管理能力。 */}
               {modelIdentityMode === 'follow_scene' && (
                 <div className="mt-4 pt-4 border-t border-[var(--color-border-light)]">
                   <div className="flex items-start justify-between gap-3 mb-3">
                     <div>
-                      <p className="text-sm font-medium text-[var(--color-text)]">选一张模特脸（选填）</p>
+                      <p className="text-sm font-medium text-[var(--color-text)]">御用 AI 模特脸库</p>
                       <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
-                        3 张亚欧混血 + 7 张欧美，脸型各不相同。挑中的脸会贯穿整组图；
-                        不挑就由系统自动生成一张，效果与以前一致。走 GPT Image 2，十张约需十几分钟。
+                        每次增量生成 3 张，已生成的脸会按账号保存并跨设备同步。每张 ¥{(MODEL_FACE_PRICE_FEN / 100).toFixed(2)}。
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={handleGenerateFaces}
-                      disabled={facesLoading}
+                      disabled={facesLoading || !currentUser || currentUser.balanceFen < MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE}
                       className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
                     >
-                      {facesLoading
-                        ? `第 ${activeFaceIndex + 1} 张，已等待 ${faceWaitSeconds} 秒`
-                        : faceRetryIndex !== null
-                          ? `重试第 ${faceRetryIndex + 1} 张`
-                          : faceCandidates.length >= MODEL_FACE_COUNT
-                            ? '再生成一批'
-                            : '生成备选脸'}
+                      {facesLoading ? '生成中…' : '再出 3 张'}
                     </button>
                   </div>
 
                   {faceCandidates.length > 0 && (
-                    <div className="grid grid-cols-5 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
                       {faceCandidates.map((face, index) => (
-                        <button
-                          key={index}
-                          type="button"
-                          onClick={() => setChosenFaceIndex(chosenFaceIndex === index ? null : index)}
-                          className={`relative aspect-[3/4] rounded-lg overflow-hidden border-2 transition ${
-                            chosenFaceIndex === index
-                              ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/30'
-                              : 'border-transparent hover:border-[var(--color-border-light)]'
-                          }`}
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={`data:${face.mimeType};base64,${face.data}`}
-                            alt={`备选模特脸 ${index + 1}`}
-                            className="w-full h-full object-cover"
-                          />
-                        </button>
+                        <div key={face.id} className="relative group">
+                          <button
+                            type="button"
+                            onClick={() => setChosenFaceId(chosenFaceId === face.id ? null : face.id)}
+                            className={`relative w-full aspect-[3/4] rounded-lg overflow-hidden border-2 transition ${
+                              chosenFaceId === face.id
+                                ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/30'
+                                : 'border-transparent hover:border-[var(--color-border-light)]'
+                            }`}
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={`data:${face.mimeType};base64,${face.image}`}
+                              alt={face.name || `御用模特脸 ${index + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                          </button>
+                          <div className="absolute top-1 right-1 flex gap-1">
+                            <button
+                              type="button"
+                              title={face.favorite ? '取消御用' : '设为御用'}
+                              onClick={() => void updateModelFace(face.id, { favorite: !face.favorite }).catch(() => setFaceError('收藏更新失败'))}
+                              className="rounded-md bg-black/55 p-1 text-white"
+                            >
+                              <Star size={13} fill={face.favorite ? 'currentColor' : 'none'} />
+                            </button>
+                            <button
+                              type="button"
+                              title="命名"
+                              onClick={() => {
+                                const name = window.prompt('给这张御用脸命名', face.name);
+                                if (name !== null) void updateModelFace(face.id, { name }).catch(() => setFaceError('命名失败'));
+                              }}
+                              className="rounded-md bg-black/55 p-1 text-white"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              title="删除"
+                              onClick={() => void deleteModelFace(face.id).catch(() => setFaceError('删除失败'))}
+                              className="rounded-md bg-black/55 p-1 text-white"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                          <p className="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">
+                            {face.name || face.recipeLabel}
+                          </p>
+                        </div>
                       ))}
                     </div>
                   )}
 
-                  {facesLoading && faceCandidates.length === 0 && (
-                    <p className="text-xs text-[var(--color-text-muted)]">正在生成第 1 张，共 10 张（逐张出现，可随时先挑）。GPT Image 2 出脸较慢，整批约十几分钟…</p>
+                  {faceJob && facesLoading && (
+                    <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                      正在生成 {faceJob.completedCount + faceJob.failedCount}/{faceJob.requestedCount}；可离开页面，回来后会自动接上。
+                    </p>
+                  )}
+                  {faceJob?.status === 'failed' && faceJob.items.some(item => item.status === 'pending') && (
+                    <button
+                      type="button"
+                      onClick={handleResumeFaceJob}
+                      className="mt-2 text-xs text-[var(--color-accent)] underline underline-offset-2"
+                    >
+                      继续生成
+                    </button>
+                  )}
+                  {currentUser && currentUser.balanceFen < MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE && (
+                    <p className="mt-2 text-xs text-amber-600">余额不足，生成 3 张需要 ¥{((MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE) / 100).toFixed(2)}。</p>
                   )}
                   {faceError && <p className="mt-2 text-xs text-amber-600">{faceError}</p>}
-                  {chosenFaceIndex !== null && (
+                  {chosenFaceId !== null && (
                     <p className="mt-2 text-xs text-[var(--color-accent)]">
-                      已选第 {chosenFaceIndex + 1} 张，整组图都会用这张脸。再点一次可取消。
+                      已选中一张身份脸，整组图都会使用同一身份。再点一次可取消。
                     </p>
                   )}
                 </div>
