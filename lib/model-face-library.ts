@@ -7,7 +7,6 @@ import {
 import type { Prisma } from '@prisma/client';
 
 export const MODEL_FACE_PAGE_SIZE = 60;
-export const MODEL_FACE_LIBRARY_LIMIT = 200;
 export { MODEL_FACE_JPEG_QUALITY, MODEL_FACE_THUMBNAIL_WIDTH, prepareModelFaceImage };
 
 export const MODEL_FACE_LIST_SELECT = {
@@ -33,10 +32,6 @@ export interface StoreModelFaceInput {
 type ModelFaceWriter = Pick<Prisma.TransactionClient, 'modelFace'>;
 
 export async function storeModelFace(input: StoreModelFaceInput, client: ModelFaceWriter = prisma) {
-  const storedFaces = await client.modelFace.count({ where: { userId: input.userId } });
-  if (storedFaces >= MODEL_FACE_LIBRARY_LIMIT) {
-    throw new Error(`御用脸库最多保存 ${MODEL_FACE_LIBRARY_LIMIT} 张，请先删除旧图片`);
-  }
   const normalized = await prepareModelFaceImage(input.image);
   return client.modelFace.create({
     data: {

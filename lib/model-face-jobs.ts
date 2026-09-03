@@ -4,7 +4,7 @@ import { checkBalance } from '@/lib/billing';
 import { getGenerationCostFen } from '@/lib/billing-constants';
 import { MODEL_FACE_SPECS, buildModelFacePortraitPrompt } from '@/lib/api';
 import { generateImage, resolveApiModel } from '@/lib/image-backends';
-import { MODEL_FACE_LIBRARY_LIMIT, storeModelFace } from '@/lib/model-face-library';
+import { storeModelFace } from '@/lib/model-face-library';
 import { chargeModelFaceItem, refundModelFaceItem } from '@/lib/model-face-billing';
 import {
   buildModelFaceJobError,
@@ -70,16 +70,6 @@ async function attemptedToday(userId: string) {
 async function assertDailyCapacity(userId: string, count: number) {
   if (!hasModelFaceAttemptCapacity(await attemptedToday(userId), count)) {
     throw new ModelFaceJobError(`今日最多生成 ${DAILY_MODEL_FACE_LIMIT} 张模特脸`, 429);
-  }
-}
-
-async function assertModelFaceLibraryCapacity(userId: string, count: number) {
-  const storedFaces = await prisma.modelFace.count({ where: { userId } });
-  if (storedFaces + count > MODEL_FACE_LIBRARY_LIMIT) {
-    throw new ModelFaceJobError(
-      `御用脸库最多保存 ${MODEL_FACE_LIBRARY_LIMIT} 张，请先删除旧图片`,
-      409,
-    );
   }
 }
 
@@ -207,7 +197,6 @@ export async function createModelFaceJob(userId: string, count: number) {
     select: { id: true },
   });
   if (active) throw new ModelFaceJobError('已有模特脸任务正在进行', 409, active.id);
-  await assertModelFaceLibraryCapacity(userId, count);
   await assertDailyCapacity(userId, count);
 
   const totalCostFen = MODEL_FACE_PRICE_FEN * count;
@@ -293,7 +282,6 @@ export async function resumeModelFaceJob(userId: string, jobId: string) {
   const remainingItems = job.items.filter(item => item.status === 'pending' || item.status === 'running');
   if (remainingItems.length === 0) throw new ModelFaceJobError('任务没有可继续的图片', 409);
 
-  await assertModelFaceLibraryCapacity(userId, remainingItems.length);
   const newAttempts = remainingItems.filter(item => !item.attemptedAt).length;
   await assertDailyCapacity(userId, newAttempts);
   const uncharged = remainingItems.filter(item => item.billingStatus === 'uncharged').length;
