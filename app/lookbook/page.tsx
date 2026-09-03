@@ -22,19 +22,27 @@ const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
 const MODEL_FACE_BATCH_SIZE = 3;
 const MODEL_FACE_PRICE_FEN = getGenerationCostFen('openai', 'medium');
+const MODEL_FACE_JOB_STORAGE_KEY = 'silkmomo:model-face-job:v1';
+const MODEL_FACE_POLL_INITIAL_MS = 2_000;
+const MODEL_FACE_POLL_MAX_MS = 12_000;
 
 type LookbookMode = 'swap' | 'products';
 type ModelIdentityMode = 'fresh' | 'follow_scene';
 
 interface ModelFaceRecord {
   id: string;
-  image: string;
-  mimeType: string;
-  specIndex: number;
+  thumbnail: string | null;
   recipeLabel: string;
   favorite: boolean;
   name: string;
   createdAt: string;
+}
+
+interface ModelFacePagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
 interface ModelFaceJob {
@@ -214,6 +222,8 @@ function ModelFaceLibraryPanel({
   onResume,
   onUpdate,
   onDelete,
+  pagination,
+  onPageChange,
 }: {
   faces: ModelFaceRecord[];
   chosenFaceId: string | null;
@@ -226,6 +236,8 @@ function ModelFaceLibraryPanel({
   onResume: () => void;
   onUpdate: (id: string, patch: { favorite?: boolean; name?: string }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  pagination: ModelFacePagination;
+  onPageChange: (page: number) => void;
 }) {
   const batchCostFen = MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE;
   return (
@@ -262,7 +274,9 @@ function ModelFaceLibraryPanel({
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={`data:${face.mimeType};base64,${face.image}`}
+                  src={face.thumbnail
+                    ? `data:image/jpeg;base64,${face.thumbnail}`
+                    : `/api/model-faces/${face.id}?variant=thumbnail`}
                   alt={face.name || `御用模特脸 ${index + 1}`}
                   className="w-full h-full object-cover"
                 />
@@ -301,6 +315,28 @@ function ModelFaceLibraryPanel({
               </p>
             </div>
           ))}
+        </div>
+      )}
+
+      {pagination.totalPages > 1 && (
+        <div className="mt-3 flex items-center justify-between text-xs text-[var(--color-text-muted)]">
+          <button
+            type="button"
+            disabled={pagination.page <= 1}
+            onClick={() => onPageChange(pagination.page - 1)}
+            className="disabled:opacity-40"
+          >
+            上一页
+          </button>
+          <span>{pagination.page}/{pagination.totalPages} · 共 {pagination.total} 张</span>
+          <button
+            type="button"
+            disabled={pagination.page >= pagination.totalPages}
+            onClick={() => onPageChange(pagination.page + 1)}
+            className="disabled:opacity-40"
+          >
+            下一页
+          </button>
         </div>
       )}
 
@@ -349,6 +385,9 @@ export default function LookbookStudio() {
   const [mode, setMode] = useState<LookbookMode>('swap');
   const [modelIdentityMode, setModelIdentityMode] = useState<ModelIdentityMode>('follow_scene');
   const [faceCandidates, setFaceCandidates] = useState<ModelFaceRecord[]>([]);
+  const [facePagination, setFacePagination] = useState<ModelFacePagination>({
+    page: 1, pageSize: 60, total: 0, totalPages: 1,
+  });
   const [chosenFaceId, setChosenFaceId] = useState<string | null>(null);
   const [faceJob, setFaceJob] = useState<ModelFaceJob | null>(null);
   const [faceError, setFaceError] = useState<string | null>(null);
@@ -401,12 +440,13 @@ export default function LookbookStudio() {
   const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
   const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
 
-  const refreshModelFaces = useCallback(async () => {
-    const res = await fetch('/api/model-faces');
+  const refreshModelFaces = useCallback(async (page = 1) => {
+    const res = await fetch(`/api/model-faces?page=${page}`);
     if (!res.ok) throw new Error('脸库读取失败');
     const data = await res.json();
     const faces = Array.isArray(data.faces) ? data.faces as ModelFaceRecord[] : [];
     setFaceCandidates(faces);
+    if (data.pagination) setFacePagination(data.pagination as ModelFacePagination);
   }, []);
 
   const pollModelFaceJob = useCallback(async (jobId: string) => {
@@ -415,43 +455,93 @@ export default function LookbookStudio() {
     const data = await res.json();
     const job = data.job as ModelFaceJob;
     setFaceJob(job);
+    setFaceError(job.error || null);
     if (typeof data.balanceFen === 'number') {
       setCurrentUser(current => current ? { ...current, balanceFen: data.balanceFen } : current);
     }
     if (job.completedCount > lastSyncedCompletedCount.current) {
-      await refreshModelFaces();
+      await refreshModelFaces(1);
       lastSyncedCompletedCount.current = job.completedCount;
     }
-    if (job.error) setFaceError(job.error);
+    if (job.status === 'completed' || job.status === 'failed') {
+      try { localStorage.removeItem(MODEL_FACE_JOB_STORAGE_KEY); } catch { /* storage may be disabled */ }
+    }
     return job;
   }, [refreshModelFaces]);
 
-  useEffect(() => {
-    let alive = true;
-    Promise.all([
-      fetch('/api/model-faces').then(res => res.ok ? res.json() : Promise.reject()),
-      fetch('/api/model-face').then(res => res.ok ? res.json() : Promise.reject()),
-    ]).then(([libraryData, jobData]) => {
-      if (!alive) return;
-      const faces = Array.isArray(libraryData.faces) ? libraryData.faces as ModelFaceRecord[] : [];
-      setFaceCandidates(faces);
-      if (jobData.job) {
-        setFaceJob(jobData.job);
-        lastSyncedCompletedCount.current = jobData.job.completedCount;
+  const restoreModelFaceJob = useCallback(async () => {
+    let persistedJobId: string | null = null;
+    try { persistedJobId = localStorage.getItem(MODEL_FACE_JOB_STORAGE_KEY); } catch { /* storage may be disabled */ }
+    if (persistedJobId) {
+      try {
+        return await pollModelFaceJob(persistedJobId);
+      } catch {
+        // Fall through to the server-side current-task lookup.
       }
-    }).catch(() => { if (alive) setFaceError('脸库读取失败，请刷新重试'); });
-    return () => { alive = false; };
-  }, []);
+    }
+    const res = await fetch('/api/model-face');
+    if (!res.ok) throw new Error('任务恢复失败');
+    const data = await res.json();
+    if (data.job) {
+      setFaceJob(data.job as ModelFaceJob);
+      lastSyncedCompletedCount.current = data.job.completedCount;
+      try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.job.id); } catch { /* storage may be disabled */ }
+    }
+    return data.job as ModelFaceJob | null;
+  }, [pollModelFaceJob]);
+
+  useEffect(() => {
+    if (modelIdentityMode !== 'fresh') return;
+    let cancelled = false;
+    void Promise.allSettled([
+      refreshModelFaces(1),
+      restoreModelFaceJob(),
+    ]).then(results => {
+      if (cancelled) return;
+      const failed = results.filter(result => result.status === 'rejected').length;
+      if (failed === 2) setFaceError('脸库与任务状态读取失败，请稍后重试');
+      else if (failed === 1) setFaceError('部分脸库信息暂时无法读取，请稍后重试');
+    });
+    return () => { cancelled = true; };
+  }, [modelIdentityMode, refreshModelFaces, restoreModelFaceJob]);
 
   const facesLoading = faceJob?.status === 'queued' || faceJob?.status === 'running';
+  const faceJobId = faceJob?.id;
 
   useEffect(() => {
-    if (!faceJob || !facesLoading) return;
-    const intervalId = window.setInterval(() => {
-      void pollModelFaceJob(faceJob.id).catch(() => setFaceError('任务状态暂时无法读取，稍后自动重试'));
-    }, 2000);
-    return () => window.clearInterval(intervalId);
-  }, [faceJob, facesLoading, pollModelFaceJob]);
+    if (modelIdentityMode !== 'fresh' || !faceJobId || !facesLoading) return;
+    let cancelled = false;
+    let delayMs = MODEL_FACE_POLL_INITIAL_MS;
+    let timeoutId: number | null = null;
+
+    const schedule = (waitMs = delayMs) => {
+      if (cancelled || document.visibilityState === 'hidden') return;
+      timeoutId = window.setTimeout(() => { void tick(); }, waitMs);
+    };
+    const tick = async () => {
+      timeoutId = null;
+      if (cancelled || document.visibilityState === 'hidden') return;
+      try {
+        const job = await pollModelFaceJob(faceJobId);
+        delayMs = Math.min(delayMs * 2, MODEL_FACE_POLL_MAX_MS);
+        if (job.status === 'queued' || job.status === 'running') schedule();
+      } catch {
+        setFaceError('任务状态暂时无法读取，稍后自动重试');
+        delayMs = Math.min(delayMs * 2, MODEL_FACE_POLL_MAX_MS);
+        schedule();
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && timeoutId === null) schedule(0);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [modelIdentityMode, faceJobId, facesLoading, pollModelFaceJob]);
 
   const submitFaceJob = async (body: { count: number } | { resumeJobId: string }) => {
     if (facesLoading) return;
@@ -464,10 +554,14 @@ export default function LookbookStudio() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      if (data.jobId) await pollModelFaceJob(data.jobId).catch(() => undefined);
+      if (data.jobId) {
+        try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
+        await pollModelFaceJob(data.jobId).catch(() => undefined);
+      }
       setFaceError(data.error || '模特脸任务创建失败');
       return;
     }
+    try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
     await pollModelFaceJob(data.jobId);
   };
 
@@ -507,6 +601,12 @@ export default function LookbookStudio() {
     setIsGenerating(true);
     try {
       await migrateLegacyStylePackImages();
+      let original: { image: string; mimeType: string } | null = null;
+      if (modelIdentityMode === 'fresh' && chosenFaceId) {
+        const faceRes = await fetch(`/api/model-faces/${chosenFaceId}`);
+        if (!faceRes.ok) throw new Error('选中的模特脸读取失败');
+        original = await faceRes.json() as { image: string; mimeType: string };
+      }
       const productModeLabels = validProductGroups.map((group, index) => group.label.trim() || `产品 ${index + 1}`);
       const projectId = await db.projects.add({
         createdAt: new Date(),
@@ -536,14 +636,13 @@ export default function LookbookStudio() {
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
       });
 
-      const chosen = faceCandidates.find(face => face.id === chosenFaceId);
       await prepareProjectImageSlot(projectId as number);
 
-      if (modelIdentityMode === 'fresh' && chosen) {
+      if (modelIdentityMode === 'fresh' && chosenFaceId && original) {
         await db.images.add({
-          projectId, type: 'anchor', data: chosen.image, mimeType: chosen.mimeType,
+          projectId, type: 'anchor', data: original.image, mimeType: original.mimeType,
         });
-        await db.projects.update(projectId as number, { modelFaceChosen: true, modelFaceId: chosen.id });
+        await db.projects.update(projectId as number, { modelFaceChosen: true, modelFaceId: chosenFaceId });
       }
 
       if (mode === 'products') {
@@ -755,6 +854,8 @@ export default function LookbookStudio() {
                     onResume={handleResumeFaceJob}
                     onUpdate={updateModelFace}
                     onDelete={deleteModelFace}
+                    pagination={facePagination}
+                    onPageChange={(page) => { void refreshModelFaces(page); }}
                   />
                 )}
               />
@@ -888,6 +989,8 @@ export default function LookbookStudio() {
                     onResume={handleResumeFaceJob}
                     onUpdate={updateModelFace}
                     onDelete={deleteModelFace}
+                    pagination={facePagination}
+                    onPageChange={(page) => { void refreshModelFaces(page); }}
                   />
                 )}
               />

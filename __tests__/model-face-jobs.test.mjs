@@ -166,6 +166,7 @@ test('job API recovers interrupted work and caps each UTC+8 day at 200 requested
   assert.match(jobs, /hasModelFaceAttemptCapacity/);
   assert.match(jobs, /startOfShanghaiDay/);
   assert.match(jobs, /recoverInterruptedModelFaceJobs/);
+  assert.match(jobs, /assertModelFaceLibraryCapacity/);
   assert.match(jobs, /leaseUntil/);
   assert.match(jobs, /attemptedAt: \{ gte: startOfShanghaiDay/);
   assert.match(jobs, /retryPendingModelFaceRefunds/);

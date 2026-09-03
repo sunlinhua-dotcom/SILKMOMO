@@ -126,6 +126,28 @@ test('model face worker keeps the upstream deadline and persists completed faces
   assert.match(jobs, /for \(const item of items\)/);
 });
 
+test('follow_scene sends no face-library or face-job recovery requests', () => {
+  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const effectStart = source.indexOf("if (modelIdentityMode !== 'fresh') return;");
+  const effectEnd = source.indexOf('}, [modelIdentityMode', effectStart);
+  const freshOnlyEffect = source.slice(effectStart, effectEnd);
+
+  assert.ok(effectStart > -1 && effectEnd > effectStart);
+  assert.match(freshOnlyEffect, /Promise\.allSettled/);
+  assert.match(freshOnlyEffect, /refreshModelFaces/);
+  assert.match(freshOnlyEffect, /restoreModelFaceJob/);
+});
+
+test('model face list uses thumbnails and selected originals are fetched by id', () => {
+  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+
+  assert.match(source, /face\.thumbnail/);
+  assert.doesNotMatch(source, /face\.image/);
+  assert.match(source, /fetch\(`\/api\/model-faces\/\$\{chosenFaceId\}`\)/);
+  assert.doesNotMatch(source, /faceCandidates\.find\(face => face\.id === chosenFaceId\)/);
+  assert.match(source, /original\.image/);
+});
+
 test('a user-chosen face is not mistaken for a redo anchor', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
   const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
