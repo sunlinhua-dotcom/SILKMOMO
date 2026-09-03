@@ -26,15 +26,16 @@ model User {
 
 // ═══ 交易流水表（Ledger 模式）═══
 model Transaction {
-  id           String   @id @default(cuid())
-  userId       String
-  type         String // "recharge" | "consume" | "refund" | "bonus"
-  amountFen    Int // 金额（分）：正数=入账，负数=扣费
-  balanceAfter Int // 交易后余额快照
-  description  String   @default("") // 描述
-  apiModel     String? // API 模型名
-  projectId    Int? // 关联的项目 ID
-  createdAt    DateTime @default(now())
+  id             String   @id @default(cuid())
+  userId         String
+  type           String // "recharge" | "consume" | "refund" | "bonus"
+  amountFen      Int // 金额（分）：正数=入账，负数=扣费
+  balanceAfter   Int // 交易后余额快照
+  description    String   @default("") // 描述
+  apiModel       String? // API 模型名
+  projectId      Int? // 关联的项目 ID
+  idempotencyKey String?  @unique // 后台任务计费事件键；普通流水为空
+  createdAt      DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -146,13 +147,36 @@ model PendingImage {
   @@index([createdAt])
 }
 
-/// 账号级御用 AI 模特脸库。项目目前没有对象存储，图片沿用 PendingImage 的数据库
-/// base64 存储边界；与交接缓冲不同，这些记录由用户显式删除前永久保留。
+enum ModelFaceJobStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum ModelFaceItemStatus {
+  pending
+  running
+  succeeded
+  failed
+}
+
+enum ModelFaceBillingStatus {
+  uncharged
+  charged
+  refund_pending
+  refunded
+  kept
+}
+
+/// 账号级御用 AI 模特脸库。项目目前没有对象存储，原图以 quality 88 JPEG
+/// 持久化；列表只读取约 256px 宽的 thumbnail，原图按 id 单独鉴权读取。
 model ModelFace {
   id          String   @id @default(cuid())
   userId      String
   image       String
-  mimeType    String   @default("image/png")
+  thumbnail   String?
+  mimeType    String   @default("image/jpeg")
   specIndex   Int
   recipeLabel String
   favorite    Boolean  @default(false)
@@ -169,19 +193,20 @@ model ModelFace {
 /// 「再出 3 张」后台任务。activeKey 在活动时等于 userId，结束后置空，借唯一约束
 /// 保证一个账号同一时刻只有一个任务，避免多进程并发重复生图/扣费。
 model ModelFaceGenerationJob {
-  id             String    @id @default(cuid())
+  id             String             @id @default(cuid())
   userId         String
-  status         String    @default("queued")
-  activeKey      String?   @unique
+  status         ModelFaceJobStatus @default(queued)
+  activeKey      String?            @unique
   requestedCount Int
-  completedCount Int       @default(0)
-  failedCount    Int       @default(0)
+  completedCount Int                @default(0)
+  failedCount    Int                @default(0)
   startSpecIndex Int
   costFen        Int
   runnerId       String?
+  leaseUntil     DateTime?
   error          String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
   finishedAt     DateTime?
 
   user  User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -189,23 +214,28 @@ model ModelFaceGenerationJob {
 
   @@index([userId, createdAt])
   @@index([status])
+  @@index([status, leaseUntil])
 }
 
 model ModelFaceGenerationItem {
-  id        String   @id @default(cuid())
-  jobId     String
-  position  Int
-  specIndex Int
-  status    String   @default("pending")
-  faceId    String?  @unique
-  error     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String                 @id @default(cuid())
+  jobId         String
+  position      Int
+  specIndex     Int
+  status        ModelFaceItemStatus    @default(pending)
+  billingKey    String                 @unique @default(cuid())
+  billingStatus ModelFaceBillingStatus @default(uncharged)
+  attemptedAt   DateTime?
+  faceId        String?                @unique
+  error         String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
 
   job  ModelFaceGenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
   face ModelFace?             @relation(fields: [faceId], references: [id], onDelete: SetNull)
 
   @@unique([jobId, position])
   @@index([jobId, status])
+  @@index([attemptedAt])
   @@index([createdAt])
 }
