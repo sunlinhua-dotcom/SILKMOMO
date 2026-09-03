@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import type { PrismaClient } from '@prisma/client';
 
 export const MODEL_FACE_PUBLIC_SELECT = {
   id: true,
@@ -19,8 +20,10 @@ export interface StoreModelFaceInput {
   recipeLabel: string;
 }
 
-export async function storeModelFace(input: StoreModelFaceInput) {
-  return prisma.modelFace.create({
+type ModelFaceWriter = Pick<PrismaClient, 'modelFace'>;
+
+export async function storeModelFace(input: StoreModelFaceInput, client: ModelFaceWriter = prisma) {
+  return client.modelFace.create({
     data: {
       userId: input.userId,
       image: input.image,

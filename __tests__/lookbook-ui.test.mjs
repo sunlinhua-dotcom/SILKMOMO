@@ -107,57 +107,23 @@ test('event watchdog does not count down while a large data: line is still arriv
   assert.ok(splitAt > -1 && resetAt > splitAt, '半条事件的进度复位必须排在 buffer 重切之后');
 });
 
-test('model face library lets the user pick the identity, and stays optional', () => {
+test('model face library uses the paid persistent background-job API', () => {
   const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
   const faceRoute = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
 
-  // 一次一张、串行生成：满足「生图串行」约束，且单次请求短、进度可见
+  // POST 只创建后台任务，任务内串行生成；浏览器不再维持十个超长请求。
   assert.match(faceRoute, /export async function POST/);
-  assert.match(lookbook, /for \(let specIndex = 0; specIndex < MODEL_FACE_COUNT; specIndex\+\+\)/);
-  // 配方固定在服务端，客户端只传下标 —— 免费接口不能变成任意 prompt 的入口
-  assert.match(faceRoute, /MODEL_FACE_SPECS\[specIndex\]/);
-  assert.doesNotMatch(faceRoute, /rawVariation/);
-  // 走 GPT Image 2（老板指定），画质 medium 压时间与成本
-  assert.match(faceRoute, /\}, 'openai'\)/);
-  assert.match(faceRoute, /quality: 'medium'/);
-
-  // 选填：不挑也能生成，行为与以前一致
-  assert.match(lookbook, /选一张模特脸（选填）/);
-  assert.match(lookbook, /chosenFaceIndex !== null && faceCandidates\[chosenFaceIndex\]/);
-
-  // 免费但限流，防止被反复点
-  assert.match(faceRoute, /isRateLimited/);
-  assert.match(faceRoute, /bumpRateLimit/);
+  assert.match(faceRoute, /createModelFaceJob/);
+  assert.match(faceRoute, /startModelFaceJobRunner/);
+  assert.match(lookbook, /pollModelFaceJob/);
+  assert.doesNotMatch(faceRoute, /isRateLimited|bumpRateLimit/);
 });
 
-test('model face requests have ordered deadlines and preserve completed faces for retry', () => {
-  const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
-  const faceRoute = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
-
-  const serverMs = Number(
-    faceRoute.match(/const MODEL_FACE_UPSTREAM_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''),
-  );
-  const clientMs = Number(
-    lookbook.match(/const MODEL_FACE_CLIENT_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''),
-  );
-
-  assert.ok(clientMs > serverMs, `客户端截止线 ${clientMs}ms 必须大于服务端 ${serverMs}ms`);
-  assert.match(faceRoute, /timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS/);
-  assert.match(lookbook, /new AbortController\(\)/);
-  assert.match(lookbook, /controller\.abort\(\)/);
-  assert.match(lookbook, /clearTimeout\(timeoutId\)/);
-
-  // 已成功的脸只能追加，失败时记录当前配方，让按钮能从这一张继续。
-  assert.doesNotMatch(lookbook, /setFaceCandidates\(\[\]\)/);
-  assert.match(lookbook, /setFaceRetryIndex\(specIndex\)/);
-  assert.match(lookbook, /重试第 \$\{faceRetryIndex \+ 1\} 张/);
-});
-
-test('model face button reports the current item and elapsed seconds', () => {
-  const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
-
-  assert.match(lookbook, /setFaceWaitSeconds\(Math\.floor\(\(Date\.now\(\) - startedAt\) \/ 1000\)\)/);
-  assert.match(lookbook, /第 \$\{activeFaceIndex \+ 1\} 张，已等待 \$\{faceWaitSeconds\} 秒/);
+test('model face worker keeps the upstream deadline and persists completed faces', () => {
+  const jobs = fs.readFileSync('lib/model-face-jobs.ts', 'utf8');
+  assert.match(jobs, /timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS/);
+  assert.match(jobs, /storeModelFace/);
+  assert.match(jobs, /for \(const item of items\)/);
 });
 
 test('a user-chosen face is not mistaken for a redo anchor', () => {
