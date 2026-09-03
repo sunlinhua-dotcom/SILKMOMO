@@ -130,6 +130,36 @@ test('model face library lets the user pick the identity, and stays optional', (
   assert.match(faceRoute, /bumpRateLimit/);
 });
 
+test('model face requests have ordered deadlines and preserve completed faces for retry', () => {
+  const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const faceRoute = fs.readFileSync('app/api/model-face/route.ts', 'utf8');
+
+  const serverMs = Number(
+    faceRoute.match(/const MODEL_FACE_UPSTREAM_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''),
+  );
+  const clientMs = Number(
+    lookbook.match(/const MODEL_FACE_CLIENT_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''),
+  );
+
+  assert.ok(clientMs > serverMs, `客户端截止线 ${clientMs}ms 必须大于服务端 ${serverMs}ms`);
+  assert.match(faceRoute, /timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS/);
+  assert.match(lookbook, /new AbortController\(\)/);
+  assert.match(lookbook, /controller\.abort\(\)/);
+  assert.match(lookbook, /clearTimeout\(timeoutId\)/);
+
+  // 已成功的脸只能追加，失败时记录当前配方，让按钮能从这一张继续。
+  assert.doesNotMatch(lookbook, /setFaceCandidates\(\[\]\)/);
+  assert.match(lookbook, /setFaceRetryIndex\(specIndex\)/);
+  assert.match(lookbook, /重试第 \$\{faceRetryIndex \+ 1\} 张/);
+});
+
+test('model face button reports the current item and elapsed seconds', () => {
+  const lookbook = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+
+  assert.match(lookbook, /setFaceWaitSeconds\(Math\.floor\(\(Date\.now\(\) - startedAt\) \/ 1000\)\)/);
+  assert.match(lookbook, /第 \$\{activeFaceIndex \+ 1\} 张，已等待 \$\{faceWaitSeconds\} 秒/);
+});
+
 test('a user-chosen face is not mistaken for a redo anchor', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
   const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');

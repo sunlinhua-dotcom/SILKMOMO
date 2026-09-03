@@ -19,6 +19,8 @@ import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib
 const LOOKBOOK_MAX = 20;
 const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
+// 必须大于 /api/model-face 的 330s 上游截止线，避免重演 0731 客户端先掐断。
+const MODEL_FACE_CLIENT_TIMEOUT_MS = 390_000;
 
 type LookbookMode = 'swap' | 'products';
 type ModelIdentityMode = 'fresh' | 'follow_scene';
@@ -194,6 +196,9 @@ export default function LookbookStudio() {
   const [chosenFaceIndex, setChosenFaceIndex] = useState<number | null>(null);
   const [facesLoading, setFacesLoading] = useState(false);
   const [faceError, setFaceError] = useState<string | null>(null);
+  const [faceRetryIndex, setFaceRetryIndex] = useState<number | null>(null);
+  const [activeFaceIndex, setActiveFaceIndex] = useState(0);
+  const [faceWaitSeconds, setFaceWaitSeconds] = useState(0);
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -251,26 +256,53 @@ export default function LookbookStudio() {
     if (facesLoading) return;
     setFacesLoading(true);
     setFaceError(null);
-    setFaceCandidates([]);
-    setChosenFaceIndex(null);
+    const startSpecIndex = faceRetryIndex ?? (faceCandidates.length % MODEL_FACE_COUNT);
     try {
       for (let specIndex = 0; specIndex < MODEL_FACE_COUNT; specIndex++) {
-        const res = await fetch('/api/model-face', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ specIndex }),
-        });
-        if (!res.ok) {
-          const { error } = await res.json().catch(() => ({ error: '' }));
-          // 已经出了几张就保留几张，不整批丢弃
-          setFaceError(error || '模特脸生成失败，已保留已生成的几张');
+        if (specIndex < startSpecIndex) continue;
+        setActiveFaceIndex(specIndex);
+        setFaceWaitSeconds(0);
+        const startedAt = Date.now();
+        const waitTimer = window.setInterval(() => {
+          setFaceWaitSeconds(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), MODEL_FACE_CLIENT_TIMEOUT_MS);
+        try {
+          const res = await fetch('/api/model-face', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ specIndex }),
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            const { error } = await res.json().catch(() => ({ error: '' }));
+            setFaceRetryIndex(specIndex);
+            // 已经出了几张就保留几张，不整批丢弃
+            setFaceError(error || `第 ${specIndex + 1} 张生成失败，已保留成功的脸`);
+            break;
+          }
+          const { face } = await res.json();
+          if (!face?.data) {
+            setFaceRetryIndex(specIndex);
+            setFaceError(`第 ${specIndex + 1} 张没有返回图片，可单独重试`);
+            break;
+          }
+          setFaceCandidates(prev => [...prev, face]);
+          setFaceRetryIndex(null);
+        } catch (error) {
+          setFaceRetryIndex(specIndex);
+          setFaceError(
+            error instanceof DOMException && error.name === 'AbortError'
+              ? `第 ${specIndex + 1} 张等待超时，可单独重试；已保留成功的脸`
+              : `第 ${specIndex + 1} 张生成失败，可单独重试；已保留成功的脸`,
+          );
           break;
+        } finally {
+          window.clearInterval(waitTimer);
+          clearTimeout(timeoutId);
         }
-        const { face } = await res.json();
-        if (face?.data) setFaceCandidates(prev => [...prev, face]);
       }
-    } catch {
-      setFaceError('模特脸生成失败，请稍后重试');
     } finally {
       setFacesLoading(false);
     }
@@ -539,7 +571,13 @@ export default function LookbookStudio() {
                       disabled={facesLoading}
                       className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
                     >
-                      {facesLoading ? `生成中 ${faceCandidates.length}/${MODEL_FACE_COUNT}` : faceCandidates.length > 0 ? '换一批' : '生成备选脸'}
+                      {facesLoading
+                        ? `第 ${activeFaceIndex + 1} 张，已等待 ${faceWaitSeconds} 秒`
+                        : faceRetryIndex !== null
+                          ? `重试第 ${faceRetryIndex + 1} 张`
+                          : faceCandidates.length >= MODEL_FACE_COUNT
+                            ? '再生成一批'
+                            : '生成备选脸'}
                     </button>
                   </div>
 
