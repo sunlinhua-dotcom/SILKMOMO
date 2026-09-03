@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { History, Pencil, Plus, Sparkles, Star, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
@@ -153,43 +154,179 @@ function ModelIdentitySelector({
   value,
   onChange,
   radioName,
+  freshContent,
 }: {
   value: ModelIdentityMode;
   onChange: (mode: ModelIdentityMode) => void;
   radioName: string;
+  freshContent?: ReactNode;
 }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       {MODEL_IDENTITY_OPTIONS.map((option) => (
-        <label
+        <div
           key={option.id}
-          className={`flex h-full cursor-pointer flex-col gap-2 rounded-xl border p-4 transition-all duration-200 ${
+          className={`h-full rounded-xl border transition-all duration-200 ${
             value === option.id
               ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.05)]'
               : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
           }`}
         >
-          <input
-            type="radio"
-            name={radioName}
-            value={option.id}
-            checked={value === option.id}
-            onChange={() => onChange(option.id)}
-            className="sr-only"
-          />
-          <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
-            <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 ${
-              value === option.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
-            }`}>
-              {value === option.id && <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />}
+          <label className="flex cursor-pointer flex-col gap-2 p-4">
+            <input
+              type="radio"
+              name={radioName}
+              value={option.id}
+              checked={value === option.id}
+              onChange={() => onChange(option.id)}
+              className="sr-only"
+            />
+            <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
+              <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 ${
+                value === option.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
+              }`}>
+                {value === option.id && <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />}
+              </span>
+              {option.label}
             </span>
-            {option.label}
-          </span>
-          <span className="pl-6 text-xs leading-relaxed text-[var(--color-text-muted)]">
-            {option.description}
-          </span>
-        </label>
+            <span className="pl-6 text-xs leading-relaxed text-[var(--color-text-muted)]">
+              {option.description}
+            </span>
+          </label>
+          {option.id === 'fresh' && value === 'fresh' && freshContent && (
+            <div className="border-t border-[var(--color-border-light)] p-4">{freshContent}</div>
+          )}
+        </div>
       ))}
+    </div>
+  );
+}
+
+function ModelFaceLibraryPanel({
+  faces,
+  chosenFaceId,
+  job,
+  loading,
+  error,
+  balanceFen,
+  onChoose,
+  onGenerate,
+  onResume,
+  onUpdate,
+  onDelete,
+}: {
+  faces: ModelFaceRecord[];
+  chosenFaceId: string | null;
+  job: ModelFaceJob | null;
+  loading: boolean;
+  error: string | null;
+  balanceFen: number | null;
+  onChoose: (id: string | null) => void;
+  onGenerate: () => void;
+  onResume: () => void;
+  onUpdate: (id: string, patch: { favorite?: boolean; name?: string }) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const batchCostFen = MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE;
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <p className="text-sm font-medium text-[var(--color-text)]">御用 AI 模特脸库</p>
+          <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
+            每次增量生成 3 张，按账号保存并跨设备同步。点星标设为御用；不手选时优先随机使用御用脸。每张 ¥{(MODEL_FACE_PRICE_FEN / 100).toFixed(2)}。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onGenerate}
+          disabled={loading || balanceFen === null || balanceFen < batchCostFen}
+          className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
+        >
+          {loading ? '生成中…' : '再出 3 张'}
+        </button>
+      </div>
+
+      {faces.length > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          {faces.map((face, index) => (
+            <div key={face.id} className="relative group">
+              <button
+                type="button"
+                onClick={() => onChoose(chosenFaceId === face.id ? null : face.id)}
+                className={`relative w-full aspect-[3/4] rounded-lg overflow-hidden border-2 transition ${
+                  chosenFaceId === face.id
+                    ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/30'
+                    : 'border-transparent hover:border-[var(--color-border-light)]'
+                }`}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`data:${face.mimeType};base64,${face.image}`}
+                  alt={face.name || `御用模特脸 ${index + 1}`}
+                  className="w-full h-full object-cover"
+                />
+              </button>
+              <div className="absolute top-1 right-1 flex gap-1">
+                <button
+                  type="button"
+                  title={face.favorite ? '取消御用' : '设为御用'}
+                  onClick={() => void onUpdate(face.id, { favorite: !face.favorite })}
+                  className="rounded-md bg-black/55 p-1 text-white"
+                >
+                  <Star size={13} fill={face.favorite ? 'currentColor' : 'none'} />
+                </button>
+                <button
+                  type="button"
+                  title="命名"
+                  onClick={() => {
+                    const name = window.prompt('给这张御用脸命名', face.name);
+                    if (name !== null) void onUpdate(face.id, { name });
+                  }}
+                  className="rounded-md bg-black/55 p-1 text-white"
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  type="button"
+                  title="删除"
+                  onClick={() => void onDelete(face.id)}
+                  className="rounded-md bg-black/55 p-1 text-white"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              <p className="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">
+                {face.name || face.recipeLabel}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {job && loading && (
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+          正在生成 {job.completedCount + job.failedCount}/{job.requestedCount}；可离开页面，回来后会自动接上。
+        </p>
+      )}
+      {job?.status === 'failed' && job.items.some(item => item.status === 'pending') && (
+        <button
+          type="button"
+          onClick={onResume}
+          className="mt-2 text-xs text-[var(--color-accent)] underline underline-offset-2"
+        >
+          继续生成
+        </button>
+      )}
+      {balanceFen !== null && balanceFen < batchCostFen && (
+        <p className="mt-2 text-xs text-amber-600">余额不足，生成 3 张需要 ¥{(batchCostFen / 100).toFixed(2)}。</p>
+      )}
+      {error && <p className="mt-2 text-xs text-amber-600">{error}</p>}
+      {chosenFaceId !== null && (
+        <p className="mt-2 text-xs text-[var(--color-accent)]">
+          已选中这张完整身份锚，整组图都会使用同一位虚构模特。再点一次可取消。
+        </p>
+      )}
     </div>
   );
 }
@@ -338,21 +475,29 @@ export default function LookbookStudio() {
   const handleResumeFaceJob = () => faceJob && submitFaceJob({ resumeJobId: faceJob.id });
 
   const updateModelFace = async (id: string, patch: { favorite?: boolean; name?: string }) => {
-    const res = await fetch(`/api/model-faces/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) throw new Error('模特脸更新失败');
-    await refreshModelFaces();
+    try {
+      const res = await fetch(`/api/model-faces/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error('模特脸更新失败');
+      await refreshModelFaces();
+    } catch {
+      setFaceError('模特脸更新失败，请稍后重试');
+    }
   };
 
   const deleteModelFace = async (id: string) => {
     if (!window.confirm('确定从御用脸库删除这张脸吗？')) return;
-    const res = await fetch(`/api/model-faces/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error('模特脸删除失败');
-    if (chosenFaceId === id) setChosenFaceId(null);
-    await refreshModelFaces();
+    try {
+      const res = await fetch(`/api/model-faces/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('模特脸删除失败');
+      if (chosenFaceId === id) setChosenFaceId(null);
+      await refreshModelFaces();
+    } catch {
+      setFaceError('模特脸删除失败，请稍后重试');
+    }
   };
 
   // ── 生成：写同一 SilkMomoDB 再跳 /task/[id]（复用已建好的组图 SSE 内核） ──
@@ -391,16 +536,15 @@ export default function LookbookStudio() {
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
       });
 
-      // 阶段 4 会把脸库限定到 fresh；此处先接入持久化记录，替换旧的内存下标。
       const chosen = faceCandidates.find(face => face.id === chosenFaceId);
-      if (modelIdentityMode === 'follow_scene' && chosen) {
+      await prepareProjectImageSlot(projectId as number);
+
+      if (modelIdentityMode === 'fresh' && chosen) {
         await db.images.add({
           projectId, type: 'anchor', data: chosen.image, mimeType: chosen.mimeType,
         });
-        await db.projects.update(projectId as number, { modelFaceChosen: true });
+        await db.projects.update(projectId as number, { modelFaceChosen: true, modelFaceId: chosen.id });
       }
-
-      await prepareProjectImageSlot(projectId as number);
 
       if (mode === 'products') {
         for (const img of singleSceneImages) {
@@ -598,110 +742,22 @@ export default function LookbookStudio() {
                 value={modelIdentityMode}
                 onChange={setModelIdentityMode}
                 radioName="swapModelIdentityMode"
+                freshContent={(
+                  <ModelFaceLibraryPanel
+                    faces={faceCandidates}
+                    chosenFaceId={chosenFaceId}
+                    job={faceJob}
+                    loading={facesLoading}
+                    error={faceError}
+                    balanceFen={currentUser?.balanceFen ?? null}
+                    onChoose={setChosenFaceId}
+                    onGenerate={handleGenerateFaces}
+                    onResume={handleResumeFaceJob}
+                    onUpdate={updateModelFace}
+                    onDelete={deleteModelFace}
+                  />
+                )}
               />
-
-              {/* 阶段 4 会把该块移到 fresh 卡片内部；阶段 3 先完成持久化任务与管理能力。 */}
-              {modelIdentityMode === 'follow_scene' && (
-                <div className="mt-4 pt-4 border-t border-[var(--color-border-light)]">
-                  <div className="flex items-start justify-between gap-3 mb-3">
-                    <div>
-                      <p className="text-sm font-medium text-[var(--color-text)]">御用 AI 模特脸库</p>
-                      <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
-                        每次增量生成 3 张，已生成的脸会按账号保存并跨设备同步。每张 ¥{(MODEL_FACE_PRICE_FEN / 100).toFixed(2)}。
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleGenerateFaces}
-                      disabled={facesLoading || !currentUser || currentUser.balanceFen < MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE}
-                      className="shrink-0 text-xs px-3 py-1.5 rounded-lg border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
-                    >
-                      {facesLoading ? '生成中…' : '再出 3 张'}
-                    </button>
-                  </div>
-
-                  {faceCandidates.length > 0 && (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                      {faceCandidates.map((face, index) => (
-                        <div key={face.id} className="relative group">
-                          <button
-                            type="button"
-                            onClick={() => setChosenFaceId(chosenFaceId === face.id ? null : face.id)}
-                            className={`relative w-full aspect-[3/4] rounded-lg overflow-hidden border-2 transition ${
-                              chosenFaceId === face.id
-                                ? 'border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/30'
-                                : 'border-transparent hover:border-[var(--color-border-light)]'
-                            }`}
-                          >
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={`data:${face.mimeType};base64,${face.image}`}
-                              alt={face.name || `御用模特脸 ${index + 1}`}
-                              className="w-full h-full object-cover"
-                            />
-                          </button>
-                          <div className="absolute top-1 right-1 flex gap-1">
-                            <button
-                              type="button"
-                              title={face.favorite ? '取消御用' : '设为御用'}
-                              onClick={() => void updateModelFace(face.id, { favorite: !face.favorite }).catch(() => setFaceError('收藏更新失败'))}
-                              className="rounded-md bg-black/55 p-1 text-white"
-                            >
-                              <Star size={13} fill={face.favorite ? 'currentColor' : 'none'} />
-                            </button>
-                            <button
-                              type="button"
-                              title="命名"
-                              onClick={() => {
-                                const name = window.prompt('给这张御用脸命名', face.name);
-                                if (name !== null) void updateModelFace(face.id, { name }).catch(() => setFaceError('命名失败'));
-                              }}
-                              className="rounded-md bg-black/55 p-1 text-white"
-                            >
-                              <Pencil size={13} />
-                            </button>
-                            <button
-                              type="button"
-                              title="删除"
-                              onClick={() => void deleteModelFace(face.id).catch(() => setFaceError('删除失败'))}
-                              className="rounded-md bg-black/55 p-1 text-white"
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                          <p className="mt-1 truncate text-[11px] text-[var(--color-text-muted)]">
-                            {face.name || face.recipeLabel}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {faceJob && facesLoading && (
-                    <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                      正在生成 {faceJob.completedCount + faceJob.failedCount}/{faceJob.requestedCount}；可离开页面，回来后会自动接上。
-                    </p>
-                  )}
-                  {faceJob?.status === 'failed' && faceJob.items.some(item => item.status === 'pending') && (
-                    <button
-                      type="button"
-                      onClick={handleResumeFaceJob}
-                      className="mt-2 text-xs text-[var(--color-accent)] underline underline-offset-2"
-                    >
-                      继续生成
-                    </button>
-                  )}
-                  {currentUser && currentUser.balanceFen < MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE && (
-                    <p className="mt-2 text-xs text-amber-600">余额不足，生成 3 张需要 ¥{((MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE) / 100).toFixed(2)}。</p>
-                  )}
-                  {faceError && <p className="mt-2 text-xs text-amber-600">{faceError}</p>}
-                  {chosenFaceId !== null && (
-                    <p className="mt-2 text-xs text-[var(--color-accent)]">
-                      已选中一张身份脸，整组图都会使用同一身份。再点一次可取消。
-                    </p>
-                  )}
-                </div>
-              )}
             </div>
 
             <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[var(--color-border-light)]">
@@ -819,6 +875,21 @@ export default function LookbookStudio() {
                 value={modelIdentityMode}
                 onChange={setModelIdentityMode}
                 radioName="productsModelIdentityMode"
+                freshContent={(
+                  <ModelFaceLibraryPanel
+                    faces={faceCandidates}
+                    chosenFaceId={chosenFaceId}
+                    job={faceJob}
+                    loading={facesLoading}
+                    error={faceError}
+                    balanceFen={currentUser?.balanceFen ?? null}
+                    onChoose={setChosenFaceId}
+                    onGenerate={handleGenerateFaces}
+                    onResume={handleResumeFaceJob}
+                    onUpdate={updateModelFace}
+                    onDelete={deleteModelFace}
+                  />
+                )}
               />
             </div>
 

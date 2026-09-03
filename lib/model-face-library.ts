@@ -42,3 +42,16 @@ export async function listModelFaces(userId: string) {
     select: MODEL_FACE_PUBLIC_SELECT,
   });
 }
+
+/** fresh 未显式选脸时，从该账号的御用脸中等概率取一张；无御用脸返回 null。 */
+export async function getRandomFavoriteModelFace(userId: string) {
+  const where = { userId, favorite: true };
+  const count = await prisma.modelFace.count({ where });
+  if (count === 0) return null;
+  return prisma.modelFace.findFirst({
+    where: { userId, favorite: true },
+    skip: Math.floor(Math.random() * count),
+    orderBy: { id: 'asc' },
+    select: { id: true, image: true, mimeType: true, specIndex: true },
+  });
+}
