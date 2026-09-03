@@ -20,6 +20,7 @@ model User {
   transactions  Transaction[]
   brandProfiles BrandProfile[]
   generations   GenerationRecord[]
+  modelFaces    ModelFace[]
 }
 
 // ═══ 交易流水表（Ledger 模式）═══
@@ -142,4 +143,23 @@ model PendingImage {
 
   @@index([userId, taskId])
   @@index([createdAt])
+}
+
+/// 账号级御用 AI 模特脸库。项目目前没有对象存储，图片沿用 PendingImage 的数据库
+/// base64 存储边界；与交接缓冲不同，这些记录由用户显式删除前永久保留。
+model ModelFace {
+  id          String   @id @default(cuid())
+  userId      String
+  image       String
+  mimeType    String   @default("image/png")
+  specIndex   Int
+  recipeLabel String
+  favorite    Boolean  @default(false)
+  name        String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, favorite, createdAt])
 }
