@@ -1,0 +1,70 @@
+{
+  "experiment": "09-04 follow_scene rollback verification",
+  "instruction": "Measure tone continuity only; do not score or judge identity similarity.",
+  "sourceCommit": "d72b759cd590ba5bc676e851e9654b6f5511b3c5",
+  "startedAt": "2026-09-04T10:35:08.082Z",
+  "completedAt": "2026-09-04T10:36:58.529Z",
+  "serialGenerationCalls": 2,
+  "references": {
+    "scene": {
+      "file": "verify-0904-锚图AB/reference_scene.jpeg",
+      "mimeType": "image/jpeg",
+      "width": 1320,
+      "height": 1647,
+      "bytes": 390562,
+      "sha256": "d79e02fd0a634aa7c0fe02291d06e3ebd97f86c2feb6df84ef40a6eb9d3f4ada"
+    },
+    "product": {
+      "file": "verify-0717-出图验证/产品参考-正面.jpeg",
+      "mimeType": "image/jpeg",
+      "width": 1023,
+      "height": 1537,
+      "bytes": 62674,
+      "sha256": "f79932879a47c977683ed787c8d3f2cdd0ef256fe81f449cdcbabcadf669125b"
+    }
+  },
+  "anchor": {
+    "success": true,
+    "provider": "apiyi",
+    "backend": "gemini",
+    "model": "gemini-3-pro-image",
+    "aspectRatio": "3:4",
+    "imageSize": "2K",
+    "durationMs": 53020,
+    "promptChars": 1844,
+    "promptSha256": "26589ff9633063b9eeeb522287892675f530fbe31cd80fe5c2044b6afb016ef1",
+    "output": {
+      "file": "derived-anchor.png",
+      "width": 1792,
+      "height": 2400,
+      "bytes": 8948490,
+      "sha256": "cc5baff411728709e40a88082b811a98d780bef4f096e0a4e8696a134d9f18dd"
+    }
+  },
+  "composition": {
+    "success": true,
+    "provider": "302.ai",
+    "backend": "openai",
+    "model": "gpt-image-2",
+    "quality": "medium",
+    "aspectRatio": "3:4",
+    "durationMs": 56767,
+    "promptChars": 12750,
+    "promptSha256": "be8ef6f64ca770388ff17ef56bf63bf1a1dfdb2f9de274c142a38964c49e0db0",
+    "garmentDescription": "blush-pink satin pajama top with a square neckline, flutter short sleeves, gathered front yoke, and self-covered center-front buttons",
+    "output": {
+      "file": "follow-scene-look.png",
+      "width": 1024,
+      "height": 1536,
+      "bytes": 3706450,
+      "sha256": "479b41507b744297e73ba749b69e85e68bbbcb7611609ef3834d67f3792fc6e8"
+    }
+  },
+  "contactSheet": {
+    "file": "contact.jpg",
+    "width": 1536,
+    "height": 702,
+    "bytes": 246794
+  },
+  "totalDurationMs": 110447
+}

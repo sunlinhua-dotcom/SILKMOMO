@@ -1,0 +1,149 @@
+{
+  "method": "YCbCr skin filter + drop darkest 25% / brightest 5% by luma + per-channel median; ΔRGB = RMS over RGB channels; Δ亮度 = luma(face) - luma(neck/chest)",
+  "image": "verify-0904-回退验证/follow-scene-look.png",
+  "coordinateReview": "Visual placement only; no identity-similarity judgment.",
+  "samples": {
+    "faceRightCheekNarrow": {
+      "box": [
+        566,
+        330,
+        26,
+        30
+      ],
+      "medianRGB": [
+        193,
+        135,
+        110
+      ],
+      "meanRGB": [
+        189.7,
+        130.7,
+        105.9
+      ],
+      "luma": 149.5,
+      "skinPx": 780,
+      "boxPx": 780,
+      "skinRatio": 1,
+      "visualNote": "右颊窄框完全落在皮肤上，避开右侧金发。"
+    },
+    "throat": {
+      "box": [
+        504,
+        458,
+        62,
+        50
+      ],
+      "medianRGB": [
+        170,
+        104,
+        77
+      ],
+      "meanRGB": [
+        156.3,
+        96.8,
+        71.4
+      ],
+      "luma": 120.7,
+      "skinPx": 3070,
+      "boxPx": 3100,
+      "skinRatio": 0.99,
+      "visualNote": "喉部中央皮肤，避开两侧头发与下方衣领。"
+    },
+    "upperChest": {
+      "box": [
+        494,
+        548,
+        74,
+        48
+      ],
+      "medianRGB": [
+        175,
+        103,
+        75
+      ],
+      "meanRGB": [
+        170.7,
+        99.1,
+        71.5
+      ],
+      "luma": 121.3,
+      "skinPx": 3552,
+      "boxPx": 3552,
+      "skinRatio": 1,
+      "visualNote": "上胸中央皮肤，位于衣领上方。"
+    }
+  },
+  "comparisons": {
+    "faceToThroat": {
+      "dRGB": 29.32,
+      "dLuma": 28.8
+    },
+    "faceToUpperChest": {
+      "dRGB": 29.29,
+      "dLuma": 28.2
+    }
+  },
+  "reference": {
+    "image": "verify-0904-锚图AB/reference_scene.jpeg",
+    "samples": {
+      "faceRightCheek": {
+        "box": [
+          696,
+          350,
+          44,
+          38
+        ],
+        "medianRGB": [
+          202,
+          143,
+          124
+        ],
+        "meanRGB": [
+          201.5,
+          142.1,
+          122.5
+        ],
+        "luma": 158.5,
+        "skinPx": 1672,
+        "boxPx": 1672,
+        "skinRatio": 1,
+        "visualNote": "底图右颊皮肤。"
+      },
+      "throat": {
+        "box": [
+          592,
+          516,
+          70,
+          52
+        ],
+        "medianRGB": [
+          203,
+          153,
+          132
+        ],
+        "meanRGB": [
+          201.4,
+          150.4,
+          129.4
+        ],
+        "luma": 165.6,
+        "skinPx": 3640,
+        "boxPx": 3640,
+        "skinRatio": 1,
+        "visualNote": "底图喉部唯一干净皮肤框，避开衣领。"
+      }
+    }
+  },
+  "criterion": {
+    "rule": "output ΔRGB <= reference-image face-to-throat ΔRGB + 4",
+    "referenceFaceToThroat": {
+      "dRGB": 7.42,
+      "dLuma": -7.1
+    },
+    "allowance": 4,
+    "line": 11.42,
+    "faceToThroatPass": false,
+    "faceToUpperChestPass": false,
+    "note": "底图上胸框受衣领与下颌投影污染，因此两项都只与底图干净右颊↔喉部的 +4 线比较。"
+  }
+}
