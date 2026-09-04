@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import sharp from 'sharp';
 
 const api = await import('../lib/api.ts');
+const postprocess = await import('../lib/postprocess.ts');
 
 const followSceneWithAnchor = () => api.buildSceneGroupPrompt({
   garmentDescription: 'blush satin flutter-sleeve top with covered buttons',
@@ -172,10 +174,21 @@ test('anchor pushed to the client is shrunk server-side first', () => {
   // 原样推送 = 客户端白下载一条 2.9MB 的大 data: 行（0731 实测），且大 data: 行会让
   // 事件看门狗在下载期间收不到完整事件。
   assert.match(postSource, /export async function shrinkAnchorForClient/);
-  assert.match(routeSource, /const anchorForClient = await shrinkAnchorForClient\(anchorResult\.data\)/);
+  assert.match(routeSource, /const anchorForClient = await shrinkAnchorForClient\(anchorResult\.data, anchorImage\.mimeType\)/);
   assert.match(routeSource, /push\('anchor', \{ imageData: anchorForClient\.data, mimeType: anchorForClient\.mimeType \}\)/);
   // fail-open：压缩异常绝不能影响出图链路
-  assert.match(postSource, /\} catch \{\s*\n\s*return \{ data: b64, mimeType: 'image\/png' \};/);
+  assert.match(postSource, /\} catch \{\s*\n\s*return \{ data: b64, mimeType: inputMimeType \};/);
+});
+
+test('anchor shrinking preserves the real input MIME type on both fail-open paths', async () => {
+  const jpeg = await sharp({
+    create: { width: 1, height: 1, channels: 3, background: '#ffffff' },
+  }).jpeg({ quality: 20 }).toBuffer();
+  const small = await postprocess.shrinkAnchorForClient(jpeg.toString('base64'), 'image/jpeg');
+  assert.equal(small.mimeType, 'image/jpeg');
+
+  const invalid = await postprocess.shrinkAnchorForClient('not-an-image', 'image/jpeg');
+  assert.deepEqual(invalid, { data: 'not-an-image', mimeType: 'image/jpeg' });
 });
 
 test('garment analysis failure is no longer swallowed silently', () => {

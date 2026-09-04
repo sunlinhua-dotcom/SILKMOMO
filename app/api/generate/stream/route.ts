@@ -781,7 +781,7 @@ export async function POST(req: NextRequest) {
               const favorite = await getRandomFavoriteModelFace(auth.userId);
               if (favorite) {
                 anchorImage = { data: favorite.image, mimeType: favorite.mimeType };
-                const anchorForClient = await shrinkAnchorForClient(favorite.image);
+                const anchorForClient = await shrinkAnchorForClient(favorite.image, favorite.mimeType);
                 push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
               }
             }
@@ -887,7 +887,7 @@ export async function POST(req: NextRequest) {
                   // 推给客户端的那份先压小：客户端每张请求都要回传它，而服务端收到时
                   // 本来就会归一化成同样的 1434x1920 JPEG。原样推＝白下载一条 2.9MB 的
                   // 大 data: 行（0731 实测），客户端落地后还得再压一次。
-                  const anchorForClient = await shrinkAnchorForClient(anchorResult.data);
+                  const anchorForClient = await shrinkAnchorForClient(anchorResult.data, anchorImage.mimeType);
                   push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
                 } else {
                   console.log('[sceneGroup] 肖像卡生成失败，回退首张成功图作锚:', anchorResult.error);
