@@ -13,6 +13,7 @@
  * 客户端没来取的（断网/关页面）由 TTL 清理兜底，同时也正是断网重连后能补拉的来源。
  */
 import prisma from '@/lib/prisma';
+import { limitWithHasMore, pendingKindsForList } from '@/lib/pending-delivery-core';
 
 /** 未被取走的图保留多久。够覆盖「断网 → 用户重开页面补拉」，又不会让库长期堆积。 */
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
@@ -90,9 +91,13 @@ export async function deletePendingImage(id: string, userId: string): Promise<bo
  * 断网重连后的补拉入口：列出该任务下还没被取走的图（只给元信息，不带 base64，
  * 免得这个接口本身又变成一次大传输）。
  */
-export async function listPendingImages(userId: string, taskId: number): Promise<PendingImageMeta[]> {
+export async function listPendingImages(
+  userId: string,
+  taskId: number,
+  includeAnchor = false,
+): Promise<PendingImageMeta[]> {
   return prisma.pendingImage.findMany({
-    where: { userId, taskId },
+    where: { userId, taskId, kind: { in: pendingKindsForList(includeAnchor) } },
     orderBy: { createdAt: 'asc' },
     select: { id: true, kind: true, shotIndex: true, width: true, height: true, mimeType: true, createdAt: true },
     take: 50,
@@ -108,12 +113,15 @@ export async function findPendingImageByIdempotencyKey(userId: string, idempoten
 }
 
 /** 管理员只读对账：结果已扣费落库，但超过 10 分钟仍未收到客户端 DELETE 回执。 */
-export async function listStalePendingImages(ageMs = 10 * 60 * 1000, limit = 200): Promise<StalePendingImage[]> {
+export async function listStalePendingImages(ageMs = 10 * 60 * 1000, limit = 200): Promise<{
+  records: StalePendingImage[];
+  hasMore: boolean;
+}> {
   const cutoff = new Date(Date.now() - ageMs);
-  return prisma.pendingImage.findMany({
+  const rows = await prisma.pendingImage.findMany({
     where: { kind: 'result', createdAt: { lt: cutoff } },
     orderBy: { createdAt: 'asc' },
-    take: limit,
+    take: limit + 1,
     select: {
       id: true,
       kind: true,
@@ -127,6 +135,7 @@ export async function listStalePendingImages(ageMs = 10 * 60 * 1000, limit = 200
       createdAt: true,
     },
   });
+  return limitWithHasMore(rows, limit);
 }
 
 export async function sweepExpiredPendingImages(): Promise<number> {

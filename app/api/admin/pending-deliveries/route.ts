@@ -15,6 +15,6 @@ export async function GET() {
     return NextResponse.json({ error: '权限不足' }, { status: 403 });
   }
 
-  const records = await listStalePendingImages();
-  return NextResponse.json({ records, count: records.length, minimumAgeMinutes: 10 });
+  const { records, hasMore } = await listStalePendingImages();
+  return NextResponse.json({ records, count: records.length, hasMore, minimumAgeMinutes: 10 });
 }

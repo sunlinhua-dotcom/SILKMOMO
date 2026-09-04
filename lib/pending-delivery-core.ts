@@ -1,5 +1,19 @@
 export type PendingDeliveryKind = 'result' | 'anchor';
 
+export function pendingKindsForList(includeAnchor: boolean): PendingDeliveryKind[] {
+  return includeAnchor ? ['result', 'anchor'] : ['result'];
+}
+
+export function limitWithHasMore<T>(rows: readonly T[], limit: number): {
+  records: T[];
+  hasMore: boolean;
+} {
+  return {
+    records: rows.slice(0, limit),
+    hasMore: rows.length > limit,
+  };
+}
+
 export interface PendingDeliveryInput {
   kind: PendingDeliveryKind;
   userId: string;
