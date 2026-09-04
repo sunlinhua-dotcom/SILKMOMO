@@ -974,8 +974,8 @@ export async function POST(req: NextRequest) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
-                // 没有御用脸时从同一份 3 亚欧混血 + 7 欧美配方随机取一项；族裔与脸型
-                // 都由 buildModelFacePortraitPrompt 明写，不再交给底模自行猜测。
+                // fresh 没有御用脸时从 3 亚欧混血 + 7 欧美配方随机取一项；follow_scene
+                // 则从场景图派生同一人的正面身份卡，不使用脸库族裔配方。
                 let anchorPrompt: string;
                 if (modelIdentityMode === 'follow_scene') {
                   anchorPrompt = buildDerivedAnchorPortraitPrompt(derivedAnchorSkinTone);
@@ -992,6 +992,9 @@ export async function POST(req: NextRequest) {
                   () => generateBackendImage({
                     prompt: anchorPrompt,
                     productImages: [],
+                    ...(modelIdentityMode === 'follow_scene' && sceneRefImages[0]
+                      ? { sceneRefImages: [sceneRefImages[0]], promptPurpose: 'derived-anchor' as const }
+                      : {}),
                     aspectRatio: '3:4',
                   }, 'gemini'),
                 );

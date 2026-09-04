@@ -40,6 +40,7 @@ npm run lint       # ESLint
 | `DEEPSEEK_API_KEY` | 可选 | AI 聊天助手主通道(api.deepseek.com);不配则聊天回退 Gemini Lite |
 | `DEEPSEEK_CHAT_MODEL` | 可选 | 聊天模型,默认 `deepseek-v4-pro` |
 | `GEMINI_BASE_URL` | 可选 | 上游网关地址(默认 `https://api.apiyi.com`) |
+| `DERIVED_ANCHOR_MODEL` | 可选 | `follow_scene` 派生身份锚模型(默认 `gemini-3-pro-image`) |
 | `IMAGE_BACKEND` | 可选 | 默认引擎 `gemini` / `openai` |
 
 参考 `.env.example`。

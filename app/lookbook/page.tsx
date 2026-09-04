@@ -63,7 +63,7 @@ const MODEL_IDENTITY_OPTIONS: Array<{
   {
     id: 'follow_scene',
     label: '贴近场景模特',
-    description: '肤色、发型发色、体型都与场景图模特一致，仅对五官做局部调整（部分换脸），最大程度还原参考图。',
+    description: '与场景图里的模特是同一个人：肤色、发型发色、体型、五官都还原参考图。',
   },
   {
     id: 'fresh',

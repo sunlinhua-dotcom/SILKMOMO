@@ -33,7 +33,7 @@ export interface BackendInput {
   // 组图（换装）模式：把 sceneRefImages 当作可编辑底图，放在参考图队首（GPT edit 的
   // image[] 首图 = 主底图），并在 Gemini parts 里前置，指令要求「保留底图、只换服装+人物」。
   sceneAsEditBase?: boolean;
-  promptPurpose?: 'compose' | 'faceswap';
+  promptPurpose?: 'compose' | 'faceswap' | 'derived-anchor';
   timeoutMs?: number;
   allowRetryOn5xx?: boolean;
 }
@@ -78,6 +78,7 @@ const OPENAI_BASE =
   (HAS_DEDICATED_OPENAI_KEY ? 'https://api.302.ai' : APIYI_BASE);
 
 const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
+export const DERIVED_ANCHOR_MODEL = process.env.DERIVED_ANCHOR_MODEL || 'gemini-3-pro-image';
 // 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
 // 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
 const OPENAI_MODEL =
@@ -178,7 +179,8 @@ async function normalizeBackendReferenceImages(input: BackendInput): Promise<Bac
 // ═══════════════════════════════════════════════
 
 async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<BackendResult> {
-  const url = `${APIYI_BASE}/v1beta/models/${GEMINI_MODEL}:generateContent?key=${API_KEY}`;
+  const model = input.promptPurpose === 'derived-anchor' ? DERIVED_ANCHOR_MODEL : GEMINI_MODEL;
+  const url = `${APIYI_BASE}/v1beta/models/${model}:generateContent?key=${API_KEY}`;
   const parts = buildGeminiParts(input);
 
   let response: Response;
@@ -259,7 +261,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
   for (const part of resultParts || []) {
     const inlineData = (part.inlineData || part.inline_data) as Record<string, string> | undefined;
     if (inlineData?.data) {
-      return { success: true, data: inlineData.data, backend: 'gemini', model: GEMINI_MODEL };
+      return { success: true, data: inlineData.data, backend: 'gemini', model };
     }
   }
 
@@ -300,7 +302,9 @@ export function buildGeminiParts(input: BackendInput): Array<Record<string, unkn
     );
   }
   if (!input.sceneAsEditBase && input.sceneRefImages?.length) {
-    parts.push({ text: '\n\nScene Reference Images (use spatial structure, pose/composition if relevant, lighting, filter, expression, makeup, and photographic language; clothing in these images is NOT a product design reference):' });
+    parts.push({ text: input.promptPurpose === 'derived-anchor'
+      ? '\n\nScene Reference Image (use as the identity source for the same model; match her ethnicity, face shape, facial features, hair color, and hairstyle as directed by the prompt):'
+      : '\n\nScene Reference Images (use spatial structure, pose/composition if relevant, lighting, filter, expression, makeup, and photographic language; clothing in these images is NOT a product design reference):' });
     input.sceneRefImages.forEach(img =>
       parts.push({ inline_data: { mime_type: img.mimeType, data: img.data } })
     );
@@ -444,7 +448,7 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   }
 
   // 在 prompt 里给参考图分组打标，弥补 multipart 不能传图标签的限制
-  const roleText = (tag: string, purpose: 'compose' | 'faceswap' = 'compose') => {
+  const roleText = (tag: string, purpose: BackendInput['promptPurpose'] = 'compose') => {
     switch (tag) {
       case 'product':
         return 'product — the garment: style, cut, silhouette, tailoring, proportions, fabric, color, pattern, seams, closures. Nothing else in these frames applies.';

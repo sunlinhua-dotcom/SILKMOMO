@@ -48,7 +48,7 @@ test('fresh without favorites draws from the same explicit 3/7 ethnicity recipes
   assert.match(api.buildModelFacePortraitPrompt(api.MODEL_FACE_SPECS[3]), /white European \/ North American woman/);
 });
 
-test('fresh anchor is explicitly complete while follow_scene semantics stay partial', () => {
+test('fresh anchor is explicitly complete while follow_scene keeps the scene person', () => {
   const fresh = api.buildSceneGroupPrompt({
     garmentDescription: 'silk dress', modelIdentityMode: 'fresh', hasAnchor: true,
   });
@@ -61,6 +61,8 @@ test('fresh anchor is explicitly complete while follow_scene semantics stay part
   assert.doesNotMatch(follow, /COMPLETE IDENTITY ANCHOR/);
   assert.match(follow, /DO NOT copy the anchor's skin complexion\/tone/);
   assert.match(follow, /scene-base person's exact skin tone/);
+  assert.match(follow, /same person/i);
+  assert.doesNotMatch(follow, /Eurasian|East-Asian|partial face swap/i);
   assert.match(fresh, /visible skin complexion.*anchor/i);
   assert.doesNotMatch(fresh, /Sample the scene-base person's neck, throat and chest/);
 });
@@ -86,11 +88,32 @@ test('fresh renders texture at its identity complexion brightness and rejects a 
   }
 });
 
-test('follow_scene prompt text is byte-for-byte unchanged by the fresh complexion fix', () => {
+test('09-04 用户拍板「就是场景图里那个人」后，follow_scene 新文本保持字节级稳定', () => {
   const cases = [
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: false }, 'e5bee511e3d6eaa7b3752052540872c2ce61906facb2a423fab344c40732474d'],
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true }, '68ac52f44784cfa19bec2b071eb6d9b7a2d9eef6a5b19760b9efe5eb31ca9ab1'],
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true, hasReplacementAccessory: true, isRegeneration: true, sceneGroupMode: 'products', productLabel: 'Set A', garmentCategories: ['dress'], customPrompt: 'keep rain' }, '18a20fccbed2604653fa974f4f27eb832b60612f736958cbc6b05fc7e5422d74'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: false }, '9be0a79bf5fbd3975d9319c156b074778072b5d5ab0055fac027adfb92318a00'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true }, 'f04d3dd6f48007f76e5ab49b558a6c898d043493944fbafe76f97717dc001c6f'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true, hasReplacementAccessory: true, isRegeneration: true, sceneGroupMode: 'products', productLabel: 'Set A', garmentCategories: ['dress'], customPrompt: 'keep rain' }, 'bc17e539f16966ab13e08534c4f7316bc7e8d07feb5a092c6d1aeccac05ee463'],
+  ];
+
+  for (const [options, expectedHash] of cases) {
+    const prompt = api.buildSceneGroupPrompt(options);
+    assert.equal(crypto.createHash('sha256').update(prompt).digest('hex'), expectedHash);
+    assert.match(prompt, /same person/i);
+    assert.doesNotMatch(prompt, /Eurasian|East-Asian|partial face swap/i);
+  }
+
+  const derivedPrompt = api.buildDerivedAnchorPortraitPrompt();
+  assert.equal(
+    crypto.createHash('sha256').update(derivedPrompt).digest('hex'),
+    '959926577a7b3fae4a3d5d9a58cee542f20157a99be49ea2764b7e8e476f2c09',
+  );
+});
+
+test('fresh prompt hashes stay byte-for-byte unchanged by the 09-04 follow_scene identity change', () => {
+  const cases = [
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'fresh', hasAnchor: false }, '1feeb0c61a9fc6df7ece5502963f15f2ffe40288a5b5870dc11b4b933e802a3b'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'fresh', hasAnchor: true }, '7b35c8bbcb7a36ed21c6c63c458dfaaa407ba16ee031fece5c02a300d2e19ac3'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'fresh', hasAnchor: true, hasReplacementAccessory: true, isRegeneration: true, sceneGroupMode: 'products', productLabel: 'Set A', garmentCategories: ['dress'], customPrompt: 'keep rain' }, '4b81c93da837b5b7217bdf99977b3d8fbaab4d174d2989207a1fe49be781eb73'],
   ];
 
   for (const [options, expectedHash] of cases) {
