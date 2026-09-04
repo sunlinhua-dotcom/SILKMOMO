@@ -128,11 +128,11 @@ test('derived follow-scene anchor uses the final head-and-shoulders identity por
   assert.doesNotMatch(derivedBlock, /subtle East-Asian eyelid|Eurasian mixed European-Asian/);
 });
 
-test('follow_scene derived anchor alone selects its configurable Pro model', () => {
+test('follow_scene derived anchor alone selects its configurable Flash model', () => {
   const backendSource = fs.readFileSync('lib/image-backends.ts', 'utf8');
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
 
-  assert.match(backendSource, /DERIVED_ANCHOR_MODEL.*process\.env\.DERIVED_ANCHOR_MODEL.*gemini-3-pro-image/);
+  assert.match(backendSource, /DERIVED_ANCHOR_MODEL.*process\.env\.DERIVED_ANCHOR_MODEL.*gemini-3\.1-flash-image-preview/);
   assert.match(backendSource, /promptPurpose\?: 'compose' \| 'faceswap' \| 'derived-anchor'/);
   assert.match(routeSource, /promptPurpose: 'derived-anchor'/);
   assert.match(routeSource, /sceneRefImages: \[sceneRefImages\[0\]\]/);
