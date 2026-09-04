@@ -5,6 +5,7 @@ import sharp from 'sharp';
 
 const api = await import('../lib/api.ts');
 const postprocess = await import('../lib/postprocess.ts');
+const recovery = await import('../lib/generation-recovery.ts');
 
 const followSceneWithAnchor = () => api.buildSceneGroupPrompt({
   garmentDescription: 'blush satin flutter-sleeve top with covered buttons',
@@ -235,12 +236,22 @@ test('pending image API scopes every read and delete to the owner', () => {
 });
 
 test('disconnect auto-continues once, only for stalls, and never for fatal errors', () => {
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
-
-  assert.match(taskSource, /if \(finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef\.current\)/);
-  // 必须等 generating 落回 false 再触发：同步递归会被 handleStartGeneration 自己的闸门挡回去
-  assert.match(taskSource, /if \(generating \|\| !pendingAutoRetryRunIdRef\.current\) return;/);
-  assert.match(taskSource, /void handleGenerateRemaining\(runId\);/);
+  const base = { remaining: [2], alreadyRetried: false };
+  assert.equal(recovery.shouldScheduleAutomaticFill({
+    ...base,
+    lastErrorWasStall: true,
+    fatalStop: false,
+  }), true);
+  assert.equal(recovery.shouldScheduleAutomaticFill({
+    ...base,
+    lastErrorWasStall: false,
+    fatalStop: false,
+  }), false);
+  assert.equal(recovery.shouldScheduleAutomaticFill({
+    ...base,
+    lastErrorWasStall: true,
+    fatalStop: true,
+  }), false);
 });
 
 test('garment analysis is reused across chunks instead of re-run every time', () => {

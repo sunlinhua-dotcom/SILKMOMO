@@ -19,6 +19,55 @@ export function missingShotIndexes(
   return expectedShots.filter(shotIndex => !successfulShots.has(shotIndex));
 }
 
+export function reconcileStalledChunk(input: {
+  successfulShots: ReadonlySet<number>;
+  recoveredShotIndexes: readonly number[];
+  expectedShots: readonly number[];
+  stalledChunkShots: readonly number[];
+}): {
+  successfulShots: Set<number>;
+  unresolvedChunkShots: number[];
+  fatal: false;
+  continueChunks: true;
+} {
+  const successfulShots = mergeRecoveredShots(
+    input.successfulShots,
+    input.recoveredShotIndexes,
+    input.expectedShots,
+  );
+  return {
+    successfulShots,
+    unresolvedChunkShots: missingShotIndexes(input.stalledChunkShots, successfulShots),
+    fatal: false,
+    continueChunks: true,
+  };
+}
+
+export function shouldScheduleAutomaticFill(input: {
+  remaining: readonly number[];
+  lastErrorWasStall: boolean;
+  fatalStop: boolean;
+  alreadyRetried: boolean;
+}): boolean {
+  return input.remaining.length > 0
+    && input.lastErrorWasStall
+    && !input.fatalStop
+    && !input.alreadyRetried;
+}
+
+export function mergeRunLocalResults(input: {
+  successfulShots: ReadonlySet<number>;
+  localShotIndexes: readonly number[];
+  expectedShots: readonly number[];
+  restoredShotIndexes: ReadonlySet<number>;
+}): Set<number> {
+  return mergeRecoveredShots(
+    input.successfulShots,
+    input.localShotIndexes.filter(shotIndex => !input.restoredShotIndexes.has(shotIndex)),
+    input.expectedShots,
+  );
+}
+
 export function finalizeGeneration(input: {
   expectedShots: readonly number[];
   successfulShots: ReadonlySet<number>;

@@ -3,6 +3,30 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const delivery = await import('../lib/pending-delivery-core.ts').catch(() => ({}));
+const pendingFetch = await import('../lib/pending-fetch.ts').catch(() => ({}));
+
+test('a slow paid image body is not aborted by the 10ms handshake timeout', async () => {
+  assert.equal(typeof pendingFetch.fetchPendingImageWithRetry, 'function');
+  let signal;
+  const result = await pendingFetch.fetchPendingImageWithRetry('slow-image', {
+    attempts: 1,
+    handshakeTimeoutMs: 10,
+    fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      return {
+        status: 200,
+        ok: true,
+        json: async () => {
+          await new Promise(resolve => setTimeout(resolve, 30));
+          return { image: { data: 'large-image', mimeType: 'image/png', width: 2048, height: 2731 } };
+        },
+      };
+    },
+  });
+
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(result, { data: 'large-image', mimeType: 'image/png', width: 2048, height: 2731 });
+});
 
 test('result and anchor deliveries use a pending id and never inline data after a successful store', async () => {
   assert.equal(typeof delivery.preparePendingDelivery, 'function');
