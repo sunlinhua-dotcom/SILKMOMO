@@ -345,7 +345,7 @@ function ModelFaceLibraryPanel({
           正在生成 {job.completedCount + job.failedCount}/{job.requestedCount}；可离开页面，回来后会自动接上。
         </p>
       )}
-      {job?.status === 'failed' && job.items.some(item => item.status === 'pending') && (
+      {job?.status === 'failed' && job.items.some(item => ['pending', 'running'].includes(item.status)) && (
         <button
           type="button"
           onClick={onResume}

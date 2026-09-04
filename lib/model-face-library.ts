@@ -29,10 +29,24 @@ export interface StoreModelFaceInput {
   recipeLabel: string;
 }
 
+interface PreparedModelFaceImage {
+  image: string;
+  thumbnail: string;
+  mimeType: 'image/jpeg';
+}
+
 type ModelFaceWriter = Pick<Prisma.TransactionClient, 'modelFace'>;
 
 export async function storeModelFace(input: StoreModelFaceInput, client: ModelFaceWriter = prisma) {
   const normalized = await prepareModelFaceImage(input.image);
+  return storePreparedModelFace(input, normalized, client);
+}
+
+export function storePreparedModelFace(
+  input: StoreModelFaceInput,
+  normalized: PreparedModelFaceImage,
+  client: ModelFaceWriter = prisma,
+) {
   return client.modelFace.create({
     data: {
       userId: input.userId,
