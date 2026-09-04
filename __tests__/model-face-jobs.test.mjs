@@ -77,6 +77,20 @@ test('refund failure stays refund_pending and is never reported as refunded', as
   assert.equal(result.refundStatus, 'refund_pending');
 });
 
+test('markAttempt exception is refunded and never reaches the upstream generator', async () => {
+  const { calls, deps } = fakeDeps({
+    markAttempt: async () => { calls.push('attempt'); throw new Error('P2028 transaction expired'); },
+  });
+  const result = await runner.generateChargedModelFace({
+    userId: 'u1', specIndex: 0, costFen: 120, billingStatus: 'charged',
+  }, deps);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.refundStatus, 'refunded');
+  assert.equal(result.error, 'P2028 transaction expired');
+  assert.deepEqual(calls, ['attempt', 'refund']);
+});
+
 test('job summary keeps refund reconciliation visible until every refund commits', () => {
   assert.equal(typeof runner.buildModelFaceJobError, 'function');
   assert.equal(runner.buildModelFaceJobError(2, 1), '2 张失败，1 张退款处理中');
@@ -191,4 +205,23 @@ test('lookbook starts and polls a three-face background job without clearing exi
   assert.match(source, /每张 ¥\{\(MODEL_FACE_PRICE_FEN \/ 100\)\.toFixed\(2\)\}/);
   assert.doesNotMatch(source, /setFaceCandidates\(\[\]\)/);
   assert.doesNotMatch(source, /for \(let specIndex/);
+});
+
+test('failed face jobs can be resumed when an item is still running', () => {
+  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+
+  assert.match(
+    source,
+    /job\.items\.some\(item => \['pending', 'running'\]\.includes\(item\.status\)\)/,
+  );
+});
+
+test('face image normalization finishes before the row-locking store transaction starts', () => {
+  const source = fs.readFileSync('lib/model-face-jobs.ts', 'utf8');
+  const prepareIndex = source.indexOf('prepareModelFaceImage(input.data)');
+  const transactionIndex = source.indexOf('prisma.$transaction', prepareIndex);
+
+  assert.ok(prepareIndex >= 0, 'runner must prepare the generated image before storage');
+  assert.ok(transactionIndex > prepareIndex, 'CPU image encoding must finish before opening the store transaction');
+  assert.match(source.slice(transactionIndex, transactionIndex + 1_200), /storePreparedModelFace/);
 });

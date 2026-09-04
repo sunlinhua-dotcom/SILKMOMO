@@ -69,12 +69,12 @@ export async function generateChargedModelFace(
     return { status: 'blocked', error: '该图片计费状态不可生成' };
   }
 
-  const attempted = await deps.markAttempt(input);
-  if (!attempted.success) {
-    return refundFailure(input, deps, attempted.error || '今日生成次数已达上限');
-  }
-
   try {
+    const attempted = await deps.markAttempt(input);
+    if (!attempted.success) {
+      return refundFailure(input, deps, attempted.error || '今日生成次数已达上限');
+    }
+
     const generated = await deps.generate(input);
     if (!generated.success || !generated.data) {
       return refundFailure(input, deps, generated.error || '模特脸生成失败');

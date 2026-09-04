@@ -8,8 +8,9 @@ test('model face job states use Prisma enums and database check constraints', ()
     .filter(entry => entry.isDirectory())
     .map(entry => entry.name)
     .sort();
-  const latest = migrationDirs.at(-1);
-  const migration = fs.readFileSync(`prisma/migrations/${latest}/migration.sql`, 'utf8');
+  const migrations = migrationDirs
+    .map(dir => fs.readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8'))
+    .join('\n');
 
   assert.match(schema, /enum ModelFaceJobStatus/);
   assert.match(schema, /enum ModelFaceItemStatus/);
@@ -17,9 +18,11 @@ test('model face job states use Prisma enums and database check constraints', ()
   assert.match(schema, /status\s+ModelFaceJobStatus\s+@default\(queued\)/);
   assert.match(schema, /status\s+ModelFaceItemStatus\s+@default\(pending\)/);
   assert.match(schema, /idempotencyKey\s+String\?\s+@unique/);
-  assert.match(migration, /CREATE TYPE "ModelFaceJobStatus" AS ENUM/);
-  assert.match(migration, /ModelFaceGenerationJob_requestedCount_check/);
-  assert.match(migration, /ModelFaceGenerationJob_costFen_check/);
-  assert.match(migration, /ModelFaceGenerationItem_specIndex_check/);
-  assert.match(migration, /ModelFaceGenerationItem_position_check/);
+  assert.match(schema, /@@index\(\[billingStatus\]\)/);
+  assert.match(migrations, /CREATE TYPE "ModelFaceJobStatus" AS ENUM/);
+  assert.match(migrations, /ModelFaceGenerationJob_requestedCount_check/);
+  assert.match(migrations, /ModelFaceGenerationJob_costFen_check/);
+  assert.match(migrations, /ModelFaceGenerationItem_specIndex_check/);
+  assert.match(migrations, /ModelFaceGenerationItem_position_check/);
+  assert.match(migrations, /CREATE INDEX "ModelFaceGenerationItem_billingStatus_idx"/);
 });

@@ -236,6 +236,7 @@ model ModelFaceGenerationItem {
 
   @@unique([jobId, position])
   @@index([jobId, status])
+  @@index([billingStatus])
   @@index([attemptedAt])
   @@index([createdAt])
 }

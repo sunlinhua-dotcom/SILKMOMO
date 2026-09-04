@@ -4,8 +4,14 @@ import { checkBalance } from '@/lib/billing';
 import { getGenerationCostFen } from '@/lib/billing-constants';
 import { MODEL_FACE_SPECS, buildModelFacePortraitPrompt } from '@/lib/api';
 import { generateImage, resolveApiModel } from '@/lib/image-backends';
-import { storeModelFace } from '@/lib/model-face-library';
+import { prepareModelFaceImage, storePreparedModelFace } from '@/lib/model-face-library';
 import { chargeModelFaceItem, refundModelFaceItem } from '@/lib/model-face-billing';
+import {
+  isPrismaUniqueConstraintError,
+  markModelFaceAttemptWithDeps,
+  resetBlockedModelFaceItem,
+  retryPendingModelFaceRefundsWithDeps,
+} from '@/lib/model-face-job-operations';
 import {
   buildModelFaceJobError,
   createModelFaceLeaseHeartbeat,
@@ -74,25 +80,11 @@ async function assertDailyCapacity(userId: string, count: number) {
 }
 
 async function markModelFaceAttempt(itemId: string, userId: string) {
-  return prisma.$transaction(async tx => {
-    const item = await tx.modelFaceGenerationItem.findUniqueOrThrow({
-      where: { id: itemId },
-      select: { attemptedAt: true },
-    });
-    if (item.attemptedAt) return { success: false, error: '该图片已发起过上游生成' };
-    const used = await tx.modelFaceGenerationItem.count({
-      where: { job: { userId }, attemptedAt: { gte: startOfShanghaiDay() } },
-    });
-    if (!hasModelFaceAttemptCapacity(used, 1)) {
-      return { success: false, error: `今日最多生成 ${DAILY_MODEL_FACE_LIMIT} 张模特脸` };
-    }
-    const marked = await tx.modelFaceGenerationItem.updateMany({
-      where: { id: itemId, status: 'running', attemptedAt: null },
-      data: { attemptedAt: new Date() },
-    });
-    return marked.count === 1
-      ? { success: true }
-      : { success: false, error: '该图片已被其他 worker 接管' };
+  return markModelFaceAttemptWithDeps(itemId, userId, {
+    prisma,
+    startOfDay: startOfShanghaiDay,
+    hasCapacity: hasModelFaceAttemptCapacity,
+    limit: DAILY_MODEL_FACE_LIMIT,
   });
 }
 
@@ -104,7 +96,15 @@ async function syncJobCounts(jobId: string) {
   const [completedCount, failedCount, pendingRefunds] = await Promise.all([
     prisma.modelFaceGenerationItem.count({ where: { jobId, status: 'succeeded' } }),
     prisma.modelFaceGenerationItem.count({ where: { jobId, status: 'failed' } }),
-    prisma.modelFaceGenerationItem.count({ where: { jobId, billingStatus: 'refund_pending' } }),
+    prisma.modelFaceGenerationItem.count({
+      where: {
+        jobId,
+        OR: [
+          { billingStatus: 'refund_pending' },
+          { billingStatus: 'charged', status: 'failed' },
+        ],
+      },
+    }),
   ]);
   const error = buildModelFaceJobError(failedCount, pendingRefunds);
   await prisma.modelFaceGenerationJob.updateMany({
@@ -115,30 +115,14 @@ async function syncJobCounts(jobId: string) {
 }
 
 export async function retryPendingModelFaceRefunds(userId?: string): Promise<number> {
-  const items = await prisma.modelFaceGenerationItem.findMany({
-    where: {
-      billingStatus: 'refund_pending',
-      ...(userId ? { job: { userId } } : {}),
-    },
-    select: { id: true, jobId: true, error: true, specIndex: true },
-  });
-  const touchedJobs = new Set<string>();
-  let refunded = 0;
-  for (const item of items) {
-    const reason = item.error || '模特脸生成失败';
-    const result = await refundModelFaceItem(
+  return retryPendingModelFaceRefundsWithDeps(userId, {
+    prisma,
+    refund: (item, reason) => refundModelFaceItem(
       item.id,
       `御用 AI 模特脸失败退款 · ${RECIPE_LABELS[item.specIndex]} · ${reason}`,
-    );
-    await prisma.modelFaceGenerationItem.updateMany({
-      where: { id: item.id, billingStatus: result.success ? 'refunded' : 'refund_pending' },
-      data: { status: 'failed', error: refundMessage(reason, result.success) },
-    });
-    if (result.success) refunded += 1;
-    touchedJobs.add(item.jobId);
-  }
-  for (const jobId of touchedJobs) await syncJobCounts(jobId);
-  return refunded;
+    ),
+    syncJobCounts,
+  });
 }
 
 const localRunners = new Set<string>();
@@ -237,7 +221,7 @@ export async function createModelFaceJob(userId: string, count: number) {
     });
   } catch (error) {
     if (error instanceof ModelFaceJobError) throw error;
-    if (error instanceof Error && /unique constraint/i.test(error.message)) {
+    if (isPrismaUniqueConstraintError(error)) {
       const existing = await prisma.modelFaceGenerationJob.findFirst({
         where: { userId, status: { in: ['queued', 'running'] } },
         select: { id: true },
@@ -303,7 +287,7 @@ export async function resumeModelFaceJob(userId: string, jobId: string) {
       },
     });
   } catch (error) {
-    if (error instanceof Error && /unique constraint/i.test(error.message)) {
+    if (isPrismaUniqueConstraintError(error)) {
       throw new ModelFaceJobError('已有模特脸任务正在进行', 409);
     }
     throw error;
@@ -372,13 +356,13 @@ async function runModelFaceJob(jobId: string): Promise<void> {
   });
 
   try {
-    await retryPendingModelFaceRefunds();
     if (!await renewLease(jobId)) throw new ModelFaceLeaseLostError();
     await reconcileClaimedJob(jobId);
     const job = await prisma.modelFaceGenerationJob.findUniqueOrThrow({
       where: { id: jobId },
       include: jobInclude,
     });
+    await retryPendingModelFaceRefunds(job.userId);
     const items = job.items.filter(item => item.status === 'pending');
 
     // Deliberately sequential: one awaited item at a time per account/job.
@@ -412,26 +396,29 @@ async function runModelFaceJob(jobId: string): Promise<void> {
           }, 'openai');
           return { ...generated, mimeType: 'image/png' };
         },
-        store: input => prisma.$transaction(async tx => {
-          const owned = await tx.modelFaceGenerationJob.updateMany({
-            where: { id: jobId, status: 'running', runnerId: PROCESS_RUNNER_ID },
-            data: { leaseUntil: leaseDeadline() },
+        store: async input => {
+          const normalized = await prepareModelFaceImage(input.data);
+          return prisma.$transaction(async tx => {
+            const owned = await tx.modelFaceGenerationJob.updateMany({
+              where: { id: jobId, status: 'running', runnerId: PROCESS_RUNNER_ID },
+              data: { leaseUntil: leaseDeadline() },
+            });
+            if (owned.count === 0) throw new ModelFaceLeaseLostError();
+            const face = await storePreparedModelFace({
+              userId: input.userId,
+              image: input.data,
+              mimeType: input.mimeType,
+              specIndex: input.specIndex,
+              recipeLabel: RECIPE_LABELS[input.specIndex],
+            }, normalized, tx);
+            const stored = await tx.modelFaceGenerationItem.updateMany({
+              where: { id: item.id, status: 'running', billingStatus: 'charged' },
+              data: { status: 'succeeded', billingStatus: 'kept', faceId: face.id, error: null },
+            });
+            if (stored.count === 0) throw new ModelFaceLeaseLostError();
+            return face;
           });
-          if (owned.count === 0) throw new ModelFaceLeaseLostError();
-          const face = await storeModelFace({
-            userId: input.userId,
-            image: input.data,
-            mimeType: input.mimeType,
-            specIndex: input.specIndex,
-            recipeLabel: RECIPE_LABELS[input.specIndex],
-          }, tx);
-          const stored = await tx.modelFaceGenerationItem.updateMany({
-            where: { id: item.id, status: 'running', billingStatus: 'charged' },
-            data: { status: 'succeeded', billingStatus: 'kept', faceId: face.id, error: null },
-          });
-          if (stored.count === 0) throw new ModelFaceLeaseLostError();
-          return face;
-        }),
+        },
         refund: input => refundModelFaceItem(
           item.id,
           `御用 AI 模特脸失败退款 · ${RECIPE_LABELS[item.specIndex]} · ${input.reason}`,
@@ -439,10 +426,7 @@ async function runModelFaceJob(jobId: string): Promise<void> {
       });
 
       if (charged.status === 'blocked') {
-        await prisma.modelFaceGenerationItem.updateMany({
-          where: { id: item.id, status: 'running' },
-          data: { status: 'pending', error: charged.error },
-        });
+        await resetBlockedModelFaceItem(prisma, item.id, PROCESS_RUNNER_ID, charged.error);
         await prisma.modelFaceGenerationJob.updateMany({
           where: { id: jobId, runnerId: PROCESS_RUNNER_ID },
           data: {

@@ -122,7 +122,7 @@ test('model face library uses the paid persistent background-job API', () => {
 test('model face worker keeps the upstream deadline and persists completed faces', () => {
   const jobs = fs.readFileSync('lib/model-face-jobs.ts', 'utf8');
   assert.match(jobs, /timeoutMs: MODEL_FACE_UPSTREAM_TIMEOUT_MS/);
-  assert.match(jobs, /storeModelFace/);
+  assert.match(jobs, /storePreparedModelFace/);
   assert.match(jobs, /for \(const item of items\)/);
 });
 
