@@ -1,0 +1,87 @@
+{
+  "method": "YCbCr skin filter + drop darkest 25% / brightest 5% by luma + per-channel median; ΔRGB = RMS over RGB channels",
+  "image": "verify-0904-提示词优化/follow-scene-look.png",
+  "samples": {
+    "face": {
+      "box": [
+        452,
+        317,
+        42,
+        38
+      ],
+      "medianRGB": [
+        212,
+        156,
+        130
+      ],
+      "meanRGB": [
+        211.8,
+        154.3,
+        129
+      ],
+      "luma": 169.8,
+      "skinPx": 1596,
+      "boxPx": 1596
+    },
+    "throat": {
+      "box": [
+        504,
+        458,
+        62,
+        50
+      ],
+      "medianRGB": [
+        171,
+        106,
+        78
+      ],
+      "meanRGB": [
+        151.9,
+        95.9,
+        69.3
+      ],
+      "luma": 122.2,
+      "skinPx": 3033,
+      "boxPx": 3100
+    },
+    "upperChest": {
+      "box": [
+        494,
+        548,
+        74,
+        48
+      ],
+      "medianRGB": [
+        184,
+        118,
+        85
+      ],
+      "meanRGB": [
+        179.5,
+        113.5,
+        81.3
+      ],
+      "luma": 134,
+      "skinPx": 3552,
+      "boxPx": 3552
+    }
+  },
+  "comparisons": {
+    "faceToThroat": {
+      "dRGB": 47.91,
+      "dLuma": 47.6,
+      "previous0904": 12.83
+    },
+    "faceToUpperChest": {
+      "dRGB": 37.65,
+      "dLuma": 35.8,
+      "previous0904Range": [
+        4.8,
+        7
+      ]
+    },
+    "baseline0731": {
+      "dRGB": 7.05
+    }
+  }
+}
