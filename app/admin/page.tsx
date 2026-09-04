@@ -118,6 +118,12 @@ export default function AdminPage() {
           </Link>
           <div className="flex items-center gap-3">
             <Link
+              href="/admin/pending-deliveries"
+              className="px-3 py-1 text-xs font-medium border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
+            >
+              未取走对账
+            </Link>
+            <Link
               href="/admin/failures"
               className="px-3 py-1 text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
             >
