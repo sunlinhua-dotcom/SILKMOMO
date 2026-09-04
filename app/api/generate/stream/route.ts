@@ -12,6 +12,7 @@
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { checkBalance, deductBalance, refundBalance } from '@/lib/billing';
+import { formatGenerationDeductionError } from '@/lib/generation-billing-core';
 import {
   getGenerationCostFen,
   getGenerationQualityLabel,
@@ -35,6 +36,7 @@ import { findPendingImageByIdempotencyKey, storePendingImage } from '@/lib/pendi
 import { preparePendingDelivery } from '@/lib/pending-delivery-core';
 import { createSseBackpressureObserver } from '@/lib/sse-backpressure';
 import { getRandomFavoriteModelFace } from '@/lib/model-face-library';
+import { resolveIdempotentGeneration } from '@/lib/generation-idempotency';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -282,8 +284,6 @@ async function deliverAnchor(
   push('anchor', prepared.payload);
 }
 
-const PAID_DELIVERY_RECOVERY_ERROR = '该镜次已付费，请刷新取回';
-
 function generationIdempotencyKey(
   userId: string,
   taskId: number,
@@ -299,11 +299,11 @@ async function redeliverIdempotentResult(
   idempotencyKey: string,
   meta: { shotIndex: number; current: number; total: number },
 ): Promise<boolean> {
-  const pending = await findPendingImageByIdempotencyKey(userId, idempotencyKey);
-  if (!pending) {
-    push('error', { ...meta, message: PAID_DELIVERY_RECOVERY_ERROR, fatal: true });
-    return false;
-  }
+  const resolution = await resolveIdempotentGeneration({
+    findPending: () => findPendingImageByIdempotencyKey(userId, idempotencyKey),
+  });
+  if (resolution.action === 'generate') return false;
+  const { pending } = resolution;
   push('result', {
     ...meta,
     pendingId: pending.id,
@@ -311,6 +311,17 @@ async function redeliverIdempotentResult(
     height: pending.height,
   });
   return true;
+}
+
+async function generationDeductionErrorMessage(
+  userId: string,
+  error: string | undefined,
+  stopped: boolean,
+): Promise<string> {
+  const balanceFen = error === '余额不足'
+    ? (await checkBalance(userId, 1)).balanceFen
+    : 0;
+  return formatGenerationDeductionError(error, balanceFen, stopped);
 }
 
 // 旧版内联实现 callGeminiApi / buildParts 已删除。
@@ -609,7 +620,7 @@ export async function POST(req: NextRequest) {
               idempotencyKey,
             );
             if (!deduction.success) {
-              const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
+              const errMsg = await generationDeductionErrorMessage(auth.userId, deduction.error, true);
               push('error', {
                 shotIndex: shot.index,
                 current: i + 1,
@@ -633,12 +644,17 @@ export async function POST(req: NextRequest) {
                 current: i + 1,
                 total,
               });
-              if (!reused) {
-                failedCount += total - i;
-                break;
+              if (reused) {
+                recordGeneration({
+                  userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
+                  promptText: '(idempotent pending redelivery)',
+                  modelId, bodyType, skinTone, aspectRatio,
+                  apiModel: requestedApiModel,
+                  success: true, apiLatencyMs: 0,
+                }).catch(err => console.error('[recordGeneration]', err));
+                successCount++;
+                continue;
               }
-              successCount++;
-              continue;
             }
 
             // —— 从这里起，钱已扣；任何失败 / 异常 / 客户端断开都必须退款 ——
@@ -688,7 +704,7 @@ export async function POST(req: NextRequest) {
               }
             } catch (innerErr) {
               const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-              await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
+              await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
               recordGeneration({
                 userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
                 promptText: prompt || '(throw before prompt built)',
@@ -737,7 +753,7 @@ export async function POST(req: NextRequest) {
               // 关键：生成成功但客户端已断开 → push 会被吞，IndexedDB 也写不进去 → 用户付了钱拿不到图。
               // 主动退款（记录已在上面记为 disconnect 失败，这里不再重复记）。
               if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                 failedCount++;
                 break;
               }
@@ -758,7 +774,7 @@ export async function POST(req: NextRequest) {
               // 才暴露的（心跳 25s 一次，req.signal 未必先到），这里是唯一的感知时机——
               // 漏掉就会扣了钱、图没送到、还不退款。successCount 也必须等复查通过再加。
               if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                 failedCount++;
                 break;
               }
@@ -770,6 +786,8 @@ export async function POST(req: NextRequest) {
                 costFen,
                 `${chargeLabel} 失败退款`,
                 taskId,
+                idempotencyKey,
+                deduction.consumeTransactionId,
               );
               push('error', {
                 shotIndex: shot.index,
@@ -1070,7 +1088,7 @@ export async function POST(req: NextRequest) {
                 () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel, idempotencyKey),
               );
               if (!deduction.success) {
-                const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
+                const errMsg = await generationDeductionErrorMessage(auth.userId, deduction.error, true);
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
@@ -1088,12 +1106,17 @@ export async function POST(req: NextRequest) {
                   current: i + 1,
                   total,
                 });
-                if (!reused) {
-                  failedCount += total - i;
-                  break;
+                if (reused) {
+                  recordGeneration({
+                    userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                    promptText: '(idempotent pending redelivery)',
+                    modelId, bodyType, skinTone, aspectRatio,
+                    apiModel: requestedApiModel,
+                    success: true, apiLatencyMs: 0,
+                  }).catch(err => console.error('[recordGeneration]', err));
+                  successCount++;
+                  continue;
                 }
-                successCount++;
-                continue;
               }
 
               // —— 钱已扣：任何失败/异常/断开都必须退款 ——
@@ -1155,7 +1178,7 @@ export async function POST(req: NextRequest) {
               } catch (innerErr) {
                 const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
                 logTimings();
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
                   promptText: prompt || '(throw before prompt built)',
@@ -1185,7 +1208,7 @@ export async function POST(req: NextRequest) {
 
               if (result.success && result.data) {
                 if (clientClosed) {
-                  await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
+                  await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                   failedCount++;
                   break;
                 }
@@ -1203,14 +1226,14 @@ export async function POST(req: NextRequest) {
                 });
                 // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
                 if (clientClosed) {
-                  await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
+                  await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                   failedCount++;
                   break;
                 }
                 successCount++;
               } else {
                 failedCount++;
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 失败退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 失败退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
                 push('error', {
                   shotIndex: refSeq, current: i + 1, total,
                   message: `${result.error ?? '生成失败（未知原因）'}（已自动退款）`,
@@ -1296,7 +1319,7 @@ export async function POST(req: NextRequest) {
             idempotencyKey,
           );
           if (!sceneDeduction.success) {
-            const errMsg = `扣费失败: ${sceneDeduction.error || '未知错误'}`;
+            const errMsg = await generationDeductionErrorMessage(auth.userId, sceneDeduction.error, false);
             push('error', {
               shotIndex: 0,
               current: 1,
@@ -1321,13 +1344,22 @@ export async function POST(req: NextRequest) {
               current: 1,
               total: 1,
             });
-            push('done', {
-              successCount: reused ? 1 : 0,
-              failedCount: reused ? 0 : 1,
-              totalSeconds: Math.round((Date.now() - startTime) / 1000),
-            });
-            controller.close();
-            return;
+            if (reused) {
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'scene', shotIndex: 0,
+                promptText: '(idempotent pending redelivery)',
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: requestedApiModel,
+                success: true, apiLatencyMs: 0,
+              }).catch(err => console.error('[recordGeneration]', err));
+              push('done', {
+                successCount: 1,
+                failedCount: 0,
+                totalSeconds: Math.round((Date.now() - startTime) / 1000),
+              });
+              controller.close();
+              return;
+            }
           }
 
           const modelConfig = modelId ? MODELS.find(m => m.id === modelId) : undefined;
@@ -1377,7 +1409,7 @@ export async function POST(req: NextRequest) {
             }
           } catch (innerErr) {
             const msg = innerErr instanceof Error ? innerErr.message : '生成异常';
-            await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId);
+            await refundBalance(auth.userId, costFen, `${chargeLabel} 异常退款`, taskId, idempotencyKey, sceneDeduction.consumeTransactionId);
             recordGeneration({
               userId: auth.userId, taskId, module: 'scene',
               promptText: prompt || '(throw before prompt built)',
@@ -1414,7 +1446,7 @@ export async function POST(req: NextRequest) {
           if (result.success && result.data) {
             // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款（记录已在上面记为 disconnect 失败）。
             if (clientClosed) {
-              await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId);
+              await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, sceneDeduction.consumeTransactionId);
               failedCount = 1;
             } else {
               await deliverResult(push, auth.userId, taskId, {
@@ -1428,7 +1460,7 @@ export async function POST(req: NextRequest) {
               });
               // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
               if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId);
+                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, sceneDeduction.consumeTransactionId);
                 failedCount = 1;
               } else {
                 successCount = 1;
@@ -1441,6 +1473,8 @@ export async function POST(req: NextRequest) {
               costFen,
               `${chargeLabel} 失败退款`,
               taskId,
+              idempotencyKey,
+              sceneDeduction.consumeTransactionId,
             );
             push('error', {
               shotIndex: 0,
