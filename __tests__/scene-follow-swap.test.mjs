@@ -14,13 +14,15 @@ const followSceneWithAnchor = () => api.buildSceneGroupPrompt({
   hasAnchor: true,
 });
 
-test('follow_scene one-pass prompt carries anchor face identity plus scene-base skin/hair/body', () => {
+test('follow_scene one-pass prompt keeps the scene person and uses the anchor to confirm that same identity', () => {
   const prompt = followSceneWithAnchor();
 
-  assert.match(prompt, /REPLACE #2 - Person: Replace the person with the SAME fictional FACE identity/);
-  assert.match(prompt, /The anchor is the ONLY facial identity reference/);
+  assert.match(prompt, /same person/i);
+  assert.match(prompt, /face identity must match the anchor/i);
+  assert.match(prompt, /must not replace her with another person/i);
   assert.match(prompt, /DO NOT copy the anchor's skin complexion\/tone/);
   assert.match(prompt, /paler, pinker, lighter, or less tanned skin is a FAILURE/);
+  assert.doesNotMatch(prompt, /Eurasian|East-Asian|partial face swap/i);
 });
 
 test('skin tone continuity block outranks the realism block and pins texture to the neck brightness', () => {
@@ -55,7 +57,7 @@ test('lower-face identity source follows whether an anchor is attached', () => {
     hasAnchor: false,
   });
 
-  assert.match(withoutAnchor, /take the new model's lip outline and cupid's bow/);
+  assert.match(withoutAnchor, /match the scene-base person's lip outline and cupid's bow/);
   assert.doesNotMatch(withoutAnchor, /take the anchor's lip outline/);
 });
 
@@ -116,6 +118,22 @@ test('derived follow-scene anchor uses the final head-and-shoulders identity por
   assert.match(derivedBlock, /85mm lens/);
   assert.match(derivedBlock, /face filling roughly 40%/);
   assert.match(derivedBlock, /rendered at pore level/);
+  assert.match(derivedBlock, /same fictional woman shown in the uploaded scene reference image/);
+  assert.match(derivedBlock, /Strictly match the ethnicity, face shape, facial features, hair color, and hairstyle/);
+  assert.match(derivedBlock, /Slight beautification is allowed, but do not change her ethnicity or overall appearance/);
+  assert.doesNotMatch(derivedBlock, /subtle East-Asian eyelid|Eurasian mixed European-Asian/);
+});
+
+test('follow_scene derived anchor alone selects its configurable Pro model', () => {
+  const backendSource = fs.readFileSync('lib/image-backends.ts', 'utf8');
+  const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
+
+  assert.match(backendSource, /DERIVED_ANCHOR_MODEL.*process\.env\.DERIVED_ANCHOR_MODEL.*gemini-3-pro-image/);
+  assert.match(backendSource, /promptPurpose\?: 'compose' \| 'faceswap' \| 'derived-anchor'/);
+  assert.match(routeSource, /promptPurpose: 'derived-anchor'/);
+  assert.match(routeSource, /sceneRefImages: \[sceneRefImages\[0\]\]/);
+  assert.match(backendSource, /input\.promptPurpose === 'derived-anchor'/);
+  assert.match(backendSource, /return backend === 'openai' \? OPENAI_MODEL : GEMINI_MODEL/);
 });
 
 test('every remaining long phase still heartbeats', () => {
@@ -301,7 +319,11 @@ test('face library ships 3 eurasian + 7 western with genuinely distinct face sha
   // 欧美档必须明确排除东亚长相，否则底模会漂回混血脸
   assert.match(apiSource, /must NOT read as East Asian or mixed-Asian/);
 
-  // 自动创建的派生锚不受影响：它那份「美亚混血」方向是 A.3.3 真图验证后定死的
-  assert.match(apiSource, /export function buildDerivedAnchorPortraitPrompt/);
-  assert.match(apiSource, /subtle East-Asian eyelid/);
+  // 09-04 用户拍板：自动派生锚必须就是场景图里那个人，不再继承脸库的族裔配方。
+  const derivedBlock = apiSource.slice(
+    apiSource.indexOf('export function buildDerivedAnchorPortraitPrompt'),
+    apiSource.indexOf('export type ModelFaceEthnicity'),
+  );
+  assert.match(derivedBlock, /same fictional woman shown in the uploaded scene reference image/);
+  assert.doesNotMatch(derivedBlock, /Eurasian|East-Asian/);
 });

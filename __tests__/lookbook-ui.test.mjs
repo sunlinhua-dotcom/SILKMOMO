@@ -11,6 +11,8 @@ test('lookbook defaults to follow_scene and shows that option first', () => {
   assert.match(source, /useState<ModelIdentityMode>\('follow_scene'\)/);
   assert.ok(firstFollowSceneIndex !== -1 && firstFreshIndex !== -1);
   assert.ok(firstFollowSceneIndex < firstFreshIndex, 'follow_scene option should render before fresh');
+  assert.match(source, /与场景图里的模特是同一个人：肤色、发型发色、体型、五官都还原参考图/);
+  assert.doesNotMatch(source, /仅对五官做局部调整（部分换脸）/);
 });
 
 test('lookbook swap tab places model before optional accessories with contiguous numbering', () => {
