@@ -133,17 +133,20 @@ model GenerationRecord {
 /// 断网重连后还能按 taskId 把没取走的补拉回来，根治断网丢图。
 /// 遗留未取走的由 TTL 清理（见 lib/pending-image.ts）。
 model PendingImage {
-  id        String   @id @default(cuid())
-  userId    String // 取图时校验归属，防越权
-  taskId    Int // Dexie Project.id
-  shotIndex Int      @default(0)
-  data      String // base64（交接用，取走即删）
-  mimeType  String   @default("image/png")
-  width     Int      @default(0)
-  height    Int      @default(0)
-  createdAt DateTime @default(now())
+  id             String   @id @default(cuid())
+  userId         String // 取图时校验归属，防越权
+  taskId         Int // Dexie Project.id
+  shotIndex      Int      @default(0)
+  kind           String   @default("result") // result | anchor
+  idempotencyKey String?  @unique // 已扣费结果与 run 级流水关联；锚和老客户端为空
+  data           String // base64（交接用，取走即删）
+  mimeType       String   @default("image/png")
+  width          Int      @default(0)
+  height         Int      @default(0)
+  createdAt      DateTime @default(now())
 
   @@index([userId, taskId])
+  @@index([kind, createdAt])
   @@index([createdAt])
 }
 

@@ -3,6 +3,7 @@
  * Ledger 模式 + 原子操作扣费
  */
 import prisma from './prisma';
+import { deductGenerationBalanceInTransaction } from './generation-billing-core';
 export { PRICING, RECHARGE_PACKAGES } from './billing-constants'
 
 function assertValidCostFen(costFen: number): number {
@@ -30,46 +31,33 @@ export async function deductBalance(
   costFen: number,
   description: string,
   projectId?: number,
-  apiModel: string = 'gemini-3.1-flash-image-preview'
-): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
+  apiModel: string = 'gemini-3.1-flash-image-preview',
+  idempotencyKey?: string,
+): Promise<{ success: boolean; balanceAfter: number; idempotent?: boolean; error?: string }> {
   try {
     const cost = assertValidCostFen(costFen);
-    const result = await prisma.$transaction(async (tx) => {
-      // 1+2. 原子条件扣费：余额不足时 where 不命中任何行。
-      // 不能先 findUnique 再 update —— 普通 SELECT 不加行锁，
-      // 并发请求会同时通过余额检查导致双花 / 负余额。
-      const updated = await tx.user.updateMany({
-        where: { id: userId, balanceFen: { gte: cost } },
-        data: { balanceFen: { decrement: cost } },
-      });
-      if (updated.count === 0) {
-        const user = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
-        if (!user) throw new Error('用户不存在');
-        throw new Error('余额不足');
-      }
-      const after = await tx.user.findUniqueOrThrow({
-        where: { id: userId },
-        select: { balanceFen: true },
-      });
+    const result = await prisma.$transaction(tx => deductGenerationBalanceInTransaction(tx, {
+      userId,
+      costFen: cost,
+      description,
+      projectId,
+      apiModel,
+      idempotencyKey,
+    }));
 
-      // 3. 记录流水
-      await tx.transaction.create({
-        data: {
-          userId,
-          type: 'consume',
-          amountFen: -cost,
-          balanceAfter: after.balanceFen,
-          description,
-          apiModel,
-          projectId,
-        },
-      });
-
-      return { balanceAfter: after.balanceFen };
-    });
-
-    return { success: true, balanceAfter: result.balanceAfter };
+    return { success: true, balanceAfter: result.balanceAfter, idempotent: result.idempotent };
   } catch (error) {
+    // 两个并发请求都在事务内查不到键时，唯一索引决定胜者；败者事务整体回滚（含扣款），
+    // 再读取胜者流水即可安全复用。
+    if (idempotencyKey && typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+      const existing = await prisma.transaction.findUnique({
+        where: { idempotencyKey },
+        select: { userId: true, type: true, balanceAfter: true },
+      });
+      if (existing?.userId === userId && existing.type === 'consume') {
+        return { success: true, balanceAfter: existing.balanceAfter, idempotent: true };
+      }
+    }
     const msg = error instanceof Error ? error.message : '扣费失败';
     return { success: false, balanceAfter: 0, error: msg };
   }

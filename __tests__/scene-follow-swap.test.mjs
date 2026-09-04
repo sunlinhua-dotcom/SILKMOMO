@@ -160,7 +160,8 @@ test('client event watchdog stays above the server single-shot ceiling', () => {
 test('finalization recomputes the remaining count instead of reusing a mid-run snapshot', () => {
   const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
 
-  assert.match(taskSource, /const finalRemaining = Math\.max\(0, grandTotal - successCount\)/);
+  assert.match(taskSource, /const recovery = await recoverPendingImages\(taskId, expectedShotIndexes\)/);
+  assert.match(taskSource, /const finalRemaining = outcome\.remaining\.length/);
   // 全部出齐时红条要被清掉，而不是继续挂着中途那条过期文案
   assert.match(taskSource, /setErrorMessage\(persistedError \?\? null\)/);
   assert.match(taskSource, /buildFriendlyConnectionErrorMessage\(successCount, finalRemaining\)/);
@@ -175,7 +176,7 @@ test('anchor pushed to the client is shrunk server-side first', () => {
   // 事件看门狗在下载期间收不到完整事件。
   assert.match(postSource, /export async function shrinkAnchorForClient/);
   assert.match(routeSource, /const anchorForClient = await shrinkAnchorForClient\(anchorResult\.data, anchorImage\.mimeType\)/);
-  assert.match(routeSource, /push\('anchor', \{ imageData: anchorForClient\.data, mimeType: anchorForClient\.mimeType \}\)/);
+  assert.match(routeSource, /await deliverAnchor\(push, auth\.userId, taskId, anchorForClient\.data, anchorForClient\.mimeType\)/);
   // fail-open：压缩异常绝不能影响出图链路
   assert.match(postSource, /\} catch \{\s*\n\s*return \{ data: b64, mimeType: inputMimeType \};/);
 });
@@ -211,7 +212,8 @@ test('generated images are handed off by id, not pushed through SSE', () => {
   // 4~5MB 的图作为一条 data: 行是 0731 客户「生成失败」的根因；改为只推 id。
   assert.doesNotMatch(routeSource, /push\('result', \{[\s\S]{0,120}imageData: result\.data/);
   assert.match(routeSource, /async function deliverResult/);
-  assert.match(routeSource, /\.\.\.\(pendingId \? \{ pendingId \} : \{ imageData: payload\.data \}\)/);
+  assert.match(routeSource, /const prepared = await preparePendingDelivery\(storePendingImage/);
+  assert.match(routeSource, /\.\.\.prepared\.payload/);
   // fail-open：交接缓冲写失败必须回退直推，不能让已扣费的图丢掉
   assert.match(routeSource, /storePendingImage/);
 
@@ -237,8 +239,8 @@ test('disconnect auto-continues once, only for stalls, and never for fatal error
 
   assert.match(taskSource, /if \(finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef\.current\)/);
   // 必须等 generating 落回 false 再触发：同步递归会被 handleStartGeneration 自己的闸门挡回去
-  assert.match(taskSource, /if \(generating \|\| !pendingAutoRetryRef\.current\) return;/);
-  assert.match(taskSource, /void handleGenerateRemaining\(\);/);
+  assert.match(taskSource, /if \(generating \|\| !pendingAutoRetryRunIdRef\.current\) return;/);
+  assert.match(taskSource, /void handleGenerateRemaining\(runId\);/);
 });
 
 test('garment analysis is reused across chunks instead of re-run every time', () => {

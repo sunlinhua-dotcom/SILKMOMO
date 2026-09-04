@@ -31,7 +31,9 @@ import { generateImage as generateBackendImage, normalizeBackend, resolveApiMode
 import { recordGeneration } from '@/lib/generation-record';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_SHOTS, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES, sizeToAspectRatio } from '@/lib/models';
 import { normalizeGeneratedImage, shrinkAnchorForClient } from '@/lib/postprocess';
-import { storePendingImage } from '@/lib/pending-image';
+import { findPendingImageByIdempotencyKey, storePendingImage } from '@/lib/pending-image';
+import { preparePendingDelivery } from '@/lib/pending-delivery-core';
+import { createSseBackpressureObserver } from '@/lib/sse-backpressure';
 import { getRandomFavoriteModelFace } from '@/lib/model-face-library';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
@@ -89,6 +91,7 @@ interface GenerateStreamRequest {
   anchorImage?: ImageInput;
   garmentDescription?: string;
   anchorIsUserChosen?: boolean; // true=用户在脸库里挑的脸（新任务），false/缺省=单张重做回传的锚
+  runId?: string; // 一次用户点击生成一个；同次自动补齐沿用，作为逐镜次扣费幂等域
 }
 
 // ═══ 入参防线：参考图数量 / 单图体积 / MIME 白名单 ═══
@@ -234,26 +237,80 @@ async function deliverResult(
     height: number;
     current: number;
     total: number;
+    idempotencyKey?: string;
   },
 ): Promise<void> {
-  const pendingId = await storePendingImage({
+  const prepared = await preparePendingDelivery(storePendingImage, {
+    kind: 'result',
     userId,
     taskId,
     shotIndex: payload.shotIndex,
     data: payload.data,
+    mimeType: 'image/png',
     width: payload.width,
     height: payload.height,
+    idempotencyKey: payload.idempotencyKey,
   });
 
   push('result', {
     shotIndex: payload.shotIndex,
-    // 拿到 id 就不带 imageData；没拿到才回退直推
-    ...(pendingId ? { pendingId } : { imageData: payload.data }),
+    ...prepared.payload,
     width: payload.width,
     height: payload.height,
     current: payload.current,
     total: payload.total,
   });
+}
+
+async function deliverAnchor(
+  push: StreamPush,
+  userId: string,
+  taskId: number,
+  data: string,
+  mimeType: string,
+): Promise<void> {
+  const prepared = await preparePendingDelivery(storePendingImage, {
+    kind: 'anchor',
+    userId,
+    taskId,
+    shotIndex: 0,
+    data,
+    mimeType,
+    width: 0,
+    height: 0,
+  });
+  push('anchor', prepared.payload);
+}
+
+const PAID_DELIVERY_RECOVERY_ERROR = '该镜次已付费，请刷新取回';
+
+function generationIdempotencyKey(
+  userId: string,
+  taskId: number,
+  shotIndex: number,
+  runId: string | undefined,
+): string | undefined {
+  return runId ? `${userId}:${taskId}:${shotIndex}:${runId}` : undefined;
+}
+
+async function redeliverIdempotentResult(
+  push: StreamPush,
+  userId: string,
+  idempotencyKey: string,
+  meta: { shotIndex: number; current: number; total: number },
+): Promise<boolean> {
+  const pending = await findPendingImageByIdempotencyKey(userId, idempotencyKey);
+  if (!pending) {
+    push('error', { ...meta, message: PAID_DELIVERY_RECOVERY_ERROR, fatal: true });
+    return false;
+  }
+  push('result', {
+    ...meta,
+    pendingId: pending.id,
+    width: pending.width,
+    height: pending.height,
+  });
+  return true;
 }
 
 // 旧版内联实现 callGeminiApi / buildParts 已删除。
@@ -303,6 +360,7 @@ export async function POST(req: NextRequest) {
     sceneGroupGarmentCategories,
     garmentDescription: clientGarmentDescription,
     anchorIsUserChosen,
+    runId: rawRunId,
     customPrompt,
     engine: rawEngine,
     quality: rawQuality,
@@ -318,6 +376,12 @@ export async function POST(req: NextRequest) {
   const sceneGroupMode: 'swap' | 'products' = rawSceneGroupMode === 'products' ? 'products' : 'swap';
   const modelIdentityMode: 'fresh' | 'follow_scene' = rawModelIdentityMode === 'follow_scene' ? 'follow_scene' : 'fresh';
   const productImages = Array.isArray(rawProductImages) ? rawProductImages : [];
+  const runId = typeof rawRunId === 'string' && /^[A-Za-z0-9_-]{8,100}$/.test(rawRunId)
+    ? rawRunId
+    : undefined;
+  if (rawRunId !== undefined && !runId) {
+    return new Response(JSON.stringify({ error: 'runId 非法' }), { status: 400 });
+  }
 
   // 截断防止滥用（DoS / token 浪费）
   const safeCustomPrompt = typeof customPrompt === 'string' && customPrompt.trim()
@@ -396,11 +460,16 @@ export async function POST(req: NextRequest) {
       let clientClosed = false;
       const onAbort = () => { clientClosed = true; };
       req.signal.addEventListener('abort', onAbort);
+      const observeBackpressure = createSseBackpressureObserver({
+        thresholdMs: 30_000,
+        log: data => console.warn('[sse-backpressure]', { taskId, ...data }),
+      });
 
       const push = (type: string, data: unknown) => {
         if (clientClosed) return;
         try {
           controller.enqueue(new TextEncoder().encode(sseEvent(type, data)));
+          observeBackpressure(controller.desiredSize);
         } catch {
           // controller 已关闭 / 客户端已断开
           clientClosed = true;
@@ -413,10 +482,14 @@ export async function POST(req: NextRequest) {
         if (clientClosed) return;
         try {
           controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'));
+          observeBackpressure(controller.desiredSize);
         } catch {
           clientClosed = true;
         }
       }, 25_000);
+      const backpressureMonitor = setInterval(() => {
+        if (!clientClosed) observeBackpressure(controller.desiredSize);
+      }, 5_000);
 
       const startTime = Date.now();
       let successCount = 0;
@@ -440,8 +513,8 @@ export async function POST(req: NextRequest) {
           const declaredWidth = outputSize === 'custom' ? customWidth : outputSizeConfig.width;
           const declaredHeight = outputSize === 'custom' ? customHeight : outputSizeConfig.height;
 
-          const preflightBalance = await checkBalance(auth.userId, costFen);
-          if (!preflightBalance.sufficient) {
+          const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+          if (preflightBalance && !preflightBalance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
             const firstShot = shotConfigs[0];
             push('error', {
@@ -504,8 +577,8 @@ export async function POST(req: NextRequest) {
 
             // 余额检查 + 扣费
             const chargeLabel = chargeDescription(`生成镜次 #${shot.index}`);
-            const balance = await checkBalance(auth.userId, costFen);
-            if (!balance.sufficient) {
+            const balance = runId ? null : await checkBalance(auth.userId, costFen);
+            if (balance && !balance.sufficient) {
               const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
               push('error', {
                 shotIndex: shot.index,
@@ -526,7 +599,15 @@ export async function POST(req: NextRequest) {
               break;
             }
 
-            const deduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
+            const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, shot.index, runId);
+            const deduction = await deductBalance(
+              auth.userId,
+              costFen,
+              chargeLabel,
+              taskId,
+              requestedApiModel,
+              idempotencyKey,
+            );
             if (!deduction.success) {
               const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
               push('error', {
@@ -545,6 +626,19 @@ export async function POST(req: NextRequest) {
               }).catch(err => console.error('[recordGeneration]', err));
               failedCount += total - i;
               break;
+            }
+            if (deduction.idempotent && idempotencyKey) {
+              const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+                shotIndex: shot.index,
+                current: i + 1,
+                total,
+              });
+              if (!reused) {
+                failedCount += total - i;
+                break;
+              }
+              successCount++;
+              continue;
             }
 
             // —— 从这里起，钱已扣；任何失败 / 异常 / 客户端断开都必须退款 ——
@@ -658,6 +752,7 @@ export async function POST(req: NextRequest) {
                 height: resultHeight,
                 current: i + 1,
                 total,
+                idempotencyKey,
               });
               // 上面的闸门只挡住"推流前就已知的断开"。若断连是由 push 内 enqueue 抛错
               // 才暴露的（心跳 25s 一次，req.signal 未必先到），这里是唯一的感知时机——
@@ -740,8 +835,8 @@ export async function POST(req: NextRequest) {
             }
             const total = targetIndexes.length;
 
-            const preflightBalance = await checkBalance(auth.userId, costFen);
-            if (!preflightBalance.sufficient) {
+            const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+            if (preflightBalance && !preflightBalance.sufficient) {
               const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
               const firstTarget = targetIndexes[0] ?? 0;
               push('error', { shotIndex: firstTarget, current: 1, total, message: errMsg, fatal: true });
@@ -782,7 +877,7 @@ export async function POST(req: NextRequest) {
               if (favorite) {
                 anchorImage = { data: favorite.image, mimeType: favorite.mimeType };
                 const anchorForClient = await shrinkAnchorForClient(favorite.image, favorite.mimeType);
-                push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
+                await deliverAnchor(push, auth.userId, taskId, anchorForClient.data, anchorForClient.mimeType);
               }
             }
 
@@ -888,7 +983,7 @@ export async function POST(req: NextRequest) {
                   // 本来就会归一化成同样的 1434x1920 JPEG。原样推＝白下载一条 2.9MB 的
                   // 大 data: 行（0731 实测），客户端落地后还得再压一次。
                   const anchorForClient = await shrinkAnchorForClient(anchorResult.data, anchorImage.mimeType);
-                  push('anchor', { imageData: anchorForClient.data, mimeType: anchorForClient.mimeType });
+                  await deliverAnchor(push, auth.userId, taskId, anchorForClient.data, anchorForClient.mimeType);
                 } else {
                   console.log('[sceneGroup] 肖像卡生成失败，回退首张成功图作锚:', anchorResult.error);
                 }
@@ -946,13 +1041,13 @@ export async function POST(req: NextRequest) {
               });
 
               const phaseMeta = { current: i + 1, total, shotIndex: refSeq };
-              const balance = await withPhaseBeat(
+              const balance = runId ? null : await withPhaseBeat(
                 push,
                 '正在核对余额',
                 phaseMeta,
                 () => checkBalance(auth.userId, costFen),
               );
-              if (!balance.sufficient) {
+              if (balance && !balance.sufficient) {
                 const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}），已停止生成`;
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
                 recordGeneration({
@@ -967,11 +1062,12 @@ export async function POST(req: NextRequest) {
               }
 
               const chargeLabel = chargeDescription(sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`);
+              const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, refSeq, runId);
               const deduction = await withPhaseBeat(
                 push,
                 '正在核对余额',
                 phaseMeta,
-                () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel),
+                () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel, idempotencyKey),
               );
               if (!deduction.success) {
                 const errMsg = `扣费失败: ${deduction.error || '未知错误'}`;
@@ -985,6 +1081,19 @@ export async function POST(req: NextRequest) {
                 }).catch(err => console.error('[recordGeneration]', err));
                 failedCount += total - i;
                 break;
+              }
+              if (deduction.idempotent && idempotencyKey) {
+                const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+                  shotIndex: refSeq,
+                  current: i + 1,
+                  total,
+                });
+                if (!reused) {
+                  failedCount += total - i;
+                  break;
+                }
+                successCount++;
+                continue;
               }
 
               // —— 钱已扣：任何失败/异常/断开都必须退款 ——
@@ -1090,6 +1199,7 @@ export async function POST(req: NextRequest) {
                   height: resultHeight,
                   current: i + 1,
                   total,
+                  idempotencyKey,
                 });
                 // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
                 if (clientClosed) {
@@ -1110,8 +1220,8 @@ export async function POST(req: NextRequest) {
               }
             }
           } else {
-          const preflightBalance = await checkBalance(auth.userId, costFen);
-          if (!preflightBalance.sufficient) {
+          const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+          if (preflightBalance && !preflightBalance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}）`;
             push('error', {
               shotIndex: 0,
@@ -1154,8 +1264,8 @@ export async function POST(req: NextRequest) {
 
           // 余额 + 扣费
           const chargeLabel = chargeDescription('场景图生成');
-          const balance = await checkBalance(auth.userId, costFen);
-          if (!balance.sufficient) {
+          const balance = runId ? null : await checkBalance(auth.userId, costFen);
+          if (balance && !balance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(balance.balanceFen / 100).toFixed(2)}）`;
             push('error', {
               shotIndex: 0,
@@ -1176,7 +1286,15 @@ export async function POST(req: NextRequest) {
             return;
           }
 
-          const sceneDeduction = await deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel);
+          const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, 0, runId);
+          const sceneDeduction = await deductBalance(
+            auth.userId,
+            costFen,
+            chargeLabel,
+            taskId,
+            requestedApiModel,
+            idempotencyKey,
+          );
           if (!sceneDeduction.success) {
             const errMsg = `扣费失败: ${sceneDeduction.error || '未知错误'}`;
             push('error', {
@@ -1194,6 +1312,20 @@ export async function POST(req: NextRequest) {
               success: false, apiLatencyMs: 0, errorMessage: errMsg,
             }).catch(err => console.error('[recordGeneration]', err));
             push('done', { successCount: 0, failedCount: 1, totalSeconds: 0 });
+            controller.close();
+            return;
+          }
+          if (sceneDeduction.idempotent && idempotencyKey) {
+            const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+              shotIndex: 0,
+              current: 1,
+              total: 1,
+            });
+            push('done', {
+              successCount: reused ? 1 : 0,
+              failedCount: reused ? 0 : 1,
+              totalSeconds: Math.round((Date.now() - startTime) / 1000),
+            });
             controller.close();
             return;
           }
@@ -1292,6 +1424,7 @@ export async function POST(req: NextRequest) {
                 height: resultHeight,
                 current: 1,
                 total: 1,
+                idempotencyKey,
               });
               // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
               if (clientClosed) {
@@ -1353,6 +1486,7 @@ export async function POST(req: NextRequest) {
         push('done', { successCount, failedCount: failedCount + 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
       } finally {
         clearInterval(heartbeat);
+        clearInterval(backpressureMonitor);
         req.signal.removeEventListener('abort', onAbort);
         try { controller.close(); } catch { /* 已 close */ }
       }
