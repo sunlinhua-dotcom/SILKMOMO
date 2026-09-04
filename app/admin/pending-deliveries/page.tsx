@@ -20,6 +20,7 @@ export default function PendingDeliveriesPage() {
   const [records, setRecords] = useState<PendingDelivery[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [hasMore, setHasMore] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -29,6 +30,7 @@ export default function PendingDeliveriesPage() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '加载失败');
       setRecords(data.records || []);
+      setHasMore(data.hasMore === true);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败');
     } finally {
@@ -64,6 +66,11 @@ export default function PendingDeliveriesPage() {
           </button>
         </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
+        {hasMore && (
+          <p className="text-sm text-amber-700">
+            当前仅显示最早的 200 条，仍有更多记录；请优先处理本页后刷新。
+          </p>
+        )}
         <div className="bg-white rounded-2xl border border-[var(--color-border-light)] overflow-x-auto">
           <table className="w-full text-xs">
             <thead className="bg-[var(--color-background)] text-[var(--color-text-muted)]">
