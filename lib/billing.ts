@@ -3,7 +3,10 @@
  * Ledger 模式 + 原子操作扣费
  */
 import prisma from './prisma';
-import { deductGenerationBalanceInTransaction } from './generation-billing-core';
+import {
+  deductGenerationBalanceInTransaction,
+  refundGenerationBalanceInTransaction,
+} from './generation-billing-core';
 export { PRICING, RECHARGE_PACKAGES } from './billing-constants'
 
 function assertValidCostFen(costFen: number): number {
@@ -33,7 +36,13 @@ export async function deductBalance(
   projectId?: number,
   apiModel: string = 'gemini-3.1-flash-image-preview',
   idempotencyKey?: string,
-): Promise<{ success: boolean; balanceAfter: number; idempotent?: boolean; error?: string }> {
+): Promise<{
+  success: boolean;
+  balanceAfter: number;
+  idempotent?: boolean;
+  consumeTransactionId?: string;
+  error?: string;
+}> {
   try {
     const cost = assertValidCostFen(costFen);
     const result = await prisma.$transaction(tx => deductGenerationBalanceInTransaction(tx, {
@@ -45,17 +54,27 @@ export async function deductBalance(
       idempotencyKey,
     }));
 
-    return { success: true, balanceAfter: result.balanceAfter, idempotent: result.idempotent };
+    return {
+      success: true,
+      balanceAfter: result.balanceAfter,
+      idempotent: result.idempotent,
+      consumeTransactionId: result.consumeTransactionId,
+    };
   } catch (error) {
     // 两个并发请求都在事务内查不到键时，唯一索引决定胜者；败者事务整体回滚（含扣款），
     // 再读取胜者流水即可安全复用。
     if (idempotencyKey && typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
       const existing = await prisma.transaction.findUnique({
         where: { idempotencyKey },
-        select: { userId: true, type: true, balanceAfter: true },
+        select: { id: true, userId: true, type: true, balanceAfter: true },
       });
       if (existing?.userId === userId && existing.type === 'consume') {
-        return { success: true, balanceAfter: existing.balanceAfter, idempotent: true };
+        return {
+          success: true,
+          balanceAfter: existing.balanceAfter,
+          idempotent: true,
+          consumeTransactionId: existing.id,
+        };
       }
     }
     const msg = error instanceof Error ? error.message : '扣费失败';
@@ -115,30 +134,21 @@ export async function refundBalance(
   userId: string,
   amountFen: number,
   description: string,
-  projectId?: number
+  projectId?: number,
+  idempotencyKey?: string,
+  consumeTransactionId?: string,
 ): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
   if (amountFen <= 0) return { success: true, balanceAfter: 0 };
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
-      const updated = await tx.user.update({
-        where: { id: userId },
-        data: { balanceFen: { increment: amountFen } },
-      });
-
-      await tx.transaction.create({
-        data: {
-          userId,
-          type: 'refund',
-          amountFen: amountFen,
-          balanceAfter: updated.balanceFen,
-          description,
-          projectId,
-        },
-      });
-
-      return { balanceAfter: updated.balanceFen };
-    });
+    const result = await prisma.$transaction(tx => refundGenerationBalanceInTransaction(tx, {
+      userId,
+      amountFen,
+      description,
+      projectId,
+      idempotencyKey,
+      consumeTransactionId,
+    }));
 
     return { success: true, balanceAfter: result.balanceAfter };
   } catch (error) {
