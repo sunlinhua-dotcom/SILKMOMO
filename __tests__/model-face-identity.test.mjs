@@ -59,8 +59,8 @@ test('fresh anchor is explicitly complete while follow_scene keeps the scene per
   assert.match(fresh, /COMPLETE IDENTITY ANCHOR/);
   assert.match(fresh, /face, hair, hairline, complexion, and age/);
   assert.doesNotMatch(follow, /COMPLETE IDENTITY ANCHOR/);
-  assert.match(follow, /anchor confirms face/i);
-  assert.match(follow, /SKIN TONE CONTINUITY/);
+  assert.match(follow, /DO NOT copy the anchor's skin complexion\/tone/);
+  assert.match(follow, /scene-base person's exact skin tone/);
   assert.match(follow, /same person/i);
   assert.doesNotMatch(follow, /Eurasian|East-Asian|partial face swap/i);
   assert.match(fresh, /visible skin complexion.*anchor/i);
@@ -88,11 +88,11 @@ test('fresh renders texture at its identity complexion brightness and rejects a 
   }
 });
 
-test('09-04 提示词优化后，follow_scene 新文本保持字节级稳定', () => {
+test('09-04 仅改派生锚年龄与美化句，follow_scene 新文本保持字节级稳定', () => {
   const cases = [
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: false }, '925924fc08cf33ba50e916ebbf0477a8e6ad01d9fb6d6fa8676c8a29763cd12a'],
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true }, '155239846787e3b376b6fa2af32bf67ea3c30f413ae0160d41f22f9fb3bc8650'],
-    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true, hasReplacementAccessory: true, isRegeneration: true, sceneGroupMode: 'products', productLabel: 'Set A', garmentCategories: ['dress'], customPrompt: 'keep rain' }, 'ee6dd7af35706cd5697b540c03f672d5fd61644a0589e0037ed72ce4f4bc6ea3'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: false }, '9be0a79bf5fbd3975d9319c156b074778072b5d5ab0055fac027adfb92318a00'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true }, 'f04d3dd6f48007f76e5ab49b558a6c898d043493944fbafe76f97717dc001c6f'],
+    [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true, hasReplacementAccessory: true, isRegeneration: true, sceneGroupMode: 'products', productLabel: 'Set A', garmentCategories: ['dress'], customPrompt: 'keep rain' }, 'bc17e539f16966ab13e08534c4f7316bc7e8d07feb5a092c6d1aeccac05ee463'],
   ];
 
   for (const [options, expectedHash] of cases) {
@@ -105,29 +105,13 @@ test('09-04 提示词优化后，follow_scene 新文本保持字节级稳定', (
   const derivedPrompt = api.buildDerivedAnchorPortraitPrompt();
   assert.equal(
     crypto.createHash('sha256').update(derivedPrompt).digest('hex'),
-    'b681ea18d5dabd00cfeb259519a9fe8c8388bdac72478014cecce898cc878f22',
+    '26589ff9633063b9eeeb522287892675f530fbe31cd80fe5c2044b6afb016ef1',
   );
-});
-
-test('09-04 提示词优化合并肤色裁决并移除人物替换框架与派生锚美化', () => {
-  const follow = api.buildSceneGroupPrompt({
-    garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: true,
-  });
-  const derived = api.buildDerivedAnchorPortraitPrompt();
-
-  assert.ok((follow.match(/paler/gi) || []).length <= 2, 'follow_scene 中 paler 不应重复堆叠');
-  assert.ok((follow.match(/pinker/gi) || []).length <= 2, 'follow_scene 中 pinker 不应重复堆叠');
-  assert.match(follow, /Render every pore, texture break and film grain AT the neck's own brightness/);
-  assert.match(follow, /A face that reads lighter, paler, cooler, or flatter than the neck below it is a failure/);
-  assert.doesNotMatch(follow, /REPLACE #2 - Person/);
-  assert.match(follow, /PERSON: unchanged .* same person as scene-base; anchor confirms face/i);
-
-  assert.doesNotMatch(derived, /24-28/);
-  assert.doesNotMatch(derived, /beautification is allowed/i);
-  assert.match(derived, /apparent age matches the scene reference/i);
-  assert.match(derived, /clean commercial retouching/i);
-  assert.match(derived, /skin exposure and brightness.*neck and chest.*scene reference/i);
-  assert.match(derived, /no studio-style brightening/i);
+  assert.match(derivedPrompt, /apparent age matches the scene reference/i);
+  assert.match(derivedPrompt, /Only clean commercial retouching is allowed/);
+  assert.match(derivedPrompt, /do not change any facial feature, facial proportion, or recognizable appearance/i);
+  assert.doesNotMatch(derivedPrompt, /24-28/);
+  assert.doesNotMatch(derivedPrompt, /beautification is allowed/i);
 });
 
 test('fresh prompt hashes stay byte-for-byte unchanged by the 09-04 follow_scene identity change', () => {

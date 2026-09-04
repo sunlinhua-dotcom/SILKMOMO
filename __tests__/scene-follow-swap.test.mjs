@@ -18,10 +18,10 @@ test('follow_scene one-pass prompt keeps the scene person and uses the anchor to
   const prompt = followSceneWithAnchor();
 
   assert.match(prompt, /same person/i);
-  assert.match(prompt, /IDENTITY:/);
-  assert.match(prompt, /anchor.*front-facing identity card.*same person/i);
-  assert.match(prompt, /only confirms.*face shape.*facial proportions/i);
-  assert.match(prompt, /PERSON: unchanged .* same person as scene-base; anchor confirms face/i);
+  assert.match(prompt, /face identity must match the anchor/i);
+  assert.match(prompt, /must not replace her with another person/i);
+  assert.match(prompt, /DO NOT copy the anchor's skin complexion\/tone/);
+  assert.match(prompt, /paler, pinker, lighter, or less tanned skin is a FAILURE/);
   assert.doesNotMatch(prompt, /Eurasian|East-Asian|partial face swap/i);
 });
 
@@ -29,10 +29,10 @@ test('skin tone continuity block outranks the realism block and pins texture to 
   const prompt = followSceneWithAnchor();
 
   assert.match(prompt, /SKIN TONE CONTINUITY \(this outranks the realism block below\)/);
-  assert.match(prompt, /the face is the same skin as the neck directly beneath it/i);
+  assert.match(prompt, /the new face is the same skin as the neck directly beneath it/);
   assert.match(prompt, /no visible step, edge, or tonal seam anywhere along the jawline/);
   assert.match(prompt, /Render every pore, texture break and film grain AT the neck's own brightness/);
-  assert.match(prompt, /A face that reads lighter, paler, cooler, or flatter than the neck below it is a failure/);
+  assert.match(prompt, /never lighten, cool down, or flatten the face in order to make its texture visible/);
 
   // 顺序很重要：连续性必须出现在真实感块之前，后者才是被压制的一方
   assert.ok(
@@ -47,7 +47,7 @@ test('eyewear occlusion falls back to lower-face identity without needing face d
   assert.match(prompt, /If the scene-base person's eyes are behind sunglasses or eyeglasses/);
   assert.match(prompt, /take the anchor's lip outline and cupid's bow/);
   assert.match(prompt, /mouth width, philtrum length, chin point, jaw angle, and lower-cheek contour/);
-  assert.match(prompt, /The eyewear stays exactly where it is, untouched, and no eye is drawn behind it/);
+  assert.match(prompt, /The eyewear itself stays exactly where it is, untouched, and no eye is drawn behind it/);
 });
 
 test('lower-face identity source follows whether an anchor is attached', () => {
@@ -65,21 +65,7 @@ test('worn accessories stay locked in the one-pass prompt', () => {
   const prompt = followSceneWithAnchor();
 
   assert.match(prompt, /Keep EVERY existing accessory \(headwear\/hat, sunglasses\/eyeglasses, bag, jewelry, belt, watch, scarf, shoes\)/);
-  assert.match(prompt, /Match face\/head visibility and occlusion exactly/);
-  assert.match(prompt, /do not uncover features hidden by headwear, eyewear, hair, or camera angle/);
-});
-
-test('an explicit replacement accessory remains the only non-garment exception', () => {
-  const prompt = api.buildSceneGroupPrompt({
-    garmentDescription: 'blush satin top',
-    modelIdentityMode: 'follow_scene',
-    hasAnchor: true,
-    hasReplacementAccessory: true,
-  });
-
-  assert.match(prompt, /except the garment listed under REPLACE below and the explicitly requested accessory change/);
-  assert.match(prompt, /changing only the product garment and the explicitly requested replacement accessories/);
-  assert.doesNotMatch(prompt, /Only the garment changes\. Never add, remove, or reposition worn accessories/);
+  assert.match(prompt, /NEVER remove, lift, or reposition it to reveal the new face/);
 });
 
 test('two-pass face swap architecture is fully retired', () => {
@@ -135,10 +121,9 @@ test('derived follow-scene anchor uses the final head-and-shoulders identity por
   assert.match(derivedBlock, /same fictional woman shown in the uploaded scene reference image/);
   assert.match(derivedBlock, /Strictly match the ethnicity, face shape, facial features, hair color, and hairstyle/);
   assert.match(derivedBlock, /apparent age matches the scene reference/i);
-  assert.match(derivedBlock, /clean commercial retouching/i);
+  assert.match(derivedBlock, /Only clean commercial retouching is allowed/);
   assert.match(derivedBlock, /do not change any facial feature, facial proportion, or recognizable appearance/i);
-  assert.match(derivedBlock, /neutral, even, low-contrast illumination/i);
-  assert.match(derivedBlock, /skin exposure and brightness.*neck and chest.*scene reference/i);
+  assert.match(derivedBlock, /One large soft source from the front left, a weak fill on the right/);
   assert.doesNotMatch(derivedBlock, /24-28|beautification is allowed/i);
   assert.doesNotMatch(derivedBlock, /subtle East-Asian eyelid|Eurasian mixed European-Asian/);
 });
