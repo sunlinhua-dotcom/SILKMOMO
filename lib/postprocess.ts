@@ -104,6 +104,7 @@ export async function normalizeGeneratedImage(
  */
 export async function shrinkAnchorForClient(
   b64: string,
+  inputMimeType = 'image/png',
 ): Promise<{ data: string; mimeType: string }> {
   try {
     const input = Buffer.from(b64, 'base64');
@@ -112,9 +113,9 @@ export async function shrinkAnchorForClient(
       .jpeg({ quality: 82 })
       .toBuffer();
     // 反而变大就不换（本来就很小的锚没必要重编码）
-    if (out.length >= input.length) return { data: b64, mimeType: 'image/png' };
+    if (out.length >= input.length) return { data: b64, mimeType: inputMimeType };
     return { data: out.toString('base64'), mimeType: 'image/jpeg' };
   } catch {
-    return { data: b64, mimeType: 'image/png' };
+    return { data: b64, mimeType: inputMimeType };
   }
 }

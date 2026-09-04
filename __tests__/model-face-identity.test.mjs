@@ -75,6 +75,17 @@ test('fresh without an anchor gives complexion ownership to the new fictional mo
   assert.doesNotMatch(fresh, /Sample the scene-base person's neck, throat and chest/);
 });
 
+test('fresh renders texture at its identity complexion brightness and rejects a lighter face', () => {
+  for (const hasAnchor of [false, true]) {
+    const fresh = api.buildSceneGroupPrompt({
+      garmentDescription: 'silk dress', modelIdentityMode: 'fresh', hasAnchor,
+    });
+
+    assert.match(fresh, /Render every pore, texture break and film grain AT .* brightness/i);
+    assert.match(fresh, /face that reads lighter, paler, cooler, or flatter than .* neck\/chest .* failure/i);
+  }
+});
+
 test('follow_scene prompt text is byte-for-byte unchanged by the fresh complexion fix', () => {
   const cases = [
     [{ garmentDescription: 'silk dress', modelIdentityMode: 'follow_scene', hasAnchor: false }, 'e5bee511e3d6eaa7b3752052540872c2ce61906facb2a423fab344c40732474d'],
