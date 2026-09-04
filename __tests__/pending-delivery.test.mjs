@@ -28,6 +28,30 @@ test('a slow paid image body is not aborted by the 10ms handshake timeout', asyn
   assert.deepEqual(result, { data: 'large-image', mimeType: 'image/png', width: 2048, height: 2731 });
 });
 
+test('a paid image body that exceeds its upper limit is aborted', async () => {
+  assert.equal(typeof pendingFetch.fetchPendingImageWithRetry, 'function');
+  let signal;
+  const result = await pendingFetch.fetchPendingImageWithRetry('stalled-image', {
+    attempts: 1,
+    handshakeTimeoutMs: 100,
+    bodyTimeoutMs: 10,
+    fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      return {
+        status: 200,
+        ok: true,
+        json: () => new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          setTimeout(() => reject(new Error('test timed out waiting for abort')), 50);
+        }),
+      };
+    },
+  });
+
+  assert.equal(signal.aborted, true);
+  assert.equal(result, null);
+});
+
 test('result and anchor deliveries use a pending id and never inline data after a successful store', async () => {
   assert.equal(typeof delivery.preparePendingDelivery, 'function');
   const stored = [];

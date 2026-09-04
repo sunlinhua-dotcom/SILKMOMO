@@ -14,6 +14,7 @@ interface FetchResponseLike {
 interface PendingFetchOptions {
   attempts?: number;
   handshakeTimeoutMs?: number;
+  bodyTimeoutMs?: number;
   retryDelayMs?: (attempt: number) => number;
   fetchImpl?: (url: string, init: { cache: 'no-store'; signal: AbortSignal }) => Promise<FetchResponseLike>;
   onAttemptError?: (error: unknown, attempt: number, attempts: number) => void;
@@ -25,6 +26,7 @@ export async function fetchPendingImageWithRetry(
 ): Promise<PendingImageBody | null> {
   const attempts = options.attempts ?? 3;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? 10_000;
+  const bodyTimeoutMs = options.bodyTimeoutMs ?? 120_000;
   const retryDelayMs = options.retryDelayMs ?? (attempt => 1_000 * attempt);
   const fetchImpl = options.fetchImpl ?? fetch;
 
@@ -44,11 +46,12 @@ export async function fetchPendingImageWithRetry(
       }
       continue;
     } finally {
-      // 这里只保护服务器开始响应前的握手；大图 body 到达可能远超 10 秒，不能中途 abort。
+      // 10 秒只保护服务器开始响应前的握手。
       clearTimeout(timeout);
     }
 
     if (response.status === 404) return null;
+    const bodyTimeout = setTimeout(() => controller.abort(), bodyTimeoutMs);
     try {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const json = await response.json() as { image?: PendingImageBody };
@@ -59,6 +62,9 @@ export async function fetchPendingImageWithRetry(
       if (attempt < attempts) {
         await new Promise(resolve => setTimeout(resolve, retryDelayMs(attempt)));
       }
+    } finally {
+      // body 可以比握手慢很多，但半开连接不能无限占住 SSE 恢复循环。
+      clearTimeout(bodyTimeout);
     }
   }
   return null;
