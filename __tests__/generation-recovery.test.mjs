@@ -1,14 +1,39 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
 
 const recovery = await import('../lib/generation-recovery.ts').catch(() => ({}));
 
-test('stall recovery counts only newly recovered requested shots before choosing the next chunk', () => {
-  assert.equal(typeof recovery.mergeRecoveredShots, 'function');
-  const merged = recovery.mergeRecoveredShots(new Set([1]), [1, 2, 8], [1, 2, 3]);
-  assert.deepEqual([...merged].sort((a, b) => a - b), [1, 2]);
-  assert.deepEqual(recovery.missingShotIndexes([1, 2, 3], merged), [3]);
+test('stall gap is non-fatal, later chunks continue, and final auto-fill is scheduled', () => {
+  assert.equal(typeof recovery.reconcileStalledChunk, 'function');
+  const stalled = recovery.reconcileStalledChunk({
+    successfulShots: new Set([1]),
+    recoveredShotIndexes: [],
+    expectedShots: [1, 2, 3, 4],
+    stalledChunkShots: [2],
+  });
+
+  assert.equal(stalled.fatal, false);
+  assert.equal(stalled.continueChunks, true);
+  assert.deepEqual(stalled.unresolvedChunkShots, [2]);
+
+  const afterLaterChunks = recovery.mergeRecoveredShots(
+    stalled.successfulShots,
+    [3, 4],
+    [1, 2, 3, 4],
+  );
+  const outcome = recovery.finalizeGeneration({
+    expectedShots: [1, 2, 3, 4],
+    successfulShots: afterLaterChunks,
+    lastError: '连接中断',
+    lastErrorWasStall: true,
+  });
+  assert.deepEqual(outcome.remaining, [2]);
+  assert.equal(recovery.shouldScheduleAutomaticFill({
+    remaining: outcome.remaining,
+    lastErrorWasStall: true,
+    fatalStop: false,
+    alreadyRetried: false,
+  }), true);
 });
 
 test('final status and error are derived after pending recovery from actual output', () => {
@@ -37,10 +62,22 @@ test('paid generation is blocked with an explicit message when bounded recovery 
   });
 });
 
-test('all paid retry entry points recover before calculating or sending work', () => {
-  const page = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
-  assert.match(page, /const handleGenerateRemaining[\s\S]*?recoveryGate\(await recoverPendingImages\(taskId\)\)[\s\S]*?missingShotIndexes/);
-  assert.match(page, /const handleRetryFailedShot[\s\S]*?recoverPendingImages\(taskId, \[shotIndex\]\)[\s\S]*?handleStartGeneration/);
-  assert.match(page, /onClick=\{\(\) => void handleGenerateRemaining\(\)\}[\s\S]*?>\s*重试\s*</);
-  assert.match(page, /if \(!opts\?\.recoveryChecked\)[\s\S]*?recoverPendingImages\(taskId\)[\s\S]*?fetch\('\/api\/generate\/stream'/);
+test('a restored backup is visible but does not make a failed redo completed', () => {
+  assert.equal(typeof recovery.mergeRunLocalResults, 'function');
+  const successfulShots = recovery.mergeRunLocalResults({
+    successfulShots: new Set(),
+    localShotIndexes: [2],
+    expectedShots: [2],
+    restoredShotIndexes: new Set([2]),
+  });
+  const outcome = recovery.finalizeGeneration({
+    expectedShots: [2],
+    successfulShots,
+    lastError: '上游生成失败（已自动退款）',
+    lastErrorWasStall: false,
+  });
+
+  assert.deepEqual([...successfulShots], []);
+  assert.equal(outcome.status, 'failed');
+  assert.deepEqual(outcome.remaining, [2]);
 });

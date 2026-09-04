@@ -34,10 +34,14 @@ import { compressImage, type CompressedImage } from '@/lib/image-compressor';
 import {
   PAID_IMAGE_RECOVERY_ERROR,
   finalizeGeneration,
+  mergeRunLocalResults,
   mergeRecoveredShots,
   missingShotIndexes,
+  reconcileStalledChunk,
   recoveryGate,
+  shouldScheduleAutomaticFill,
 } from '@/lib/generation-recovery';
+import { fetchPendingImageWithRetry } from '@/lib/pending-fetch';
 
 // ═══ SSE 事件类型 ═══
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
@@ -178,27 +182,13 @@ async function fetchPendingImage(
   pendingId: string,
   attempts = 3,
 ): Promise<{ data: string; mimeType: string; width: number; height: number } | null> {
-  for (let i = 0; i < attempts; i++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PENDING_FETCH_TIMEOUT_MS);
-    try {
-      const res = await fetch(`/api/generation/pending/${pendingId}`, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      if (res.status === 404) return null; // 已被取走/不存在，重试无意义
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (json?.image?.data) return json.image;
-      throw new Error('响应缺少图片数据');
-    } catch (err) {
-      console.error(`[交接缓冲] 取图失败(${i + 1}/${attempts}):`, err);
-      if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  return null;
+  return fetchPendingImageWithRetry(pendingId, {
+    attempts,
+    handshakeTimeoutMs: PENDING_FETCH_TIMEOUT_MS,
+    onAttemptError: (err, attempt, total) => {
+      console.error(`[交接缓冲] 取图失败(${attempt}/${total}):`, err);
+    },
+  });
 }
 
 /** 客户端已落 IndexedDB，通知服务端删掉缓冲行。删不掉也无妨，服务端有 TTL 兜底。 */
@@ -229,7 +219,7 @@ async function recoverPendingImages(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PENDING_FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/generation/pending?taskId=${taskId}`, {
+      const res = await fetch(`/api/generation/pending?taskId=${taskId}&includeAnchor=1`, {
         cache: 'no-store',
         signal: controller.signal,
       });
@@ -248,20 +238,27 @@ async function recoverPendingImages(
             continue;
           }
           const fetchedAnchor = await fetchPendingImage(meta.id);
-          if (!fetchedAnchor) throw new Error(`待取身份锚 ${meta.id} 未能取回`);
-          await db.images.add({
-            projectId: taskId,
-            type: 'anchor',
-            data: fetchedAnchor.data,
-            mimeType: fetchedAnchor.mimeType || 'image/png',
-          });
-          local.push({
-            projectId: taskId,
-            type: 'anchor',
-            data: fetchedAnchor.data,
-            mimeType: fetchedAnchor.mimeType || 'image/png',
-          });
-          void releasePendingImage(meta.id);
+          if (!fetchedAnchor) {
+            console.error(`[交接缓冲] 身份锚 ${meta.id} 未能取回，继续并回退首张成功图`);
+            continue;
+          }
+          try {
+            await db.images.add({
+              projectId: taskId,
+              type: 'anchor',
+              data: fetchedAnchor.data,
+              mimeType: fetchedAnchor.mimeType || 'image/png',
+            });
+            local.push({
+              projectId: taskId,
+              type: 'anchor',
+              data: fetchedAnchor.data,
+              mimeType: fetchedAnchor.mimeType || 'image/png',
+            });
+            void releasePendingImage(meta.id);
+          } catch (error) {
+            console.error('[交接缓冲] 身份锚落库失败，继续并回退首张成功图:', error);
+          }
           continue;
         }
         const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
@@ -292,15 +289,12 @@ async function recoverPendingImages(
         void releasePendingImage(meta.id);
       }
 
-      const localShotIndexes = new Set(
-        local.filter(i => i.type === 'result').map(i => i.shotIndex ?? 0),
-      );
-      if (expectedShotIndexes.length === 0 || expectedShotIndexes.every(index => localShotIndexes.has(index))) {
-        if (recoveredShotIndexes.length > 0) {
-          console.log(`[交接缓冲] 补回 ${recoveredShotIndexes.length} 张此前未送达的图`);
-        }
-        return { ok: true, recoveredShotIndexes };
+      if (recoveredShotIndexes.length > 0) {
+        console.log(`[交接缓冲] 补回 ${recoveredShotIndexes.length} 张此前未送达的图`);
       }
+      // 列表成功且其中的结果都已处理，说明当前没有更多可补；缺口应交给生成路径，
+      // 不能为了等一个尚不存在的 pending 固定空转三轮。
+      return { ok: true, recoveredShotIndexes };
     } catch (err) {
       console.error(`[交接缓冲] 补拉失败(${attempt + 1}/${PENDING_RECOVERY_ATTEMPTS}):`, err);
       if (attempt === PENDING_RECOVERY_ATTEMPTS - 1) {
@@ -529,7 +523,12 @@ export default function TaskDetailPage() {
   };
 
   const handleGenerateRemaining = async (existingRunId?: string) => {
-    if (!project || generating || inputImages.products.length === 0) return;
+    if (!project || generating) return;
+    const showNoopMessage = !existingRunId;
+    if (inputImages.products.length === 0) {
+      if (showNoopMessage) setErrorMessage('缺少产品输入图，无法重试生成');
+      return;
+    }
     const runId = existingRunId || crypto.randomUUID();
     const gate = recoveryGate(await recoverPendingImages(taskId));
     if (!gate.proceed) {
@@ -557,7 +556,10 @@ export default function TaskDetailPage() {
       for (let s = 1; s <= N; s++) {
         if (!existingShotIndexes.includes(s)) remaining.push(s);
       }
-      if (remaining.length === 0) return;
+      if (remaining.length === 0) {
+        if (showNoopMessage) setErrorMessage('当前没有待补齐的组图；如需重做，请使用图片上的重新生成');
+        return;
+      }
       await handleStartGeneration(remaining, undefined, { runId, recoveryChecked: true });
       return;
     }
@@ -565,6 +567,8 @@ export default function TaskDetailPage() {
     if (moduleType === 'scene') {
       if (existingResults.length === 0) {
         await handleStartGeneration(undefined, undefined, { runId, recoveryChecked: true });
+      } else if (showNoopMessage) {
+        setErrorMessage('当前场景图已存在；如需重做，请使用图片上的重新生成');
       }
       return;
     }
@@ -572,7 +576,10 @@ export default function TaskDetailPage() {
     const selectedShotIndexes = parseSelectedShots(project.selectedShots);
     const remainingIndexes = missingShotIndexes(selectedShotIndexes, new Set(existingShotIndexes));
 
-    if (remainingIndexes.length === 0) return;
+    if (remainingIndexes.length === 0) {
+      if (showNoopMessage) setErrorMessage('当前没有待补齐的图片；如需重做，请使用图片上的重新生成');
+      return;
+    }
     await handleStartGeneration(remainingIndexes, undefined, { runId, recoveryChecked: true });
   };
 
@@ -731,6 +738,7 @@ export default function TaskDetailPage() {
     // （后者已经带了「已自动退款」，套成「连接中断」会误导用户去点重连）。
     let lastErrorWasStall = false;
     let wasCancelled = false;
+    const restoredShotIndexes = new Set<number>();
     const grandTotal = isGroup ? groupTotal : (moduleType === 'product' ? selectedShotIndexes.length : 1);
     const expectedShotIndexes = isGroup
       ? (groupTargetIndexes || [])
@@ -953,8 +961,8 @@ export default function TaskDetailPage() {
               if (!imageData && pendingId) {
                 const fetched = await fetchPendingImage(pendingId);
                 if (!fetched) {
-                  chunkController.abort();
-                  throw new Error('身份锚未取回，请刷新后再试');
+                  console.error('[anchor 取回] 失败，继续生成并回退首张成功图');
+                  continue;
                 }
                 imageData = fetched.data;
                 anchorMime = fetched.mimeType || anchorMime;
@@ -973,9 +981,7 @@ export default function TaskDetailPage() {
                   groupAnchorForChunk = compressedAnchor;
                   if (pendingId) void releasePendingImage(pendingId);
                 } catch (e) {
-                  console.error('[anchor 落库] 失败:', e);
-                  chunkController.abort();
-                  throw new Error('身份锚保存失败，请刷新后再试');
+                  console.error('[anchor 落库] 失败，继续生成并回退首张成功图:', e);
                 }
               }
 
@@ -1152,20 +1158,14 @@ export default function TaskDetailPage() {
             fatalStop = true;
             break;
           }
-          successfulShotIndexes = mergeRecoveredShots(
-            successfulShotIndexes,
-            gate.recoveredShotIndexes,
-            expectedShotIndexes,
-          );
+          const stalled = reconcileStalledChunk({
+            successfulShots: successfulShotIndexes,
+            recoveredShotIndexes: gate.recoveredShotIndexes,
+            expectedShots: expectedShotIndexes,
+            stalledChunkShots: chunkShots,
+          });
+          successfulShotIndexes = stalled.successfulShots;
           successCount = successfulShotIndexes.size;
-          const unresolvedChunkShots = missingShotIndexes(chunkShots, successfulShotIndexes);
-          if (unresolvedChunkShots.length > 0) {
-            setErrorMessage(PAID_IMAGE_RECOVERY_ERROR);
-            lastFatalError = PAID_IMAGE_RECOVERY_ERROR;
-            lastErrorWasStall = false;
-            fatalStop = true;
-            break;
-          }
           doneSoFar += chunkShots.length;
           const remainingCount = Math.max(0, grandTotal - successCount);
           const message = buildFriendlyConnectionErrorMessage(successCount, remainingCount);
@@ -1232,6 +1232,7 @@ export default function TaskDetailPage() {
             .count();
           if (hasNewResult === 0) {
             await db.images.update(b.id!, { type: 'result' });
+            restoredShotIndexes.add(b.shotIndex ?? 0);
           }
         }
       } catch (e) {
@@ -1264,11 +1265,12 @@ export default function TaskDetailPage() {
             .where('projectId').equals(taskId)
             .filter(i => i.type === 'result')
             .toArray();
-          successfulShotIndexes = mergeRecoveredShots(
-            successfulShotIndexes,
-            localResults.map(i => i.shotIndex ?? 0),
-            expectedShotIndexes,
-          );
+          successfulShotIndexes = mergeRunLocalResults({
+            successfulShots: successfulShotIndexes,
+            localShotIndexes: localResults.map(i => i.shotIndex ?? 0),
+            expectedShots: expectedShotIndexes,
+            restoredShotIndexes,
+          });
           successCount = successfulShotIndexes.size;
 
           if (!gate.proceed) {
@@ -1284,12 +1286,17 @@ export default function TaskDetailPage() {
           });
           const finalRemaining = outcome.remaining.length;
           const persistedError = !gate.proceed
-            ? gate.message
+            ? finalRemaining > 0 ? gate.message : undefined
             : finalRemaining > 0 && lastErrorWasStall
               ? buildFriendlyConnectionErrorMessage(successCount, finalRemaining)
               : outcome.lastError;
 
-          if (finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef.current) {
+          if (shouldScheduleAutomaticFill({
+            remaining: outcome.remaining,
+            lastErrorWasStall,
+            fatalStop,
+            alreadyRetried: autoRetriedRef.current,
+          })) {
             autoRetriedRef.current = true;
             pendingAutoRetryRunIdRef.current = runId;
             console.log(`[自动补齐] 连接抖动导致缺 ${finalRemaining} 张，本轮结束后以同一 runId 自动补一次`);
