@@ -78,7 +78,10 @@ const OPENAI_BASE =
   (HAS_DEDICATED_OPENAI_KEY ? 'https://api.302.ai' : APIYI_BASE);
 
 const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
-export const DERIVED_ANCHOR_MODEL = process.env.DERIVED_ANCHOR_MODEL || 'gemini-3-pro-image';
+// 09-04 三组×3 真图对照：C 组 Flash 锚在肤色连续、长相相似、稳定性、质量、速度上全面优于 Pro 锚；
+// 脸喉 ΔRGB 中位 6.66，断层评分 1.3，相似度 3.5–4，每样本 84 秒。
+// DERIVED_ANCHOR_MODEL 仍可覆盖为 gemini-3-pro-image。
+export const DERIVED_ANCHOR_MODEL = process.env.DERIVED_ANCHOR_MODEL || 'gemini-3.1-flash-image-preview';
 // 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
 // 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
 const OPENAI_MODEL =
