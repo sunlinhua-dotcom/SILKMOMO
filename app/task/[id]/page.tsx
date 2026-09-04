@@ -31,6 +31,13 @@ import { ImageLightbox } from '@/components/ImageLightbox';
 import { AIChatSidebar } from '@/components/AIChatBox';
 import Link from 'next/link';
 import { compressImage, type CompressedImage } from '@/lib/image-compressor';
+import {
+  PAID_IMAGE_RECOVERY_ERROR,
+  finalizeGeneration,
+  mergeRecoveredShots,
+  missingShotIndexes,
+  recoveryGate,
+} from '@/lib/generation-recovery';
 
 // ═══ SSE 事件类型 ═══
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
@@ -143,6 +150,8 @@ async function compressAnchorBase64(
 // 用这个阈值把两者分开，让本函数幂等——老任务里存着的锚可以放心地反复过一遍，
 // 不会每跑一次就被重新编码一次。
 const ANCHOR_COMPRESS_THRESHOLD_CHARS = 700_000;
+const PENDING_FETCH_TIMEOUT_MS = 10_000;
+const PENDING_RECOVERY_ATTEMPTS = 3;
 
 async function toCompressedAnchor(
   source: { data: string; mimeType: string },
@@ -170,8 +179,13 @@ async function fetchPendingImage(
   attempts = 3,
 ): Promise<{ data: string; mimeType: string; width: number; height: number } | null> {
   for (let i = 0; i < attempts; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PENDING_FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/generation/pending/${pendingId}`, { cache: 'no-store' });
+      const res = await fetch(`/api/generation/pending/${pendingId}`, {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
       if (res.status === 404) return null; // 已被取走/不存在，重试无意义
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
@@ -180,6 +194,8 @@ async function fetchPendingImage(
     } catch (err) {
       console.error(`[交接缓冲] 取图失败(${i + 1}/${attempts}):`, err);
       if (i < attempts - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    } finally {
+      clearTimeout(timeout);
     }
   }
   return null;
@@ -199,45 +215,105 @@ async function releasePendingImage(pendingId: string): Promise<void> {
  * 一次钱），现在服务端会把图留在交接缓冲里，进任务页就能补回来。
  * 幂等：同一 shotIndex 本地已有 result 就跳过，不会重复插入。
  */
-async function recoverPendingImages(taskId: number): Promise<number> {
-  try {
-    const res = await fetch(`/api/generation/pending?taskId=${taskId}`, { cache: 'no-store' });
-    if (!res.ok) return 0;
-    const { images } = await res.json() as {
-      images: Array<{ id: string; shotIndex: number; width: number; height: number }>;
-    };
-    if (!Array.isArray(images) || images.length === 0) return 0;
+interface PendingRecoveryResult {
+  ok: boolean;
+  recoveredShotIndexes: number[];
+}
 
-    const local = await db.images.where('projectId').equals(taskId).toArray();
-    let recovered = 0;
-    for (const meta of images) {
-      const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
-      const already = local.some(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
-      if (already) {
-        // 本地已有：缓冲行是上次没删干净的残留，顺手清掉
-        void releasePendingImage(meta.id);
-        continue;
-      }
-      const fetched = await fetchPendingImage(meta.id);
-      if (!fetched) continue;
-      await db.images.add({
-        projectId: taskId,
-        type: 'result',
-        data: fetched.data,
-        mimeType: fetched.mimeType || 'image/png',
-        shotIndex: persistedShotIndex,
-        imageType: 'hero',
-        index: meta.shotIndex,
+async function recoverPendingImages(
+  taskId: number,
+  expectedShotIndexes: readonly number[] = [],
+): Promise<PendingRecoveryResult> {
+  const recoveredShotIndexes: number[] = [];
+  for (let attempt = 0; attempt < PENDING_RECOVERY_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PENDING_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(`/api/generation/pending?taskId=${taskId}`, {
+        cache: 'no-store',
+        signal: controller.signal,
       });
-      void releasePendingImage(meta.id);
-      recovered++;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { images } = await res.json() as {
+        images: Array<{ id: string; kind: string; shotIndex: number; width: number; height: number }>;
+      };
+      if (!Array.isArray(images)) throw new Error('响应缺少待取图片列表');
+
+      const local = await db.images.where('projectId').equals(taskId).toArray();
+      for (const meta of images) {
+        if (meta.kind === 'anchor') {
+          const existingAnchor = local.find(i => i.type === 'anchor');
+          if (existingAnchor) {
+            void releasePendingImage(meta.id);
+            continue;
+          }
+          const fetchedAnchor = await fetchPendingImage(meta.id);
+          if (!fetchedAnchor) throw new Error(`待取身份锚 ${meta.id} 未能取回`);
+          await db.images.add({
+            projectId: taskId,
+            type: 'anchor',
+            data: fetchedAnchor.data,
+            mimeType: fetchedAnchor.mimeType || 'image/png',
+          });
+          local.push({
+            projectId: taskId,
+            type: 'anchor',
+            data: fetchedAnchor.data,
+            mimeType: fetchedAnchor.mimeType || 'image/png',
+          });
+          void releasePendingImage(meta.id);
+          continue;
+        }
+        const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
+        const already = local.some(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
+        if (already) {
+          void releasePendingImage(meta.id);
+          continue;
+        }
+        const fetched = await fetchPendingImage(meta.id);
+        if (!fetched) throw new Error(`待取图片 ${meta.id} 未能取回`);
+        await db.images.add({
+          projectId: taskId,
+          type: 'result',
+          data: fetched.data,
+          mimeType: fetched.mimeType || 'image/png',
+          shotIndex: persistedShotIndex,
+          imageType: 'hero',
+          index: meta.shotIndex,
+        });
+        local.push({
+          projectId: taskId,
+          type: 'result',
+          data: fetched.data,
+          mimeType: fetched.mimeType || 'image/png',
+          shotIndex: persistedShotIndex,
+        });
+        recoveredShotIndexes.push(meta.shotIndex);
+        void releasePendingImage(meta.id);
+      }
+
+      const localShotIndexes = new Set(
+        local.filter(i => i.type === 'result').map(i => i.shotIndex ?? 0),
+      );
+      if (expectedShotIndexes.length === 0 || expectedShotIndexes.every(index => localShotIndexes.has(index))) {
+        if (recoveredShotIndexes.length > 0) {
+          console.log(`[交接缓冲] 补回 ${recoveredShotIndexes.length} 张此前未送达的图`);
+        }
+        return { ok: true, recoveredShotIndexes };
+      }
+    } catch (err) {
+      console.error(`[交接缓冲] 补拉失败(${attempt + 1}/${PENDING_RECOVERY_ATTEMPTS}):`, err);
+      if (attempt === PENDING_RECOVERY_ATTEMPTS - 1) {
+        return { ok: false, recoveredShotIndexes };
+      }
+    } finally {
+      clearTimeout(timeout);
     }
-    if (recovered > 0) console.log(`[交接缓冲] 补回 ${recovered} 张此前未送达的图`);
-    return recovered;
-  } catch (err) {
-    console.error('[交接缓冲] 补拉失败:', err);
-    return 0;
+    if (attempt < PENDING_RECOVERY_ATTEMPTS - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
   }
+  return { ok: true, recoveredShotIndexes };
 }
 
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
@@ -297,7 +373,7 @@ export default function TaskDetailPage() {
   // 断线自动补齐：整轮只补一次（autoRetried），补的动作排到本轮彻底收尾之后（pendingAutoRetry），
   // 因为 handleStartGeneration 开头有 generating / startLockRef 双重闸门，同步递归会被自己挡回去。
   const autoRetriedRef = useRef(false);
-  const pendingAutoRetryRef = useRef(false);
+  const pendingAutoRetryRunIdRef = useRef<string | null>(null);
   // "调整参数重新生成"（含 AI 聊天整任务重做）的同步锁
   const regenParamsLockRef = useRef(false);
 
@@ -410,9 +486,10 @@ export default function TaskDetailPage() {
   // 复用「生成剩余」那套缺口计算，保证只补真缺的那几张。
   // 计费安全：每张图服务端独立扣费、失败自动退款，补的是用户没拿到的那几张，不会重复扣。
   useEffect(() => {
-    if (generating || !pendingAutoRetryRef.current) return;
-    pendingAutoRetryRef.current = false;
-    void handleGenerateRemaining();
+    if (generating || !pendingAutoRetryRunIdRef.current) return;
+    const runId = pendingAutoRetryRunIdRef.current;
+    pendingAutoRetryRunIdRef.current = null;
+    void handleGenerateRemaining(runId);
     // handleGenerateRemaining 依赖当前渲染的 state，故不进依赖数组（每次渲染都是新闭包）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generating]);
@@ -451,8 +528,14 @@ export default function TaskDetailPage() {
     await handleStartGeneration([selectedShotIndexes[0]], undefined, { isTrial: true });
   };
 
-  const handleGenerateRemaining = async () => {
+  const handleGenerateRemaining = async (existingRunId?: string) => {
     if (!project || generating || inputImages.products.length === 0) return;
+    const runId = existingRunId || crypto.randomUUID();
+    const gate = recoveryGate(await recoverPendingImages(taskId));
+    if (!gate.proceed) {
+      setErrorMessage(gate.message);
+      return;
+    }
 
     const moduleType = project.moduleType || 'product';
     const isGroup = moduleType === 'scene' && !!project.sceneGroup;
@@ -475,17 +558,22 @@ export default function TaskDetailPage() {
         if (!existingShotIndexes.includes(s)) remaining.push(s);
       }
       if (remaining.length === 0) return;
-      await handleStartGeneration(remaining);
+      await handleStartGeneration(remaining, undefined, { runId, recoveryChecked: true });
+      return;
+    }
+
+    if (moduleType === 'scene') {
+      if (existingResults.length === 0) {
+        await handleStartGeneration(undefined, undefined, { runId, recoveryChecked: true });
+      }
       return;
     }
 
     const selectedShotIndexes = parseSelectedShots(project.selectedShots);
-    const remainingIndexes = selectedShotIndexes.filter(
-      idx => !existingShotIndexes.includes(idx)
-    );
+    const remainingIndexes = missingShotIndexes(selectedShotIndexes, new Set(existingShotIndexes));
 
     if (remainingIndexes.length === 0) return;
-    await handleStartGeneration(remainingIndexes);
+    await handleStartGeneration(remainingIndexes, undefined, { runId, recoveryChecked: true });
   };
 
   // ═══════════════════════════════════════════════════════════════
@@ -496,7 +584,7 @@ export default function TaskDetailPage() {
   const handleStartGeneration = async (
     overrideShotIndexes?: number[],
     customPrompt?: string,
-    opts?: { isTrial?: boolean }
+    opts?: { isTrial?: boolean; runId?: string; recoveryChecked?: boolean }
   ) => {
     if (!project || inputImages.products.length === 0) return;
     // 防重复点击：generating 是异步 state，guard 后到 setGenerating(true) 之间
@@ -504,6 +592,16 @@ export default function TaskDetailPage() {
     // startLockRef 同步置位封死这个窗口。
     if (generating || abortControllerRef.current || startLockRef.current) return;
     startLockRef.current = true;
+    const runId = opts?.runId || crypto.randomUUID();
+
+    if (!opts?.recoveryChecked) {
+      const gate = recoveryGate(await recoverPendingImages(taskId));
+      if (!gate.proceed) {
+        setErrorMessage(gate.message);
+        startLockRef.current = false;
+        return;
+      }
+    }
 
     // —— 关键：从 DB 重新取 project + inputImages ——
     // handleRegenerateWithNewParams 会先写 DB 再调本函数，但 React state（project / inputImages）
@@ -627,12 +725,19 @@ export default function TaskDetailPage() {
 
     // catch/finally 也要能读到，所以放 try 外
     let successCount = 0;
+    let successfulShotIndexes = new Set<number>();
     let lastFatalError: string | null = null;
     // 定稿时要按错误的真实来源选文案：停滞＝连接中断，服务端报错＝原样保留
     // （后者已经带了「已自动退款」，套成「连接中断」会误导用户去点重连）。
     let lastErrorWasStall = false;
     let wasCancelled = false;
     const grandTotal = isGroup ? groupTotal : (moduleType === 'product' ? selectedShotIndexes.length : 1);
+    const expectedShotIndexes = isGroup
+      ? (groupTargetIndexes || [])
+      : moduleType === 'product'
+        ? selectedShotIndexes
+        : [0];
+    let fatalStop = false;
 
     try {
       // —— 用户在 pending 状态用快选 / AI 聊天改了模特/引擎/体型/肤色：持久化覆盖 ——
@@ -680,7 +785,7 @@ export default function TaskDetailPage() {
       // 产品图仍每块 ≤3 张；sceneGroup 每块 1 张,但本函数会在 for 循环里自动接续下一块。
       const PRODUCT_CHUNK_SIZE = 3;
       const SCENE_GROUP_CHUNK_SIZE = 1;
-      const targetIndexesForChunking = isGroup ? (groupTargetIndexes || []) : selectedShotIndexes;
+      const targetIndexesForChunking = expectedShotIndexes;
       const chunkSize = isGroup ? SCENE_GROUP_CHUNK_SIZE : PRODUCT_CHUNK_SIZE;
       const shouldChunk =
         effectiveEngine === 'openai' &&
@@ -697,7 +802,6 @@ export default function TaskDetailPage() {
       // （6 张图＝6 次上游调用）。首块通过 garment 事件下发，之后回传即可。
       let garmentDescriptionForChunk = '';
       let doneSoFar = 0; // 已完成(成功或失败)的镜次数,用于跨块累计进度显示
-      let fatalStop = false; // 某块出现 fatal(余额不足/扣费失败)→ 不再向后续块发请求
 
       for (let chunkIdx = 0; chunkIdx < genChunks.length; chunkIdx++) {
       const chunkShots = genChunks[chunkIdx];
@@ -759,6 +863,7 @@ export default function TaskDetailPage() {
           sceneGroupGarmentCategories: isGroup ? groupGarmentCategories : undefined,
           customPrompt: effectiveCustomPrompt || undefined,
           garmentDescription: garmentDescriptionForChunk || undefined,
+          runId,
         }),
       });
 
@@ -840,15 +945,24 @@ export default function TaskDetailPage() {
               }
 
             } else if (eventType === 'anchor') {
-              const imageData = payload.imageData as string | undefined;
+              const pendingId = typeof payload.pendingId === 'string' ? payload.pendingId : '';
+              let imageData = payload.imageData as string | undefined;
+              let anchorMime = typeof payload.mimeType === 'string' && payload.mimeType
+                ? payload.mimeType
+                : 'image/png';
+              if (!imageData && pendingId) {
+                const fetched = await fetchPendingImage(pendingId);
+                if (!fetched) {
+                  chunkController.abort();
+                  throw new Error('身份锚未取回，请刷新后再试');
+                }
+                imageData = fetched.data;
+                anchorMime = fetched.mimeType || anchorMime;
+              }
               if (shouldUseSceneGroupAnchor && imageData) {
                 // 服务端已经先压过一版（shrinkAnchorForClient），类型以它给的为准；
                 // 压过的体积落在阈值以下，toCompressedAnchor 会原样放行、不会二次编码。
-                const anchorMime = typeof payload.mimeType === 'string' && payload.mimeType
-                  ? payload.mimeType
-                  : 'image/png';
                 const compressedAnchor = await toCompressedAnchor({ data: imageData, mimeType: anchorMime });
-                groupAnchorForChunk = compressedAnchor;
                 try {
                   const existingAnchor = await db.images.where('projectId').equals(taskId).filter(i => i.type === 'anchor').first();
                   if (existingAnchor?.id) {
@@ -856,8 +970,12 @@ export default function TaskDetailPage() {
                   } else {
                     await db.images.add({ projectId: taskId, type: 'anchor', ...compressedAnchor });
                   }
+                  groupAnchorForChunk = compressedAnchor;
+                  if (pendingId) void releasePendingImage(pendingId);
                 } catch (e) {
                   console.error('[anchor 落库] 失败:', e);
+                  chunkController.abort();
+                  throw new Error('身份锚保存失败，请刷新后再试');
                 }
               }
 
@@ -893,8 +1011,7 @@ export default function TaskDetailPage() {
                 }
                 imageData = fetched.data;
               }
-              successCount++;
-              console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars, success: ${successCount}`);
+              console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars`);
               // 跨块累计进度(用 grandTotal 作分母,doneSoFar 作偏移)
               const overallCurrent = doneSoFar + currentN;
               setProgress({ current: overallCurrent, total: grandTotal, shotIndex });
@@ -930,6 +1047,9 @@ export default function TaskDetailPage() {
                   : 'hero',
                 index: shotIndex,
               });
+              successfulShotIndexes.add(shotIndex);
+              successCount = successfulShotIndexes.size;
+              console.log(`[SSE] 图片 #${shotIndex} 已落库, success: ${successCount}`);
               // 已落 IndexedDB，通知服务端删掉交接缓冲行（删不掉由 TTL 兜底）
               if (pendingId) void releasePendingImage(pendingId);
               // 如果这是单张重做产生的新图，对应位置可能已有 result_backup（旧版图） —
@@ -1023,6 +1143,29 @@ export default function TaskDetailPage() {
           break;
         }
         if (stalledOut !== null) {
+          const recovery = await recoverPendingImages(taskId, chunkShots);
+          const gate = recoveryGate(recovery);
+          if (!gate.proceed) {
+            setErrorMessage(gate.message);
+            lastFatalError = gate.message;
+            lastErrorWasStall = false;
+            fatalStop = true;
+            break;
+          }
+          successfulShotIndexes = mergeRecoveredShots(
+            successfulShotIndexes,
+            gate.recoveredShotIndexes,
+            expectedShotIndexes,
+          );
+          successCount = successfulShotIndexes.size;
+          const unresolvedChunkShots = missingShotIndexes(chunkShots, successfulShotIndexes);
+          if (unresolvedChunkShots.length > 0) {
+            setErrorMessage(PAID_IMAGE_RECOVERY_ERROR);
+            lastFatalError = PAID_IMAGE_RECOVERY_ERROR;
+            lastErrorWasStall = false;
+            fatalStop = true;
+            break;
+          }
           doneSoFar += chunkShots.length;
           const remainingCount = Math.max(0, grandTotal - successCount);
           const message = buildFriendlyConnectionErrorMessage(successCount, remainingCount);
@@ -1047,42 +1190,6 @@ export default function TaskDetailPage() {
       }
       } // ← 关闭分块 for 循环
 
-      // 全部分块跑完,统一定稿(不在每块 done 里定稿,否则多块状态会被后一块覆盖)。
-      // 若在块间被取消(wasCancelled),不在这里定稿——交给 finally 的取消分支按实际产出回写。
-      if (!wasCancelled) {
-        const finalStatus = successCount > 0 ? 'completed' : 'failed';
-        // 定稿必须按「最终产出」重算，不能沿用中途某一块失败时的那条快照。
-        // 0731 客户实例：6 张里第 2 块抖了一下，后面 3 张全部成功，页面却一直挂着
-        // 那一刻写下的「连接中断…生成剩余 5 张」——剩余数早已过期，且被写进
-        // project.lastError，刷新后仍然显示「生成失败」，用户读成"一直出错"。
-        const finalRemaining = Math.max(0, grandTotal - successCount);
-        // 定稿分支只在 for 循环正常跑完时到达；能到这里的非致命错误只有停滞重连那一类，
-        // 所以按连接中断口径重建文案。致命错误（余额不足/扣费失败）原样保留。
-        const persistedError = finalStatus === 'failed'
-          ? (lastFatalError || '生成失败（未捕获具体原因）')
-          : finalRemaining > 0 && lastFatalError
-            ? (lastErrorWasStall ? buildFriendlyConnectionErrorMessage(successCount, finalRemaining) : lastFatalError)
-            : undefined;
-        // 断线自动补齐：只补「连接抖动」造成的缺口，且整轮只补一次。
-        // 不补致命错误（余额不足/扣费失败）——那是补不出来的，重试只会再撞一次。
-        // 每张图服务端都独立扣费+失败自动退款，所以补的是「用户没拿到的那几张」，不会重复扣。
-        if (finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef.current) {
-          autoRetriedRef.current = true;
-          pendingAutoRetryRef.current = true;
-          console.log(`[自动补齐] 连接抖动导致缺 ${finalRemaining} 张，本轮结束后自动补一次`);
-        }
-        // 全部出齐就把红条彻底清掉，别让一次已被后续块补回来的抖动继续吓用户
-        setErrorMessage(persistedError ?? null);
-        await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
-        setGenerationPhase(successCount > 0 ? 'done' : 'error');
-        setSecondsLeft(0);
-        // 只有显式标记的试生成且恰好出 1 张才触发"试生成完成"横幅(单图重做/多张不算)
-        if (opts?.isTrial && successCount === 1) {
-          setTrialDone(true);
-        }
-      }
-
     } catch (err) {
       console.error('[生图前端] catch 错误:', err);
       if ((err as Error).name === 'AbortError' && cancelController.signal.aborted) {
@@ -1092,8 +1199,7 @@ export default function TaskDetailPage() {
         setGenerationPhase('cancelled');
         setErrorMessage(successCount > 0 ? `已取消生成（保留已生成的 ${successCount} 张）` : '已取消生成');
       } else {
-        // 已成功生成的图保留：项目状态由实际产出决定
-        const finalStatus = successCount > 0 ? 'completed' : 'failed';
+        // 已成功生成的图保留：最终状态在 finally 的补拉之后按实际产出决定
         const remainingCount = Math.max(0, grandTotal - successCount);
         const knownMessage = getKnownUserFacingErrorMessage(err);
         const msg = knownMessage
@@ -1104,14 +1210,10 @@ export default function TaskDetailPage() {
         setErrorMessage(msg);
         lastFatalError = msg;
         setGenerationPhase('error');
-        const persistedError = finalStatus === 'failed' || remainingCount > 0 ? (lastFatalError || '生成失败') : undefined;
-        await db.projects.update(taskId, { status: finalStatus, lastError: persistedError, updatedAt: new Date() });
-        setProject(prev => prev ? { ...prev, status: finalStatus, lastError: persistedError } : null);
       }
     } finally {
       if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
       setSecondsLeft(0);
-      setGenerating(false);
       abortControllerRef.current = null;
 
       // 数据安全：扫描所有 backup，按 shotIndex 对应是否有新 result 决定
@@ -1149,14 +1251,97 @@ export default function TaskDetailPage() {
         } catch (e) {
           console.error('[取消状态回写] 失败:', e);
         }
+      } else {
+        try {
+          const recovery = await recoverPendingImages(taskId, expectedShotIndexes);
+          const gate = recoveryGate(recovery);
+          successfulShotIndexes = mergeRecoveredShots(
+            successfulShotIndexes,
+            recovery.recoveredShotIndexes,
+            expectedShotIndexes,
+          );
+          const localResults = await db.images
+            .where('projectId').equals(taskId)
+            .filter(i => i.type === 'result')
+            .toArray();
+          successfulShotIndexes = mergeRecoveredShots(
+            successfulShotIndexes,
+            localResults.map(i => i.shotIndex ?? 0),
+            expectedShotIndexes,
+          );
+          successCount = successfulShotIndexes.size;
+
+          if (!gate.proceed) {
+            lastFatalError = gate.message;
+            lastErrorWasStall = false;
+            fatalStop = true;
+          }
+          const outcome = finalizeGeneration({
+            expectedShots: expectedShotIndexes,
+            successfulShots: successfulShotIndexes,
+            lastError: lastFatalError,
+            lastErrorWasStall,
+          });
+          const finalRemaining = outcome.remaining.length;
+          const persistedError = !gate.proceed
+            ? gate.message
+            : finalRemaining > 0 && lastErrorWasStall
+              ? buildFriendlyConnectionErrorMessage(successCount, finalRemaining)
+              : outcome.lastError;
+
+          if (finalRemaining > 0 && lastErrorWasStall && !fatalStop && !autoRetriedRef.current) {
+            autoRetriedRef.current = true;
+            pendingAutoRetryRunIdRef.current = runId;
+            console.log(`[自动补齐] 连接抖动导致缺 ${finalRemaining} 张，本轮结束后以同一 runId 自动补一次`);
+          }
+          setErrorMessage(persistedError ?? null);
+          await db.projects.update(taskId, {
+            status: outcome.status,
+            lastError: persistedError,
+            updatedAt: new Date(),
+          });
+          setProject(prev => prev ? { ...prev, status: outcome.status, lastError: persistedError } : null);
+          setGenerationPhase(successCount > 0 ? 'done' : 'error');
+          if (opts?.isTrial && successCount === 1) setTrialDone(true);
+        } catch (e) {
+          console.error('[最终补拉/状态回写] 失败:', e);
+          setErrorMessage(PAID_IMAGE_RECOVERY_ERROR);
+          await db.projects.update(taskId, {
+            status: 'failed',
+            lastError: PAID_IMAGE_RECOVERY_ERROR,
+            updatedAt: new Date(),
+          });
+        }
       }
 
-      // 刷新最终图片列表
-      await loadTaskData();
-      startLockRef.current = false;
-      // 自动补齐不在这里触发：本函数闭包里的 generating 仍是旧值，
-      // 直接递归会被 handleStartGeneration 自己的闸门挡回去。交给下面的 effect。
+      // 刷新最终图片列表后再释放锁并切 generating=false。这样自动补齐 effect 看到
+      // pendingAutoRetryRunIdRef 时，所有本轮状态与同步锁都已经稳定。
+      try {
+        await loadTaskData();
+      } finally {
+        startLockRef.current = false;
+        setGenerating(false);
+      }
     }
+  };
+
+  const handleRetryFailedShot = async (shotIndex: number) => {
+    if (generating || startLockRef.current) return;
+    const runId = crypto.randomUUID();
+    const gate = recoveryGate(await recoverPendingImages(taskId, [shotIndex]));
+    if (!gate.proceed) {
+      setErrorMessage(gate.message);
+      return;
+    }
+    const alreadyRecovered = await db.images
+      .where('projectId').equals(taskId)
+      .filter(img => img.type === 'result' && (img.shotIndex ?? 0) === shotIndex)
+      .count();
+    if (alreadyRecovered > 0) {
+      await loadTaskData();
+      return;
+    }
+    await handleStartGeneration([shotIndex], undefined, { runId, recoveryChecked: true });
   };
 
   // ─── 取消生成 ───
@@ -1170,12 +1355,18 @@ export default function TaskDetailPage() {
     if (!project || generating || startLockRef.current || regenParamsLockRef.current) return;
     // 同步锁：备份旧结果是多步异步操作，双触发会把备份图错乱地再次备份/删除
     regenParamsLockRef.current = true;
-
-    setShowAdjustPanel(false);
-    setErrorMessage(null);
-    // 不在此处 setGenerating(true) — handleStartGeneration 内部会管理
+    const runId = crypto.randomUUID();
 
     try {
+      const gate = recoveryGate(await recoverPendingImages(taskId));
+      if (!gate.proceed) {
+        setErrorMessage(gate.message);
+        return;
+      }
+      setShowAdjustPanel(false);
+      setErrorMessage(null);
+      // 不在此处 setGenerating(true) — handleStartGeneration 内部会管理
+
       // 1. 旧结果转为 result_backup（不再物理删除）
       //    若失败/取消，finally 会自动把 backup 还原为 result
       //    若成功，用户可手动选择 "保留新版" / "还原旧版"
@@ -1240,7 +1431,7 @@ export default function TaskDetailPage() {
         setProject(task);
         await loadTaskData();
         // 用 await 而非 setTimeout（之前 100ms 是脆弱 race）
-        await handleStartGeneration(undefined, customPromptOverride);
+        await handleStartGeneration(undefined, customPromptOverride, { runId, recoveryChecked: true });
       }
 
     } catch (error) {
@@ -1273,8 +1464,14 @@ export default function TaskDetailPage() {
     // 而旧图此前已被 update 成 result_backup —— 重做没发生、旧图却被永久降级，等于丢图。
     if (!project || generating || regenLockRef.current || startLockRef.current || abortControllerRef.current) return;
     regenLockRef.current = true;
+    const runId = crypto.randomUUID();
 
     try {
+      const gate = recoveryGate(await recoverPendingImages(taskId));
+      if (!gate.proceed) {
+        setErrorMessage(gate.message);
+        return;
+      }
       // 找到这张图，拿到它的 shotIndex（场景图无 shotIndex，按整任务重做）
       const img = images.find(i => i.id === imageId) || liveImages.find(i => i.id === imageId);
       if (!img) {
@@ -1300,10 +1497,10 @@ export default function TaskDetailPage() {
       // 注意：用 shotIndex === undefined 而非 !shotIndex，避免 shotIndex=0 被误判
       const isGroup = moduleType === 'scene' && !!project.sceneGroup;
       if (shotIndex === undefined || (moduleType === 'scene' && !isGroup)) {
-        await handleStartGeneration(undefined, customPrompt);
+        await handleStartGeneration(undefined, customPrompt, { runId, recoveryChecked: true });
       } else {
         // 产品镜次 或 组图参考图序号：只重做这一张
-        await handleStartGeneration([shotIndex], customPrompt);
+        await handleStartGeneration([shotIndex], customPrompt, { runId, recoveryChecked: true });
       }
     } catch (e) {
       console.error('重新生成失败:', e);
@@ -2071,7 +2268,7 @@ export default function TaskDetailPage() {
                 调整参数
               </button>
               <button
-                onClick={handleGenerateRemaining}
+                onClick={() => void handleGenerateRemaining()}
                 className="btn-primary text-sm px-5 py-2.5"
               >
                 <Wand2 className="w-4 h-4" strokeWidth={1.5} />
@@ -2092,7 +2289,7 @@ export default function TaskDetailPage() {
               </p>
             </div>
             <button
-              onClick={handleGenerateRemaining}
+              onClick={() => void handleGenerateRemaining()}
               className="btn-primary text-sm px-5 py-2.5"
             >
               <Wand2 className="w-4 h-4" strokeWidth={1.5} />
@@ -2218,7 +2415,7 @@ export default function TaskDetailPage() {
                       </p>
                       {e.shotIndex > 0 && (
                         <button
-                          onClick={() => handleStartGeneration([e.shotIndex])}
+                          onClick={() => handleRetryFailedShot(e.shotIndex)}
                           disabled={generating}
                           className="shrink-0 text-xs px-3 py-1 rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] disabled:opacity-40 transition-colors"
                         >
@@ -2235,7 +2432,7 @@ export default function TaskDetailPage() {
             <FailureHistoryPanel taskId={taskId} />
 
             <button
-              onClick={() => handleStartGeneration()}
+              onClick={() => void handleGenerateRemaining()}
               className="btn-primary"
             >
               重试

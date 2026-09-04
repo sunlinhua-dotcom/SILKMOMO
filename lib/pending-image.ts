@@ -19,11 +19,18 @@ const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface PendingImageMeta {
   id: string;
+  kind: string;
   shotIndex: number;
   width: number;
   height: number;
   mimeType: string;
   createdAt: Date;
+}
+
+export interface StalePendingImage extends PendingImageMeta {
+  userId: string;
+  taskId: number;
+  idempotencyKey: string | null;
 }
 
 /**
@@ -38,6 +45,8 @@ export async function storePendingImage(input: {
   mimeType?: string;
   width?: number;
   height?: number;
+  kind?: 'result' | 'anchor';
+  idempotencyKey?: string;
 }): Promise<string | null> {
   try {
     const row = await prisma.pendingImage.create({
@@ -45,6 +54,8 @@ export async function storePendingImage(input: {
         userId: input.userId,
         taskId: input.taskId,
         shotIndex: input.shotIndex,
+        kind: input.kind || 'result',
+        idempotencyKey: input.idempotencyKey,
         data: input.data,
         mimeType: input.mimeType || 'image/png',
         width: input.width ?? 0,
@@ -65,7 +76,7 @@ export async function storePendingImage(input: {
 export async function readPendingImage(id: string, userId: string) {
   return prisma.pendingImage.findFirst({
     where: { id, userId },
-    select: { id: true, data: true, mimeType: true, width: true, height: true, shotIndex: true },
+    select: { id: true, kind: true, data: true, mimeType: true, width: true, height: true, shotIndex: true },
   });
 }
 
@@ -83,8 +94,38 @@ export async function listPendingImages(userId: string, taskId: number): Promise
   return prisma.pendingImage.findMany({
     where: { userId, taskId },
     orderBy: { createdAt: 'asc' },
-    select: { id: true, shotIndex: true, width: true, height: true, mimeType: true, createdAt: true },
+    select: { id: true, kind: true, shotIndex: true, width: true, height: true, mimeType: true, createdAt: true },
     take: 50,
+  });
+}
+
+/** 同一 run 的重复请求只允许复用它自己已经落好的结果。 */
+export async function findPendingImageByIdempotencyKey(userId: string, idempotencyKey: string) {
+  return prisma.pendingImage.findFirst({
+    where: { userId, idempotencyKey, kind: 'result' },
+    select: { id: true, shotIndex: true, width: true, height: true, mimeType: true },
+  });
+}
+
+/** 管理员只读对账：结果已扣费落库，但超过 10 分钟仍未收到客户端 DELETE 回执。 */
+export async function listStalePendingImages(ageMs = 10 * 60 * 1000, limit = 200): Promise<StalePendingImage[]> {
+  const cutoff = new Date(Date.now() - ageMs);
+  return prisma.pendingImage.findMany({
+    where: { kind: 'result', createdAt: { lt: cutoff } },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+    select: {
+      id: true,
+      kind: true,
+      userId: true,
+      taskId: true,
+      shotIndex: true,
+      width: true,
+      height: true,
+      mimeType: true,
+      idempotencyKey: true,
+      createdAt: true,
+    },
   });
 }
 
