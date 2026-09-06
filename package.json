@@ -6,7 +6,14 @@
     "dev": "next dev -p 4605",
     "build": "next build",
     "start": "next start -p ${PORT:-4605}",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --test __tests__/*.test.mjs",
+    "test:image": "node --test __tests__/image-backends.test.mjs",
+    "test:lookbook": "node --test __tests__/lookbook-ui.test.mjs __tests__/scene-follow-swap.test.mjs",
+    "test:face": "node --test __tests__/model-face-*.test.mjs __tests__/face-analysis.test.mjs",
+    "test:delivery": "node --test __tests__/pending-*.test.mjs __tests__/generation-recovery.test.mjs __tests__/sse-backpressure.test.mjs",
+    "test:billing": "node --test __tests__/generation-billing.test.mjs __tests__/model-face-billing.test.mjs",
+    "test:prompts": "node --test __tests__/prompt-snapshot.test.mjs __tests__/scene-follow-swap.test.mjs __tests__/model-face-identity.test.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -19,7 +26,6 @@
     "dexie": "^4.3.0",
     "dotenv": "^17.4.0",
     "file-saver": "^2.0.5",
-    "inngest": "^3.51.0",
     "jose": "^6.2.2",
     "jszip": "^3.10.1",
     "lucide-react": "^0.563.0",

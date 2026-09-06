@@ -118,10 +118,12 @@ export default function HomePage() {
     touchedRef.current.skinTone = true;
     setSelectedSkinTone(v);
   }, []);
+  // ===== [B] product/scene 模式切换（状态） · 开始 =====
   const selectModule = useCallback((v: ModuleType) => {
     touchedRef.current.module = true;
     setActiveModule(v);
   }, []);
+  // ===== [B] product/scene 模式切换（状态） · 结束 =====
   const selectModelId = useCallback((v: string) => {
     touchedRef.current.modelId = true;
     setSelectedModelId(v);
@@ -519,6 +521,7 @@ export default function HomePage() {
                   </div>
                 </div>
 
+                {/* ===== [B] product/scene 模式切换（UI） · 开始 ===== */}
                 {/* 模块切换 */}
                 <div className="grid grid-cols-2 gap-3 sm:gap-6">
                   <button
@@ -565,6 +568,7 @@ export default function HomePage() {
                     {activeModule === 'scene' && <div className="absolute -bottom-8 -right-8 w-24 h-24 bg-[var(--color-accent)]/20 rounded-full blur-3xl pointer-events-none"></div>}
                   </button>
                 </div>
+                {/* ===== [B] product/scene 模式切换（UI） · 结束 ===== */}
 
                 {/* 模特快选（一键切换人种 / 性别）— 展开高级后用 Step 3 的完整 ModelSelector，避免重复 */}
                 {!advancedShown && (

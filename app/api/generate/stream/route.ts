@@ -228,6 +228,7 @@ async function withPhaseBeat<T>(
  * fail-open：落库失败就退回原来的直推。宁可冒一次大行的风险，也不能让一张已经扣过费的图
  * 因为交接缓冲不可用而丢掉。
  */
+// ===== [E] 交付与 pending 入库 · 开始 =====
 async function deliverResult(
   push: StreamPush,
   userId: string,
@@ -283,6 +284,7 @@ async function deliverAnchor(
   });
   push('anchor', prepared.payload);
 }
+// ===== [E] 交付与 pending 入库 · 结束 =====
 
 function generationIdempotencyKey(
   userId: string,
@@ -332,11 +334,13 @@ async function generationDeductionErrorMessage(
 // ═══════════════════════════════════════
 
 export async function POST(req: NextRequest) {
+  // ===== [A] 鉴权 · 开始 =====
   // 鉴权
   const auth = await getCurrentUser();
   if (!auth) {
     return new Response(JSON.stringify({ error: '未登录' }), { status: 401 });
   }
+  // ===== [A] 鉴权 · 结束 =====
 
   let body: GenerateStreamRequest;
   try {
@@ -512,6 +516,7 @@ export async function POST(req: NextRequest) {
         const bodyTypeConfig = BODY_TYPES.find(b => b.id === (bodyType || 'standard'));
         const skinToneConfig = SKIN_TONES.find(s => s.id === (skinTone || 'light'));
 
+        // ===== [B] 产品图分支 · 开始 =====
         // ─── 产品图模块 ───
         if (moduleType === 'product') {
           const indexes = selectedShotIndexes ?? [1, 2, 3, 4, 9];
@@ -611,6 +616,7 @@ export async function POST(req: NextRequest) {
             }
 
             const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, shot.index, runId);
+            // ===== [F] 计费预扣（产品图每镜次） · 开始 =====
             const deduction = await deductBalance(
               auth.userId,
               costFen,
@@ -619,6 +625,7 @@ export async function POST(req: NextRequest) {
               requestedApiModel,
               idempotencyKey,
             );
+            // ===== [F] 计费预扣（产品图每镜次） · 结束 =====
             if (!deduction.success) {
               const errMsg = await generationDeductionErrorMessage(auth.userId, deduction.error, true);
               push('error', {
@@ -810,8 +817,10 @@ export async function POST(req: NextRequest) {
             }
           }
 
+        // ===== [B] 产品图分支 · 结束 =====
         // ─── 场景图模块 ───
         } else {
+          // ===== [B] 场景图分支 · 开始 =====
           if (!sceneRefImages || sceneRefImages.length === 0) {
             push('error', {
               shotIndex: 0,
@@ -832,6 +841,7 @@ export async function POST(req: NextRequest) {
           const declaredWidth = sceneOutputSize === 'custom' ? customWidth : outputSizeConfig.width;
           const declaredHeight = sceneOutputSize === 'custom' ? customHeight : outputSizeConfig.height;
 
+          // ===== [C] 组图分支 · 开始 =====
           if (sceneGroup) {
             // ═══════════════════════════════════════════════════════════
             // 场景图·组图（换装）模式：N 张 lookbook 参考图 → N 张换装图
@@ -959,6 +969,7 @@ export async function POST(req: NextRequest) {
               }
             };
 
+            // ===== [D] 派生身份锚分支 · 开始 =====
             let derivedAnchorSkinTone: string | undefined;
             if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && !anchorImage) {
               push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
@@ -1012,6 +1023,7 @@ export async function POST(req: NextRequest) {
                 console.log('[sceneGroup] 肖像卡生成异常，回退首张成功图作锚:', anchorErr instanceof Error ? anchorErr.message : anchorErr);
               }
             }
+            // ===== [D] 派生身份锚分支 · 结束 =====
 
             for (let i = 0; i < targetIndexes.length; i++) {
               if (clientClosed) {
@@ -1084,12 +1096,14 @@ export async function POST(req: NextRequest) {
 
               const chargeLabel = chargeDescription(sceneGroupMode === 'products' ? `同景换品 #${refSeq}` : `组图换装 #${refSeq}`);
               const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, refSeq, runId);
+              // ===== [F] 计费预扣（组图每张） · 开始 =====
               const deduction = await withPhaseBeat(
                 push,
                 '正在核对余额',
                 phaseMeta,
                 () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel, idempotencyKey),
               );
+              // ===== [F] 计费预扣（组图每张） · 结束 =====
               if (!deduction.success) {
                 const errMsg = await generationDeductionErrorMessage(auth.userId, deduction.error, true);
                 push('error', { shotIndex: refSeq, current: i + 1, total, message: errMsg, fatal: true });
@@ -1245,6 +1259,7 @@ export async function POST(req: NextRequest) {
                 // 组图每张独立：不整批中止，继续下一张
               }
             }
+          // ===== [C] 组图分支 · 结束 =====
           } else {
           const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
           if (preflightBalance && !preflightBalance.sufficient) {
@@ -1313,6 +1328,7 @@ export async function POST(req: NextRequest) {
           }
 
           const idempotencyKey = generationIdempotencyKey(auth.userId, taskId, 0, runId);
+          // ===== [F] 计费预扣（单张场景图） · 开始 =====
           const sceneDeduction = await deductBalance(
             auth.userId,
             costFen,
@@ -1321,6 +1337,7 @@ export async function POST(req: NextRequest) {
             requestedApiModel,
             idempotencyKey,
           );
+          // ===== [F] 计费预扣（单张场景图） · 结束 =====
           if (!sceneDeduction.success) {
             const errMsg = await generationDeductionErrorMessage(auth.userId, sceneDeduction.error, false);
             push('error', {
@@ -1489,6 +1506,7 @@ export async function POST(req: NextRequest) {
           }
           } // end 单张场景图 else
         }
+        // ===== [B] 场景图分支 · 结束 =====
 
         // 静默学习品牌偏好：至少 1 张成功就记住这次的 模特/体型/肤色/模块/引擎
         if (successCount > 0) {
