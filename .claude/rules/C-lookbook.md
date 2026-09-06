@@ -4,6 +4,8 @@ paths:
   - "lib/prompts/group.ts"
   - "components/LookbookGarmentSlots.tsx"
   - "components/BatchOutputMatrix.tsx"
+  - "components/ModelFaceLibraryPanel.tsx"
+  - "app/api/generate/stream/route.ts"
 ---
 # C 组图换装
 
