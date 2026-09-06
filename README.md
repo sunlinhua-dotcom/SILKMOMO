@@ -40,7 +40,7 @@ npm run lint       # ESLint
 | `DEEPSEEK_API_KEY` | 可选 | AI 聊天助手主通道(api.deepseek.com);不配则聊天回退 Gemini Lite |
 | `DEEPSEEK_CHAT_MODEL` | 可选 | 聊天模型,默认 `deepseek-v4-pro` |
 | `GEMINI_BASE_URL` | 可选 | 上游网关地址(默认 `https://api.apiyi.com`) |
-| `DERIVED_ANCHOR_MODEL` | 可选 | `follow_scene` 派生身份锚模型(默认 `gemini-3-pro-image`) |
+| `DERIVED_ANCHOR_MODEL` | 可选 | `follow_scene` 派生身份锚模型(默认 `gemini-3.1-flash-image-preview`) |
 | `IMAGE_BACKEND` | 可选 | 默认引擎 `gemini` / `openai` |
 
 参考 `.env.example`。
@@ -75,7 +75,9 @@ refs/                本地素材库(品牌案例、产品照、样例输出;不
 
 | 文件 | 内容 |
 |---|---|
-| [`CONTEXT.md`](CONTEXT.md) | AI 协作会话入口:约束、命令、当前状态 |
+| [`CLAUDE.md`](CLAUDE.md) | AI 协作会话入口:板块地图,改哪个板块看哪份规则 |
+| [`.claude/rules/`](.claude/rules/) | 12 份板块规则:每份只讲一个板块的边界、红线与验证方式 |
+| [`docs/handoff/`](docs/handoff/) | 历次交接与验收记录(含已归档的 `CONTEXT-archived-0906.md`) |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | 里程碑与进度时间线 |
 | [`docs/BUGS.md`](docs/BUGS.md) | 踩坑记录:未决事项 + 已修复归档 |
 | [`docs/BACKUP.md`](docs/BACKUP.md) | 备份与恢复手册(Zeabur 原生 + pg_dump 脚本 + 恢复演练) |
