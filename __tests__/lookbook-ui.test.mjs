@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
+// 0906 板块拆分：脸库面板已搬到 components/ModelFaceLibraryPanel.tsx。
+// 对「组图页源码文本」的断言必须连同面板一起读——只读 page.tsx 的话，
+// doesNotMatch 会漏掉搬走的那一段，等于把守卫变成永真。
+const LOOKBOOK_SOURCE_FILES = ['app/lookbook/page.tsx', 'components/ModelFaceLibraryPanel.tsx'];
+const readLookbookSource = () => LOOKBOOK_SOURCE_FILES.map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+
 test('lookbook defaults to follow_scene and shows that option first', () => {
   const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
   const optionsIndex = source.indexOf('const MODEL_IDENTITY_OPTIONS');
@@ -141,7 +147,7 @@ test('follow_scene sends no face-library or face-job recovery requests', () => {
 });
 
 test('model face list uses thumbnails and selected originals are fetched by id', () => {
-  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const source = readLookbookSource();
 
   assert.match(source, /face\.thumbnail/);
   assert.doesNotMatch(source, /face\.image/);

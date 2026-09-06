@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
+// 0906 板块拆分：脸库面板已搬到 components/ModelFaceLibraryPanel.tsx。
+// 对「组图页源码文本」的断言必须连同面板一起读——只读 page.tsx 的话，
+// doesNotMatch 会漏掉搬走的那一段，等于把守卫变成永真。
+const LOOKBOOK_SOURCE_FILES = ['app/lookbook/page.tsx', 'components/ModelFaceLibraryPanel.tsx'];
+const readLookbookSource = () => LOOKBOOK_SOURCE_FILES.map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+
 const runner = await import('../lib/model-face-job-runner.ts');
 const billing = await import('../lib/billing-constants.ts');
 const policy = await import('../lib/model-face-job-policy.ts').catch(() => ({}));
@@ -187,7 +193,7 @@ test('job API recovers interrupted work, has no library total cap, and caps real
 });
 
 test('lookbook starts and polls a three-face background job without clearing existing faces', () => {
-  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const source = readLookbookSource();
 
   assert.match(source, /const handleGenerateFaces = \(\) => submitFaceJob\(\{ count: MODEL_FACE_BATCH_SIZE \}\)/);
   assert.match(source, /body: JSON\.stringify\(body\)/);
@@ -208,7 +214,7 @@ test('lookbook starts and polls a three-face background job without clearing exi
 });
 
 test('failed face jobs can be resumed when an item is still running', () => {
-  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  const source = readLookbookSource();
 
   assert.match(
     source,
