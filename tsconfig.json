@@ -6,6 +6,10 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // 0906 板块拆分：lib/prompts/* 之间用带 .ts 后缀的相对路径互相引用，
+    // 这样同一份源码既能被 next build（webpack 解析实际文件）编译，也能被
+    // node --test 直接 import（Node 的 TS 剥离要求写全后缀）。仅放宽编译期检查，不改产物。
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

@@ -7,6 +7,18 @@ const api = await import('../lib/api.ts');
 const postprocess = await import('../lib/postprocess.ts');
 const recovery = await import('../lib/generation-recovery.ts');
 
+// 0906 板块拆分：提示词构造器已从 lib/api.ts 搬到 lib/prompts/*，lib/api.ts 只剩 re-export 桶。
+// 对「源码文本」的断言必须读拆分后的真身文件——只读桶的话 doesNotMatch 会永远为真，等于没测。
+const PROMPT_SOURCE_FILES = [
+  'lib/api.ts',
+  'lib/prompts/shared.ts',
+  'lib/prompts/product.ts',
+  'lib/prompts/scene.ts',
+  'lib/prompts/group.ts',
+  'lib/prompts/face-anchor.ts',
+];
+const readPromptSources = () => PROMPT_SOURCE_FILES.map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+
 const followSceneWithAnchor = () => api.buildSceneGroupPrompt({
   garmentDescription: 'blush satin flutter-sleeve top with covered buttons',
   garmentCategories: ['top'],
@@ -69,7 +81,7 @@ test('worn accessories stay locked in the one-pass prompt', () => {
 });
 
 test('two-pass face swap architecture is fully retired', () => {
-  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+  const apiSource = readPromptSources();
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
 
   // 提示词构造器：不再有 Pass1 只换衣的分支
@@ -107,9 +119,9 @@ test('follow_scene generates in a single backend call with the anchor attached',
 });
 
 test('derived follow-scene anchor uses the final head-and-shoulders identity portrait prompt', () => {
-  // 提示词已从 route 挪到 lib/api.ts，让「自动创建的锚」与「脸库让用户挑的脸」共用同一份，
-  // 避免两处各写一份随时间漂移。
-  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+  // 提示词已从 route 挪到 lib/prompts/face-anchor.ts，让「自动创建的锚」与「脸库让用户挑的脸」
+  // 共用同一份，避免两处各写一份随时间漂移。
+  const apiSource = fs.readFileSync('lib/prompts/face-anchor.ts', 'utf8');
   const derivedStart = apiSource.indexOf('export function buildDerivedAnchorPortraitPrompt');
   const derivedBlock = apiSource.slice(derivedStart);
 
@@ -310,7 +322,7 @@ test('mixed-garment warning rides on the existing analysis call (no extra upstre
 });
 
 test('face library ships 3 eurasian + 7 western with genuinely distinct face shapes', () => {
-  const apiSource = fs.readFileSync('lib/api.ts', 'utf8');
+  const apiSource = fs.readFileSync('lib/prompts/face-anchor.ts', 'utf8');
 
   const specsBlock = apiSource.slice(apiSource.indexOf('export const MODEL_FACE_SPECS'));
   const eurasian = (specsBlock.match(/ethnicity: 'eurasian'/g) || []).length;
