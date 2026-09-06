@@ -5,6 +5,16 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# Turbopack 必须有原生 swc 绑定才能跑 next build。npm 对 optional 依赖安装失败会静默跳过
+# （不报 warn），0906 线上构建就是这么挂的：musl 绑定没落地 → Next 回退 wasm →
+# turbo.createProject is not supported by the wasm bindings。
+# 缺了就按 next 的精确版本补装；补不上就在这一层失败，别拖到 npm run build 报一个看不懂的错。
+RUN SWC="@next/swc-linux-$(node -p process.arch)-musl" \
+ && NEXT_VER="$(node -p "require('next/package.json').version")" \
+ && (node -e "require('$SWC')" 2>/dev/null \
+     || npm install --no-save --no-audit --no-fund --libc=musl "$SWC@$NEXT_VER") \
+ && node -e "require('$SWC'); console.log('native swc ok: $SWC@$NEXT_VER')"
+
 COPY . .
 
 RUN npx prisma generate
