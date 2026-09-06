@@ -69,7 +69,10 @@ docs/business/
 docs/LOG.md
 
 # Codex / browser automation local artifacts
-.claude/
+# .claude/ 整体忽略，但 .claude/rules/ 是入库的板块规则，必须放行
+.claude/*
+!.claude/rules/
+.claude/worktrees/
 .playwright-mcp/
 
 # Local browser verification screenshots
@@ -90,3 +93,6 @@ silkmomo-*.png
 *.pptx
 微信图片_*.png
 /new0701/
+
+# 验证素材与实验证据（体积大，只在本机留档）
+verify/
