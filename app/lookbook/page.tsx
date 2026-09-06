@@ -158,6 +158,7 @@ function OutputSizeSelector({
   );
 }
 
+// ===== [D] 模特身份选择器 · 开始 =====
 function ModelIdentitySelector({
   value,
   onChange,
@@ -209,7 +210,9 @@ function ModelIdentitySelector({
     </div>
   );
 }
+// ===== [D] 模特身份选择器 · 结束 =====
 
+// ===== [D] 脸库面板（ModelFaceLibraryPanel） · 开始 =====
 function ModelFaceLibraryPanel({
   faces,
   chosenFaceId,
@@ -366,6 +369,7 @@ function ModelFaceLibraryPanel({
     </div>
   );
 }
+// ===== [D] 脸库面板（ModelFaceLibraryPanel） · 结束 =====
 
 export default function LookbookStudio() {
   // ── 登录 / 余额 ──

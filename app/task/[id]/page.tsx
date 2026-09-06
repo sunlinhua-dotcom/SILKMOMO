@@ -109,6 +109,7 @@ function getDisplayErrorMessage(message: string, successCount: number, remaining
     : message;
 }
 
+// ===== [E] 看门狗与补拉 · 开始 =====
 // ═══ SSE 停滞看门狗 ═══
 // 服务端不可能让页面无限等待：单张最长 280s（lib/image-backends OPENAI_TIMEOUT_MS）后必报错退款，
 // 且每 25s 发一次 keep-alive。但客户端读流时只是 await reader.read()——连接若在中途静默失效
@@ -309,6 +310,7 @@ async function recoverPendingImages(
   }
   return { ok: true, recoveredShotIndexes };
 }
+// ===== [E] 看门狗与补拉 · 结束 =====
 
 function buildProductGroupsFromImages(images: ImageItem[]): ProductGroupPayload[] {
   const grouped = new Map<number, ImageItem[]>();
@@ -1970,6 +1972,7 @@ export default function TaskDetailPage() {
       )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {/* ===== [E] 结果 UI · 生成中（SSE 实时） · 开始 ===== */}
         {/* ═══ 生成中状态（SSE 实时） ═══ */}
         {generating && (
           <div className="mb-8">
@@ -2066,6 +2069,7 @@ export default function TaskDetailPage() {
             )}
           </div>
         )}
+        {/* ===== [E] 结果 UI · 生成中（SSE 实时） · 结束 ===== */}
 
         {/* 输入图片概览 */}
         <div className="mb-10 bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
@@ -2305,6 +2309,7 @@ export default function TaskDetailPage() {
           </div>
         )}
 
+        {/* ===== [E] 结果 UI · 结果展示 · 开始 ===== */}
         {/* 结果展示 */}
         {images.length > 0 && (
           <div ref={resultsRef}>
@@ -2371,6 +2376,7 @@ export default function TaskDetailPage() {
             />
           </div>
         )}
+        {/* ===== [E] 结果 UI · 结果展示 · 结束 ===== */}
 
         {previewImage && (
           <ImageLightbox
@@ -2386,6 +2392,7 @@ export default function TaskDetailPage() {
           />
         )}
 
+        {/* ===== [E] 结果 UI · 失败状态 · 开始 ===== */}
         {/* 失败状态 */}
         {project.status === 'failed' && images.length === 0 && (
           <div className="text-center py-16 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
@@ -2446,6 +2453,7 @@ export default function TaskDetailPage() {
             </button>
           </div>
         )}
+        {/* ===== [E] 结果 UI · 失败状态 · 结束 ===== */}
       </main>
 
       {/* 页脚 */}
