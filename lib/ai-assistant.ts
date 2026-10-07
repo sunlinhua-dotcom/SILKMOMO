@@ -456,10 +456,14 @@ Rules:
  * 与 lib/image-backends.ts 的 sanitizeError 同口径：精确 key 打码 + URL 里 ?key= / &key= 一律打码
  * + Bearer 令牌打码。（不 import 对方，避免这个文件被 node 直接加载时多出依赖。）
  */
-function sanitizeUpstreamError(error: unknown): string {
+export function sanitizeUpstreamError(error: unknown): string {
   let msg = error instanceof Error ? error.message : String(error);
   if (LITE_CONFIG.apiKey) msg = msg.split(LITE_CONFIG.apiKey).join('***');
   return msg
     .replace(/([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"'<>]+/gi, '$1***')
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***');
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***')
+    // 常见令牌形态（与 image-backends 同口径）
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, '***')
+    .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, '***')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '***');
 }

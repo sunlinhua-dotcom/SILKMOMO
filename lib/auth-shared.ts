@@ -20,15 +20,29 @@ function stripTrailingSlash(p: string): string {
 }
 
 /**
- * 静态资源判断：只认 /_next/、/favicon.ico、/icon.svg，以及白名单扩展名的文件。
- * 不再用 pathname.includes('.') 一刀切 —— 带点号的动态路由 / API 不能借此绕过鉴权。
+ * public/ 下真实存在的子目录（首段）。新增 public 子目录要加到这里，否则其下的资源会被当成受保护页面。
+ * 页面前缀（/task、/tasks、/admin、/billing、/brand、/lookbook、/api …）不在此列，所以
+ * /task/1.png 之类「页面路径 + 白名单扩展名」不会再被当作静态资源绕过登录。
+ */
+export const PUBLIC_ASSET_DIRS = ['aesthetic_database', 'presets'] as const;
+
+/**
+ * 静态资源判断：只认 /_next/、/favicon.ico、/icon.svg，以及白名单扩展名且满足下面之一的文件：
+ *   - 根目录单段文件（如 /logo.svg、/og-image.jpg）；
+ *   - 首段是 PUBLIC_ASSET_DIRS 里的 public 子目录（如 /presets/luxury/a.jpg）。
+ * 不再用 pathname.includes('.') 一刀切 —— 带点号的动态路由 / API / 页面子路径不能借此绕过鉴权。
  * /api/ 下即使以 .png 结尾也不算静态资源。
  */
 export function isStaticAssetPath(pathname: string): boolean {
   if (pathname.startsWith('/_next/')) return true;
   if (pathname === '/favicon.ico' || pathname === '/icon.svg') return true;
   if (pathname.startsWith('/api/')) return false;
-  const last = pathname.split('/').pop() ?? '';
+  const segments = pathname.split('/').slice(1);
+  if (segments.some(seg => seg === '..' || seg === '.')) return false;
+  const isRootFile = segments.length === 1;
+  const inPublicDir = segments.length > 1 && (PUBLIC_ASSET_DIRS as readonly string[]).includes(segments[0]);
+  if (!isRootFile && !inPublicDir) return false;
+  const last = segments[segments.length - 1];
   const dot = last.lastIndexOf('.');
   if (dot <= 0 || dot === last.length - 1) return false;
   const ext = last.slice(dot + 1).toLowerCase();

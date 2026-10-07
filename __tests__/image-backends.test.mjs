@@ -89,7 +89,7 @@ test('reference normalization runs concurrently (<=3) and keeps output order', a
   const started = [];
   // 越靠前的图越慢：串行实现与「按完成顺序拼装」的实现都会在顺序断言上露馅
   const delays = { p0: 40, p1: 30, p2: 20, p3: 10, m0: 5, s0: 5, a0: 5, anchor: 5 };
-  globalThis.__normalizeStub = async (img, label) => {
+  globalThis.__normalizeStub = async (img) => {
     const key = unb64(img.data);
     started.push(key);
     inFlight += 1;
@@ -300,6 +300,26 @@ test('openai text-to-image HTTP failure is sanitized too, 429 keeps its own cate
     assert.equal(result.errorKind, 'upstream_rejected');
   });
   assert.equal(backends.sanitizeError('GET /x?key=abc123&y=1 Bearer abcdefghij12345'), 'GET /x?key=***&y=1 Bearer ***');
+});
+
+test('sanitizeError masks common token shapes (sk-/pk-/AIza/ghp_) even when not in env', async () => {
+  const tokens = ['sk-proj-AbCd1234_efGh-5678', 'sk-abcdefgh', 'pk-live_ABCDEFGH1234', 'AIzaSyA1234567890abcdefghijKLMNOP', 'ghp_' + 'a'.repeat(36)];
+  for (const t of tokens) {
+    const out = backends.sanitizeError(`upstream said: invalid key ${t} (status 401)`);
+    assert.ok(!out.includes(t), `token leaked: ${t} -> ${out}`);
+    assert.match(out, /invalid key \*\*\* \(status 401\)/);
+  }
+  // 普通文本不误伤：太短的 sk- 片段、含 sk- 的单词
+  assert.equal(backends.sanitizeError('task-queue risk-free sk-1'), 'task-queue risk-free sk-1');
+});
+
+test('ai-assistant sanitizeUpstreamError uses the same token masking', async () => {
+  const assistant = await import(`../lib/ai-assistant.ts?sanitize-test=${Date.now()}`);
+  const t = 'sk-proj-AbCd1234_efGh-5678';
+  const out = assistant.sanitizeUpstreamError(new Error(`fail ${t} Bearer abcdefghij12345 /x?key=zzz999`));
+  assert.ok(!out.includes(t));
+  assert.equal(out, 'fail *** Bearer *** /x?key=***');
+  assert.equal(assistant.sanitizeUpstreamError('AIzaSyA1234567890abcdefghijKLMNOP'), '***');
 });
 
 test('gemini HTTP failure, moderation text and key echo are sanitized', async () => {

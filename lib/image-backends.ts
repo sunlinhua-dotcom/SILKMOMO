@@ -144,7 +144,11 @@ export function sanitizeError(msg: string): string {
   if (OPENAI_API_KEY && OPENAI_API_KEY !== API_KEY) out = out.split(OPENAI_API_KEY).join('***');
   return out
     .replace(/([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"'<>]+/gi, '$1***')
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***');
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***')
+    // 常见令牌形态：sk-… / pk-… / rk-…（OpenAI、302、apiyi 等）、Google AIza…、GitHub gh?_…
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, '***')
+    .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, '***')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '***');
 }
 
 const MODERATION_RE = /moderation|content[_ -]?policy|safety[_ -]?(?:system|violation)|sensitive|审核|违规|敏感/i;

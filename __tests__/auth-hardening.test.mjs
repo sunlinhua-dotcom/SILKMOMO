@@ -115,6 +115,19 @@ test('classifyPath：静态资源只放行白名单，点号动态路由不能�
   assert.equal(c('/icon.svg'), 'asset');
   assert.equal(c('/presets/a.jpg'), 'asset');
   assert.equal(c('/logo.SVG'), 'asset');
+  // 根目录单段文件 / public 真实子目录放行
+  assert.equal(c('/logo.svg'), 'asset');
+  assert.equal(c('/og-image.jpg'), 'asset');
+  assert.equal(c('/presets/luxury/deiji.jpg'), 'asset');
+  assert.equal(c('/aesthetic_database/ig_DWiOJUNkqHZ_f32009.jpg'), 'asset');
+  // 页面前缀 + 白名单扩展名不能绕过登录
+  assert.equal(c('/task/1.png'), 'protected');
+  assert.equal(c('/tasks/1.png'), 'protected');
+  assert.equal(c('/admin/x.css'), 'protected');
+  assert.equal(c('/lookbook/a.js'), 'protected');
+  assert.equal(c('/billing/a.svg'), 'protected');
+  assert.equal(c('/brand/a.webp'), 'protected');
+  assert.equal(c('/presets/../task/1.png'), 'protected');
   // 以前 includes('.') 会放行下面这些
   assert.equal(c('/task/abc.def'), 'protected');
   assert.equal(c('/admin/users.json'), 'protected');
