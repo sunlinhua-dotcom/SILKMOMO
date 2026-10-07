@@ -21,6 +21,8 @@ interface ImageLightboxProps {
   onAdjust?: () => void;
   /** 为 true 时重做 / 微调入口置灰 */
   busy?: boolean;
+  /** 单张重做的标价（如「¥1.20」）：有值时写进「重新生成」按钮的文字与 aria-label */
+  regenerateCostLabel?: string;
 }
 
 const SWIPE_MIN_PX = 50;
@@ -42,6 +44,7 @@ export function ImageLightbox({
   onRegenerate,
   onAdjust,
   busy = false,
+  regenerateCostLabel,
 }: ImageLightboxProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -163,9 +166,16 @@ export function ImageLightbox({
       {hasActions && (
         <div className="flex flex-wrap items-center justify-center gap-2 px-4 py-3 flex-shrink-0" onClick={backdropClose}>
           {onRegenerate && (
-            <button type="button" onClick={onRegenerate} disabled={busy} className={ACTION_BTN}>
+            <button
+              type="button"
+              onClick={onRegenerate}
+              disabled={busy}
+              className={ACTION_BTN}
+              aria-label={regenerateCostLabel ? `重新生成这张（${regenerateCostLabel}）` : undefined}
+              title={regenerateCostLabel ? `重新生成这张（${regenerateCostLabel}）` : undefined}
+            >
               <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
-              重新生成
+              重新生成{regenerateCostLabel ? <span className="num">（{regenerateCostLabel}）</span> : null}
             </button>
           )}
           {onAdjust && (

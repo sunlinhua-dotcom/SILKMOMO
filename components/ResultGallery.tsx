@@ -23,6 +23,8 @@ interface ResultGalleryProps {
   onRegenerate?: (imageId: number, customPrompt?: string) => void;
   onAcceptNewVersion?: (imageId: number) => void;
   onRejectNewVersion?: (imageId: number) => void;
+  /** 单张重做的标价（如「¥1.20」）：有值时写进重做按钮的 aria-label / 提示 */
+  regenerateCostLabel?: string;
 }
 
 type ImageType = ResultImage['imageType'];
@@ -146,6 +148,7 @@ const GalleryTile = memo(function GalleryTile({
   isRegen,
   isAdjusting,
   canRegenerate,
+  regenCostLabel,
   actions
 }: {
   id: number;
@@ -154,9 +157,11 @@ const GalleryTile = memo(function GalleryTile({
   isRegen: boolean;
   isAdjusting: boolean;
   canRegenerate: boolean;
+  regenCostLabel?: string;
   actions: GalleryActions;
 }) {
   const label = IMAGE_LABELS[imageType];
+  const regenLabel = regenCostLabel ? `重新生成这张（${regenCostLabel}）` : '重新生成（用相同参数）';
   const size = intrinsicSizeFor(imageType);
   return (
     <div
@@ -218,10 +223,10 @@ const GalleryTile = memo(function GalleryTile({
             {canRegenerate && (
               <>
                 <div className="relative group/tip">
-                  <button type="button" onClick={() => actions.regenerate(id)} className={ROUND_BTN} aria-label="重新生成（用相同参数）">
+                  <button type="button" onClick={() => actions.regenerate(id)} className={ROUND_BTN} aria-label={regenLabel} title={regenLabel}>
                     <RefreshCw className="w-5 h-5" strokeWidth={1.5} />
                   </button>
-                  <span aria-hidden="true" className={TIP}>重新生成</span>
+                  <span aria-hidden="true" className={TIP}>{regenCostLabel ? `重新生成 ${regenCostLabel}` : '重新生成'}</span>
                 </div>
                 <div className="relative group/tip">
                   <button type="button" onClick={() => actions.startAdjust(id)} className={ROUND_BTN} aria-label="描述要调整什么">
@@ -252,6 +257,7 @@ const CompareRow = memo(function CompareRow({
   isRegen,
   isAdjusting,
   canRegenerate,
+  regenCostLabel,
   actions
 }: {
   id: number;
@@ -261,11 +267,13 @@ const CompareRow = memo(function CompareRow({
   isRegen: boolean;
   isAdjusting: boolean;
   canRegenerate: boolean;
+  regenCostLabel?: string;
   actions: GalleryActions;
 }) {
   const aspectClass = aspectClassFor(imageType);
   const size = intrinsicSizeFor(imageType);
   const label = IMAGE_LABELS[imageType];
+  const regenLabel = regenCostLabel ? `重新生成这张（${regenCostLabel}）` : '重新生成（用相同参数）';
 
   return (
     <div className="rounded-2xl border border-border-light bg-surface p-3 sm:p-4 space-y-3 animate-fade-in">
@@ -337,9 +345,9 @@ const CompareRow = memo(function CompareRow({
           </button>
           {canRegenerate && (
             <>
-              <button type="button" onClick={() => actions.regenerate(id)} disabled={isRegen} className={ROW_BTN}>
+              <button type="button" onClick={() => actions.regenerate(id)} disabled={isRegen} className={ROW_BTN} aria-label={regenLabel} title={regenLabel}>
                 {isRegen ? <Loader className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" strokeWidth={1.5} />}
-                重新生成
+                重新生成{regenCostLabel ? `（${regenCostLabel}）` : ''}
               </button>
               <button type="button" onClick={() => actions.startAdjust(id)} disabled={isRegen} className={ROW_BTN}>
                 <Wand2 className="w-4 h-4" strokeWidth={1.5} />
@@ -390,7 +398,8 @@ function ResultGalleryImpl({
   images,
   onRegenerate,
   onAcceptNewVersion,
-  onRejectNewVersion
+  onRejectNewVersion,
+  regenerateCostLabel
 }: ResultGalleryProps) {
   const toast = useToast();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -578,6 +587,7 @@ function ResultGalleryImpl({
                 isRegen={regenerating.has(image.id)}
                 isAdjusting={adjustingId === image.id}
                 canRegenerate={canRegenerate}
+                regenCostLabel={regenerateCostLabel}
                 actions={actions}
               />
             ))}
@@ -593,6 +603,7 @@ function ResultGalleryImpl({
                     isRegen={regenerating.has(image.id)}
                     isAdjusting={adjustingId === image.id}
                     canRegenerate={canRegenerate}
+                    regenCostLabel={regenerateCostLabel}
                     actions={actions}
                   />
                 ))}
@@ -611,6 +622,7 @@ function ResultGalleryImpl({
           onPrev={selectedIdx > 0 ? () => setSelectedKey(viewItems[selectedIdx - 1].key) : undefined}
           onNext={selectedIdx < viewItems.length - 1 ? () => setSelectedKey(viewItems[selectedIdx + 1].key) : undefined}
           busy={regenerating.has(selected.id)}
+          regenerateCostLabel={regenerateCostLabel}
           onRegenerate={
             canRegenerate && !selected.isOld
               ? () => { setSelectedKey(null); void regenerate(selected.id); }
@@ -664,5 +676,6 @@ export const ResultGallery = memo(
     prev.onRegenerate === next.onRegenerate &&
     prev.onAcceptNewVersion === next.onAcceptNewVersion &&
     prev.onRejectNewVersion === next.onRejectNewVersion &&
+    prev.regenerateCostLabel === next.regenerateCostLabel &&
     sameImages(prev.images, next.images)
 );

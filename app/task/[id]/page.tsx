@@ -445,6 +445,8 @@ export default function TaskDetailPage() {
   const autostartHandledRef = useRef(false);
   // AI 触发整任务重做时确认框正在显示，避免连续触发叠出多个确认
   const aiConfirmingRef = useRef(false);
+  // 单张重做的确认弹窗是否打开：防止确认期间连点别的图再弹第二个
+  const regenConfirmingRef = useRef(false);
   // 余额不足时的充值引导弹窗（值为这次动作需要的费用，null = 关闭）
   const [rechargeNeedFen, setRechargeNeedFen] = useState<number | null>(null);
 
@@ -1573,7 +1575,25 @@ export default function TaskDetailPage() {
   const handleRegenerate = async (imageId: number, customPrompt?: string) => {
     // 也要挡住 startLock / abortController 窗口：否则 handleStartGeneration 会因这些锁提前 return，
     // 而旧图此前已被 update 成 result_backup —— 重做没发生、旧图却被永久降级，等于丢图。
-    if (!project || generating || regenLockRef.current || startLockRef.current || abortControllerRef.current) return;
+    if (!project || generating || regenLockRef.current || startLockRef.current || abortControllerRef.current || regenConfirmingRef.current) return;
+    // 单张重做同样按单价扣费：余额不足走充值弹窗；否则先确认金额，取消则什么都不跑（也不碰备份）。
+    if (affordability(unitCostFen) === 'insufficient') {
+      setRechargeNeedFen(unitCostFen);
+      return;
+    }
+    regenConfirmingRef.current = true;
+    let regenConfirmed = false;
+    try {
+      regenConfirmed = await confirm({
+        title: '重新生成这张？',
+        message: `将重新生成这 1 张，预计扣费 ${formatYuan(unitCostFen)}（生成失败自动退款）。当前这张会保留为备份，可在对比里还原。`,
+        confirmText: `确认重做 · ${formatYuan(unitCostFen)}`,
+      });
+    } finally {
+      regenConfirmingRef.current = false;
+    }
+    // 等待确认期间可能已有别的生成开跑，再核一次同步锁
+    if (!regenConfirmed || generating || regenLockRef.current || startLockRef.current || abortControllerRef.current) return;
     regenLockRef.current = true;
     const runId = crypto.randomUUID();
 
@@ -2265,6 +2285,7 @@ export default function TaskDetailPage() {
                     backup: img.backup,
                   }))}
                   onRegenerate={handleRegenerate}
+                  regenerateCostLabel={formatYuan(unitCostFen)}
                   onAcceptNewVersion={handleAcceptNewVersion}
                   onRejectNewVersion={handleRejectNewVersion}
                 />
@@ -2532,7 +2553,7 @@ export default function TaskDetailPage() {
               生成结果 · {images.length} 张
             </h2>
 
-            <div className="mb-6">{paramChips}</div>
+            {/* 参数芯片（引擎 / 画质 / 模特…）只在上方「输入图片」卡里显示一份，这里不再重复 */}
 
             {productGroupLabels.length > 0 && (
               <div className="mb-5 flex flex-wrap gap-2">
@@ -2558,6 +2579,7 @@ export default function TaskDetailPage() {
                 backup: img.backup,
               }))}
               onRegenerate={handleRegenerate}
+              regenerateCostLabel={formatYuan(unitCostFen)}
               onAcceptNewVersion={handleAcceptNewVersion}
               onRejectNewVersion={handleRejectNewVersion}
             />
