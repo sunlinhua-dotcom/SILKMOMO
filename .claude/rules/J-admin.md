@@ -13,6 +13,7 @@ paths:
 - `app/admin/failures/`、`app/admin/pending-deliveries/` — 两个运维视图。
 - `app/api/admin/users|stats|analytics|failures|pending-deliveries|setup/route.ts`
 - `components/FailureHistoryPanel.tsx`
+- `app/admin/layout.tsx` — 后台外层布局（页面元数据）。
 
 ## 共享依赖
 - 它依赖：`lib/auth`(A)、`lib/prisma`(Z)、`lib/billing`(F)、`lib/pending-image`(E)。

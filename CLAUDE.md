@@ -6,18 +6,19 @@
 
 | 板块 | 一句话职责 | 规则文件 | 入口文件 | 测试命令 |
 | --- | --- | --- | --- | --- |
-| A 鉴权 | 登录注册、JWT 签发校验、请求头注入 | `.claude/rules/A-auth.md` | `lib/auth.ts`、`proxy.ts`、`app/api/auth/*` | `npm test` |
-| B 主出图 | 单图生成主链路与出图后端通道 | `.claude/rules/B-generate.md` | `app/api/generate/stream/route.ts`、`lib/image-backends.ts` | `npm run test:image` |
+| A 鉴权 | 登录注册、JWT 签发校验、请求头注入 | `.claude/rules/A-auth.md` | `lib/auth.ts`、`lib/auth-shared.ts`、`proxy.ts`、`app/api/auth/*` | `npm test`（鉴权专项 `node --test __tests__/auth-hardening.test.mjs`） |
+| B 主出图 | 单图生成主链路与出图后端通道 | `.claude/rules/B-generate.md` | `app/api/generate/stream/route.ts`、`lib/image-backends.ts`、`lib/generation-concurrency.ts` | `npm run test:image` |
 | C 组图换装 | Lookbook 组图、同景换品、批量分块 | `.claude/rules/C-lookbook.md` | `app/lookbook/page.tsx`、`lib/prompts/group.ts` | `npm run test:lookbook` |
 | D 脸库与身份锚 | 模特脸库 CRUD、派生身份锚、换脸一致性 | `.claude/rules/D-face.md` | `lib/model-face-*.ts`、`app/api/model-faces/route.ts` | `npm run test:face` |
-| E 交付与补拉 | SSE 交付、pending 入库、断线补拉与看门狗 | `.claude/rules/E-delivery.md` | `lib/pending-*.ts`、`app/task/[id]/page.tsx` | `npm run test:delivery` |
-| F 计费 | 积分预扣、失败退款、幂等与流水 | `.claude/rules/F-billing.md` | `lib/billing.ts`、`lib/generation-billing-core.ts` | `npm run test:billing` |
+| E 交付与补拉 | SSE 交付、pending 入库、断线补拉与看门狗 | `.claude/rules/E-delivery.md` | `lib/pending-*.ts`、`app/task/[id]/page.tsx`、`components/task/*` | `npm run test:delivery` |
+| F 计费 | 积分预扣、失败退款、幂等与流水 | `.claude/rules/F-billing.md` | `lib/billing.ts`、`lib/generation-billing-core.ts`、`lib/billing-reconcile.ts` | `npm run test:billing` |
 | G 提示词 | 四个提示词 builder 与模特脸规格常量 | `.claude/rules/G-prompts.md` | `lib/prompts/*.ts`（`lib/api.ts` 是 re-export 桶） | `npm run test:prompts` |
 | H AI 助手 | 对话式改图建议、图片分析 | `.claude/rules/H-assistant.md` | `lib/ai-assistant.ts`、`app/api/ai/*` | `npm test` |
-| I 客户端存储与上传 | IndexedDB 图库、本地会话、图片压缩上传 | `.claude/rules/I-client-storage.md` | `lib/db.ts`、`lib/image-compressor.ts`、`components/ImageUploader.tsx` | `npm test` |
+| I 客户端存储与上传 | IndexedDB 图库、本地会话、图片压缩上传 | `.claude/rules/I-client-storage.md` | `lib/db.ts`、`lib/recent-tasks.ts`、`lib/image-compressor.ts`、`components/ImageUploader.tsx` | `node --test __tests__/client-storage.test.mjs` / `npm test` |
 | J 管理后台 | 用户与统计、失败与 pending 运维视图 | `.claude/rules/J-admin.md` | `app/admin/*`、`app/api/admin/*` | `npm test` |
 | K 品牌记忆 | 品牌调性档案的读写与注入 | `.claude/rules/K-brand.md` | `lib/brand-memory.ts`、`app/api/brand/route.ts` | `npm test` |
-| Z 数据层 | Prisma schema、连接与适配器 | `.claude/rules/Z-data.md` | `prisma/schema.prisma`、`lib/prisma.ts` | `npm test` |
+| U 共享 UI 底座 | 设计 token、全局 Provider、弹窗/确认/提示、选择器、导航与画廊 | `.claude/rules/U-shared-ui.md` | `components/ui/*`、`app/providers.tsx`、`app/globals.css`、`hooks/useBalance.ts` | `npm test` |
+| Z 数据层 | Prisma schema、连接与适配器 | `.claude/rules/Z-data.md` | `prisma/schema.prisma`、`lib/prisma.ts`、`Dockerfile` | `npm test` |
 
 ## 硬约束（长期有效）
 

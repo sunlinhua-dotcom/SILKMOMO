@@ -3,6 +3,8 @@ paths:
   - "lib/billing.ts"
   - "lib/billing-constants.ts"
   - "lib/generation-billing-core.ts"
+  - "lib/billing-reconcile.ts"
+  - "instrumentation.ts"
   - "lib/model-face-billing*.ts"
   - "lib/generation-idempotency.ts"
   - "app/billing/**"
@@ -17,7 +19,8 @@ paths:
 - `lib/billing-constants.ts` — 单价与档位常量。
 - `lib/generation-billing-core.ts` — 出图计费核心。
 - `lib/model-face-billing.ts` / `-billing-core.ts` — 脸库计费。
-- `lib/generation-idempotency.ts` — 幂等键。
+- `lib/generation-idempotency.ts` — 幂等键与时间窗常量（`GENERATION_IN_FLIGHT_WINDOW_MS`、`GENERATION_ORPHAN_AGE_MS`=20 分钟）。
+- `lib/billing-reconcile.ts` — 孤儿扣费清扫：`fulfilledAt` 为空且超过 20 分钟的出图 consume 走幂等退款；`instrumentation.ts` 启动时每 5 分钟跑一次。纯逻辑 `reconcileGenerationBilling` 无运行时依赖，可被 node:test 直接加载。
 - `app/api/billing/transactions/route.ts`、`app/billing/page.tsx`
 
 ## 共享依赖
@@ -28,8 +31,11 @@ paths:
 - **扣费必须原子**：预扣和落库在同一个事务里，不许拆成两步。
 - **失败必须退款**：任何出图失败路径都要走到退款，新增失败分支时先确认退款也覆盖到了。
 - **幂等键不能动**：改了会让重试变成重复扣费。
+- **`Transaction.fulfilledAt` 是履约标记**：出图类 consume 在「结果已写入 pending / 已推给客户端」时写入；幂等命中（同键重放）看到已履约，永不再生成（堵住了「同 runId 重放免费出图」）。
+- **新增 consume 路径若是出图类，必须写 `fulfilledAt`**，否则 20 分钟后清扫会把它当孤儿误退款，用户白拿一次图。脸库计费（`<id>:charge` 键）与 AI 助手（无键）不走这个语义，别照抄。
+- **孤儿清扫退款前必须查 pending 与成功的 `GenerationRecord`**：只看 `fulfilledAt` 为空会误退「已交付但标记没写上」的单子；改清扫判据时这两个查询不能省。退款本身走现有幂等路径（先认领流水再入账），多实例同时清扫不会重复退。
 - 任何改动都必须跑 `npm run test:billing`，这套测试是防赔钱的。
 
 ## 测试与验收
-- `npm run test:billing`
+- `npm run test:billing`（含 `generation-billing-replay.test.mjs`：重放、交付后不退款、孤儿清扫）
 - 手工验收：`/billing` 看流水；故意让一次生成失败，余额应该回到原值。
