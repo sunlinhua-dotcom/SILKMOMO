@@ -5,7 +5,11 @@
  * 查询参数:
  *   - days: 最近 N 天（默认 7）
  *   - limit: 单页条数（默认 100，最大 500）
- *   - apiModel: 过滤 backend，如 "gemini-3.1-flash-image-preview" / "gpt-image-2-all"
+ *   - apiModel: 过滤 backend，如 "gemini-3.1-flash-image-preview" / "gpt-image-2"
+ *
+ * 返回: summary / topErrors / records（最多 limit 条）；
+ *   另有 total（当前筛选下的真实失败总数，records 可能被 limit 截断）与
+ *   apiModels（该时间窗内出现过的 apiModel 列表，供前端筛选下拉）。
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
@@ -32,7 +36,7 @@ export async function GET(req: Request) {
 
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const [records, totalFailures, totalSuccesses, byErrorPattern] = await Promise.all([
+  const [records, totalFailures, totalSuccesses, byErrorPattern, filteredTotal, modelGroups] = await Promise.all([
     prisma.generationRecord.findMany({
       where: {
         success: false,
@@ -70,6 +74,15 @@ export async function GET(req: Request) {
       orderBy: { _count: { id: 'desc' } },
       take: 10,
     }),
+    // 当前筛选下的真实失败总数（records 受 limit 截断，不能用 records.length）
+    apiModel
+      ? prisma.generationRecord.count({ where: { success: false, createdAt: { gte: since }, apiModel } })
+      : Promise.resolve(null),
+    // 时间窗内出现过的引擎（成功 + 失败都算），供筛选下拉
+    prisma.generationRecord.groupBy({
+      by: ['apiModel'],
+      where: { createdAt: { gte: since } },
+    }),
   ]);
 
   const totalAttempts = totalFailures + totalSuccesses;
@@ -88,5 +101,10 @@ export async function GET(req: Request) {
       count: p._count.id,
     })),
     records,
+    total: filteredTotal ?? totalFailures,
+    apiModels: modelGroups
+      .map((g: { apiModel: string }) => g.apiModel)
+      .filter(Boolean)
+      .sort(),
   });
 }

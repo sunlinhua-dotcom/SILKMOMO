@@ -16,5 +16,21 @@ export async function GET() {
   }
 
   const { records, hasMore } = await listStalePendingImages();
-  return NextResponse.json({ records, count: records.length, hasMore, minimumAgeMinutes: 10 });
+
+  // PendingImage 没有 User 关联，按 userId 批量查一次用户名并拼回（新增 user 字段，旧字段不变）
+  const userIds = [...new Set(records.map(r => r.userId))];
+  const users = userIds.length > 0
+    ? await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, username: true, name: true },
+      })
+    : [];
+  const userMap = new Map(users.map(u => [u.id, { username: u.username, name: u.name }]));
+
+  return NextResponse.json({
+    records: records.map(r => ({ ...r, user: userMap.get(r.userId) ?? null })),
+    count: records.length,
+    hasMore,
+    minimumAgeMinutes: 10,
+  });
 }

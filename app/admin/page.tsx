@@ -1,9 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Users, CreditCard, Activity, Search, Plus, RefreshCw } from 'lucide-react';
-import { Logo } from '@/components/Logo';
+import { Users, CreditCard, Activity, Search, Plus, RefreshCw } from 'lucide-react';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { Modal } from '@/components/ui/Modal';
+import { useToast } from '@/components/ui/Toast';
+import { RECHARGE_PACKAGES } from '@/lib/billing-constants';
 
 interface AdminStats {
   totalUsers: number;
@@ -23,82 +26,167 @@ interface UserItem {
   _count: { transactions: number };
 }
 
+interface RechargeTarget {
+  userId: string;
+  username: string;
+  name: string;
+}
+
+const PAGE_SIZE = 50;
+
+// 充值规则：起充额取自套餐表里最小的一档；步长与 POST /api/admin/users 的校验一致（¥75 倍数）
+const MIN_RECHARGE_FEN = Math.min(...RECHARGE_PACKAGES.map(p => p.amountFen));
+const RECHARGE_STEP_FEN = 7500;
+const yuan = (fen: number) => String(fen / 100);
+const RECHARGE_RULE_TEXT = `最低充值 ¥${yuan(MIN_RECHARGE_FEN)}，且必须是 ¥${yuan(RECHARGE_STEP_FEN)} 的倍数`;
+
+const formatFen = (fen: number) => `¥${(fen / 100).toFixed(2)}`;
+
+/** 把输入的元数解析成分；不合规返回 null */
+function parseRechargeFen(input: string): number | null {
+  const n = parseFloat(input);
+  if (!Number.isFinite(n)) return null;
+  const fen = Math.round(n * 100);
+  if (fen < MIN_RECHARGE_FEN || fen % RECHARGE_STEP_FEN !== 0) return null;
+  return fen;
+}
+
 export default function AdminPage() {
+  const toast = useToast();
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [users, setUsers] = useState<UserItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [rechargeModal, setRechargeModal] = useState<{ userId: string; username: string; name: string } | null>(null);
+  const [query, setQuery] = useState(''); // 防抖后的搜索词
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState('');
+  const [rechargeModal, setRechargeModal] = useState<RechargeTarget | null>(null);
   const [rechargeAmount, setRechargeAmount] = useState('');
   const [rechargeNote, setRechargeNote] = useState('');
   const [recharging, setRecharging] = useState(false);
-  const [message, setMessage] = useState('');
+  const [rechargeError, setRechargeError] = useState('');
+  const rechargingRef = useRef(false);
+  const listAbortRef = useRef<AbortController | null>(null);
+  const amountRef = useRef<HTMLInputElement>(null);
 
-  const loadData = useCallback(async () => {
+  const loadStats = useCallback(async () => {
     try {
-      const [statsRes, usersRes] = await Promise.all([
-        fetch('/api/admin/stats'),
-        fetch(`/api/admin/users?search=${encodeURIComponent(search)}`),
-      ]);
-      const statsData = await statsRes.json();
-      const usersData = await usersRes.json();
-
-      if (statsData.stats) setStats(statsData.stats);
-      if (usersData.users) setUsers(usersData.users);
+      const res = await fetch('/api/admin/stats');
+      const data = await res.json();
+      if (data.stats) setStats(data.stats);
     } catch (error) {
-      console.error('加载管理数据失败:', error);
-    } finally {
-      setLoading(false);
+      console.error('加载统计失败:', error);
     }
+  }, []);
+
+  // 拉用户列表；新请求会取消旧请求，防止搜索乱序覆盖
+  const loadUsers = useCallback(async (targetPage: number, searchTerm: string) => {
+    listAbortRef.current?.abort();
+    const controller = new AbortController();
+    listAbortRef.current = controller;
+    setListLoading(true);
+    setListError('');
+    try {
+      const res = await fetch(
+        `/api/admin/users?search=${encodeURIComponent(searchTerm)}&page=${targetPage}&pageSize=${PAGE_SIZE}`,
+        { signal: controller.signal },
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '加载失败');
+      const incoming: UserItem[] = data.users || [];
+      setUsers(prev => {
+        if (targetPage === 1) return incoming;
+        const seen = new Set(prev.map(u => u.id));
+        return [...prev, ...incoming.filter(u => !seen.has(u.id))];
+      });
+      setTotal(typeof data.total === 'number' ? data.total : incoming.length);
+      setPage(targetPage);
+    } catch (error) {
+      if (controller.signal.aborted) return; // 被新请求取代，忽略
+      setListError(error instanceof Error ? error.message : '加载失败');
+    } finally {
+      if (listAbortRef.current === controller) {
+        setListLoading(false);
+        setInitialLoading(false);
+      }
+    }
+  }, []);
+
+  // 搜索 300ms 防抖
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 300);
+    return () => clearTimeout(t);
   }, [search]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    void loadUsers(1, query);
+    return () => listAbortRef.current?.abort();
+  }, [query, loadUsers]);
+
+  useEffect(() => {
+    void loadStats();
+  }, [loadStats]);
+
+  const closeRecharge = () => {
+    if (rechargingRef.current) return;
+    setRechargeModal(null);
+    setRechargeAmount('');
+    setRechargeNote('');
+    setRechargeError('');
+  };
 
   const handleRecharge = async () => {
-    if (!rechargeModal || !rechargeAmount) return;
+    if (!rechargeModal || rechargingRef.current) return;
+    const amountFen = parseRechargeFen(rechargeAmount);
+    if (amountFen === null) {
+      setRechargeError(`请输入正确的金额（${RECHARGE_RULE_TEXT}）`);
+      return;
+    }
+
+    rechargingRef.current = true; // ref 兜底，防止同一帧内双击
     setRecharging(true);
-    setMessage('');
+    setRechargeError('');
+    const target = rechargeModal;
 
     try {
-      const amountFen = Math.round(parseFloat(rechargeAmount) * 100);
-      if (isNaN(amountFen) || amountFen < 15000 || amountFen % 7500 !== 0) {
-        setMessage('请输入正确的金额（最低充值 ¥150，且必须是 ¥75 的倍数）');
-        setRecharging(false);
-        return;
-      }
-
       const res = await fetch('/api/admin/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: rechargeModal.userId,
+          userId: target.userId,
           amountFen,
-          description: rechargeNote || `管理员充值 ¥${rechargeAmount}`,
+          description: rechargeNote.trim() || `管理员充值 ¥${amountFen / 100}`,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (data.success) {
-        setMessage(`✅ 充值成功！新余额 ¥${(data.balanceAfter / 100).toFixed(2)}`);
+        toast.success(`已为 ${target.name || target.username} 充值 ${formatFen(amountFen)}，新余额 ${formatFen(data.balanceAfter)}`);
+        // 就地更新该用户行，再刷新统计
+        setUsers(prev => prev.map(u => (u.id === target.userId
+          ? { ...u, balanceFen: data.balanceAfter, _count: { transactions: u._count.transactions + 1 } }
+          : u)));
+        rechargingRef.current = false;
+        setRecharging(false);
         setRechargeModal(null);
         setRechargeAmount('');
         setRechargeNote('');
-        loadData(); // 刷新
-      } else {
-        setMessage(`❌ ${data.error}`);
+        void loadStats();
+        return;
       }
+      setRechargeError(data.error || '充值失败');
     } catch {
-      setMessage('❌ 充值失败');
-    } finally {
-      setRecharging(false);
+      setRechargeError('充值失败，请检查网络后重试');
     }
+    rechargingRef.current = false;
+    setRecharging(false);
   };
 
-  const formatFen = (fen: number) => `¥${(fen / 100).toFixed(2)}`;
+  const hasMore = users.length < total;
 
-  if (loading) {
+  if (initialLoading) {
     return (
       <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center">
         <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" aria-hidden="true" />
@@ -108,89 +196,74 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
-      {/* 导航 */}
-      <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" aria-hidden="true" />
-            <Logo width={32} height={32} />
-            <span className="text-lg font-semibold tracking-tight">SILXINE</span>
-          </Link>
-          <div className="flex items-center gap-3">
+      <PageHeader
+        title="管理后台"
+        backHref="/"
+        actions={
+          <div className="flex items-center gap-2">
             <Link
               href="/admin/pending-deliveries"
-              className="px-3 py-1 text-xs font-medium border border-amber-200 text-amber-700 hover:bg-amber-50 rounded-lg transition-colors"
+              className="inline-flex min-h-9 items-center whitespace-nowrap px-3 py-1 text-xs font-medium border border-warning text-warning hover:bg-warning-soft rounded-lg transition-colors"
             >
               未取走对账
             </Link>
             <Link
               href="/admin/failures"
-              className="px-3 py-1 text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+              className="inline-flex min-h-9 items-center whitespace-nowrap px-3 py-1 text-xs font-medium border border-danger text-danger hover:bg-danger-soft rounded-lg transition-colors"
             >
               失败监控
             </Link>
-            <span className="px-3 py-1 text-xs font-semibold bg-[var(--color-accent)]/10 text-[var(--color-accent)] rounded-lg">
-              管理后台
-            </span>
           </div>
-        </div>
-      </header>
+        }
+      />
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 space-y-8">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-6 sm:space-y-8">
         {/* 统计卡片 */}
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+            <div className="bg-surface rounded-2xl p-4 sm:p-5 border border-border-light">
               <div className="flex items-center gap-2 mb-2">
-                <Users className="w-4 h-4 text-[var(--color-accent)]" aria-hidden="true" />
-                <span className="text-xs text-[var(--color-text-muted)]">总用户</span>
+                <Users className="w-4 h-4 text-brand-strong" aria-hidden="true" />
+                <span className="text-xs text-muted">总用户</span>
               </div>
-              <p className="text-2xl font-bold tabular-nums">{stats.totalUsers}</p>
+              <p className="text-2xl font-bold num">{stats.totalUsers}</p>
             </div>
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
+            <div className="bg-surface rounded-2xl p-4 sm:p-5 border border-border-light">
               <div className="flex items-center gap-2 mb-2">
-                <CreditCard className="w-4 h-4 text-green-500" aria-hidden="true" />
-                <span className="text-xs text-[var(--color-text-muted)]">总充值</span>
+                <CreditCard className="w-4 h-4 text-success" aria-hidden="true" />
+                <span className="text-xs text-muted">总充值</span>
               </div>
-              <p className="text-2xl font-bold text-green-600 tabular-nums">{formatFen(stats.totalRechargeFen)}</p>
+              <p className="text-2xl font-bold text-success num">{formatFen(stats.totalRechargeFen)}</p>
             </div>
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
+            <div className="bg-surface rounded-2xl p-4 sm:p-5 border border-border-light">
               <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-4 h-4 text-orange-500" aria-hidden="true" />
-                <span className="text-xs text-[var(--color-text-muted)]">总消费</span>
+                <Activity className="w-4 h-4 text-warning" aria-hidden="true" />
+                <span className="text-xs text-muted">总消费</span>
               </div>
-              <p className="text-2xl font-bold text-orange-600 tabular-nums">{formatFen(stats.totalConsumeFen)}</p>
+              <p className="text-2xl font-bold text-warning num">{formatFen(stats.totalConsumeFen)}</p>
             </div>
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 border border-[var(--color-border-light)]">
+            <div className="bg-surface rounded-2xl p-4 sm:p-5 border border-border-light">
               <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-4 h-4 text-blue-500" aria-hidden="true" />
-                <span className="text-xs text-[var(--color-text-muted)]">今日消费</span>
+                <Activity className="w-4 h-4 text-brand-strong" aria-hidden="true" />
+                <span className="text-xs text-muted">今日消费</span>
               </div>
-              <p className="text-2xl font-bold text-blue-600 tabular-nums">{formatFen(stats.todayConsumeFen)}</p>
-              <p className="text-xs text-[var(--color-text-muted)]"><span className="tabular-nums">{stats.todayConsumeCount}</span> 次调用</p>
+              <p className="text-2xl font-bold text-brand-strong num">{formatFen(stats.todayConsumeFen)}</p>
+              <p className="text-xs text-muted"><span className="num">{stats.todayConsumeCount}</span> 次调用</p>
             </div>
-          </div>
-        )}
-
-        {/* 成功/错误消息 */}
-        {message && (
-          <div className={`p-3 rounded-xl text-sm text-center ${
-            message.startsWith('✅') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
-          }`}>
-            {message}
           </div>
         )}
 
         {/* 用户管理 */}
-        <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border-light)]">
-          <div className="p-5 border-b border-[var(--color-border-light)] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] flex items-center gap-2">
-              <Users className="w-4 h-4" />
+        <div className="bg-surface rounded-2xl border border-border-light">
+          <div className="p-4 sm:p-5 border-b border-border-light flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-text-secondary flex items-center gap-2">
+              <Users className="w-4 h-4" aria-hidden="true" />
               用户管理
+              <span className="text-xs font-normal text-muted num">共 {total} 人</span>
             </h2>
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <div className="relative flex-1 sm:flex-none">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)]" aria-hidden="true" />
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted" aria-hidden="true" />
                 <input
                   type="text"
                   id="userSearch"
@@ -200,53 +273,62 @@ export default function AdminPage() {
                   placeholder="搜索用户名或昵称…"
                   aria-label="搜索用户名或昵称"
                   autoComplete="off"
-                  className="w-full sm:w-64 pl-9 pr-3 py-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
+                  className="w-full sm:w-64 pl-9 pr-3 py-2 rounded-xl border border-border bg-background text-sm outline-none focus:border-brand-strong transition-colors"
                 />
               </div>
               <button
-                onClick={loadData}
-                className="p-2 rounded-xl border border-[var(--color-border)] hover:bg-[var(--color-background)] transition-colors"
+                onClick={() => { void loadUsers(1, query); void loadStats(); }}
+                disabled={listLoading}
+                className="p-2.5 rounded-xl border border-border hover:bg-background transition-colors disabled:opacity-60"
                 aria-label="刷新用户列表"
               >
-                <RefreshCw className="w-4 h-4 text-[var(--color-text-muted)]" aria-hidden="true" />
+                <RefreshCw className={`w-4 h-4 text-muted ${listLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
               </button>
             </div>
           </div>
 
+          {listError && (
+            <p role="alert" className="px-4 sm:px-5 py-3 text-sm text-danger bg-danger-soft">
+              {listError}
+            </p>
+          )}
+
           {/* 用户列表 */}
-          <div className="divide-y divide-[var(--color-border-light)]">
+          <div className="divide-y divide-border-light">
             {users.length === 0 ? (
-              <p className="text-center text-sm text-[var(--color-text-muted)] py-12">暂无用户</p>
+              <p className="text-center text-sm text-muted py-12">
+                {listLoading ? '加载中…' : '暂无用户'}
+              </p>
             ) : users.map(u => (
-              <div key={u.id} className="px-5 py-4 flex items-center justify-between hover:bg-[var(--color-background)]/50 transition-colors">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[var(--color-accent)]/20 to-[var(--color-accent)]/5 flex items-center justify-center">
-                    <span className="text-sm font-bold text-[var(--color-accent)]">
+              <div key={u.id} className="px-4 sm:px-5 py-4 flex items-center justify-between gap-3 hover:bg-background/50 transition-colors">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-brand/20 to-brand/5 flex items-center justify-center">
+                    <span className="text-sm font-bold text-brand-strong">
                       {u.name?.[0] || u.username.slice(0, 2)}
                     </span>
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium">{u.name}</p>
+                      <p className="text-sm font-medium truncate">{u.name}</p>
                       {u.role === 'admin' && (
-                        <span className="text-[10px] px-1.5 py-0.5 bg-[var(--color-accent)]/10 text-[var(--color-accent)] rounded font-semibold">
+                        <span className="shrink-0 text-[10px] px-1.5 py-0.5 bg-brand-soft text-brand-strong rounded font-semibold">
                           管理员
                         </span>
                       )}
                     </div>
-                    <p className="text-xs text-[var(--color-text-muted)]">
-                      {u.username} · {u._count.transactions} 笔交易
+                    <p className="text-xs text-muted truncate">
+                      {u.username} · <span className="num">{u._count.transactions}</span> 笔交易
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3 sm:gap-4 shrink-0">
                   <div className="text-right">
-                    <p className="text-sm font-semibold tabular-nums">{formatFen(u.balanceFen)}</p>
-                    <p className="text-xs text-[var(--color-text-muted)]">余额</p>
+                    <p className="text-sm font-semibold num">{formatFen(u.balanceFen)}</p>
+                    <p className="text-xs text-muted">余额</p>
                   </div>
                   <button
-                    onClick={() => setRechargeModal({ userId: u.id, username: u.username, name: u.name })}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--color-accent)] text-white rounded-lg hover:bg-[var(--color-accent-dark)] transition-colors"
+                    onClick={() => { setRechargeError(''); setRechargeModal({ userId: u.id, username: u.username, name: u.name }); }}
+                    className="flex items-center gap-1.5 min-h-9 px-3 py-1.5 text-xs font-medium bg-brand-strong text-white rounded-lg hover:opacity-90 transition-opacity"
                   >
                     <Plus className="w-3.5 h-3.5" aria-hidden="true" />
                     充值
@@ -255,87 +337,126 @@ export default function AdminPage() {
               </div>
             ))}
           </div>
+
+          {users.length > 0 && (
+            <div className="p-4 border-t border-border-light flex flex-col items-center gap-2">
+              <p className="text-xs text-muted">
+                已显示 <span className="num">{users.length}</span> / <span className="num">{total}</span> 人
+              </p>
+              {hasMore && (
+                <button
+                  onClick={() => void loadUsers(page + 1, query)}
+                  disabled={listLoading}
+                  className="min-h-10 px-5 text-sm border border-border rounded-xl hover:bg-background transition-colors disabled:opacity-60"
+                >
+                  {listLoading ? '加载中…' : '加载更多'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </main>
 
-      {/* 充值 Modal */}
-      {rechargeModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-[var(--color-surface)] rounded-2xl w-full max-w-md shadow-2xl border border-[var(--color-border-light)]">
-            <div className="p-5 border-b border-[var(--color-border-light)]">
-              <h3 className="text-lg font-semibold">充值</h3>
-              <p className="text-sm text-[var(--color-text-muted)] mt-1">
-                为 {rechargeModal.name}（{rechargeModal.username}）充值
+      {/* 充值弹窗 */}
+      <Modal
+        open={rechargeModal !== null}
+        onClose={closeRecharge}
+        title="充值"
+        size="md"
+        closeOnOverlay={!recharging}
+        initialFocusRef={amountRef}
+        footer={
+          <div className="flex gap-3">
+            <button
+              onClick={closeRecharge}
+              disabled={recharging}
+              className="flex-1 min-h-11 py-2.5 text-sm border border-border rounded-xl hover:bg-background transition-colors disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              onClick={() => void handleRecharge()}
+              disabled={recharging || !rechargeAmount}
+              className="btn-primary flex-1 text-sm py-2.5"
+            >
+              <span>{recharging ? '充值中…' : `确认充值 ¥${rechargeAmount || '0'}`}</span>
+            </button>
+          </div>
+        }
+      >
+        {rechargeModal && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted">
+              为 {rechargeModal.name}（{rechargeModal.username}）充值
+            </p>
+            {rechargeError && (
+              <p role="alert" className="p-3 rounded-xl text-sm bg-danger-soft text-danger">
+                {rechargeError}
               </p>
+            )}
+            <div>
+              <label htmlFor="rechargeAmount" className="block text-sm font-medium text-text-secondary mb-1.5">
+                充值金额（元）
+              </label>
+              <input
+                ref={amountRef}
+                type="number"
+                inputMode="decimal"
+                id="rechargeAmount"
+                name="rechargeAmount"
+                value={rechargeAmount}
+                onChange={(e) => { setRechargeAmount(e.target.value); setRechargeError(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleRecharge(); }}
+                placeholder={`例如：${yuan(RECHARGE_PACKAGES[0].amountFen)}`}
+                min={yuan(MIN_RECHARGE_FEN)}
+                step={yuan(RECHARGE_STEP_FEN)}
+                autoComplete="off"
+                aria-describedby="rechargeRule"
+                className="w-full px-4 py-3 rounded-xl border border-border bg-background text-base sm:text-sm outline-none focus:border-brand-strong transition-colors"
+              />
+              <p id="rechargeRule" className="mt-1.5 text-xs text-muted">{RECHARGE_RULE_TEXT}</p>
             </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <label htmlFor="rechargeAmount" className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
-                  充值金额（元）
-                </label>
-                <input
-                  type="number"
-                  id="rechargeAmount"
-                  name="rechargeAmount"
-                  value={rechargeAmount}
-                  onChange={(e) => setRechargeAmount(e.target.value)}
-                  placeholder="例如：50"
-                  min="1"
-                  step="1"
-                  autoComplete="off"
-                  className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
-                />
-              </div>
-              {/* 快捷金额 */}
-              <div className="flex gap-2">
-                {['150', '300', '750', '1500'].map(amt => (
+            {/* 快捷金额：取自充值套餐 */}
+            <div className="grid grid-cols-4 gap-2">
+              {RECHARGE_PACKAGES.map(pack => {
+                const amt = yuan(pack.amountFen);
+                const active = rechargeAmount === amt;
+                return (
                   <button
-                    key={amt}
-                    onClick={() => setRechargeAmount(amt)}
-                    className={`flex-1 py-2 text-xs font-medium rounded-lg border transition-colors ${
-                      rechargeAmount === amt
-                        ? 'bg-[var(--color-accent)] text-white border-[var(--color-accent)]'
-                        : 'border-[var(--color-border)] hover:bg-[var(--color-background)]'
+                    key={pack.id}
+                    type="button"
+                    onClick={() => { setRechargeAmount(amt); setRechargeError(''); }}
+                    aria-pressed={active}
+                    className={`min-h-10 py-2 text-xs font-medium rounded-lg border transition-colors num ${
+                      active
+                        ? 'bg-brand-strong text-white border-brand-strong'
+                        : 'border-border hover:bg-background'
                     }`}
                   >
-                    ¥{amt}
+                    {pack.label}
                   </button>
-                ))}
-              </div>
-              <div>
-                <label htmlFor="rechargeNote" className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
-                  备注 <span className="text-[var(--color-text-muted)]">(可选)</span>
-                </label>
-                <input
-                  type="text"
-                  id="rechargeNote"
-                  name="rechargeNote"
-                  value={rechargeNote}
-                  onChange={(e) => setRechargeNote(e.target.value)}
-                  placeholder="充值备注"
-                  autoComplete="off"
-                  className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-sm outline-none focus:border-[var(--color-accent)] transition-colors"
-                />
-              </div>
+                );
+              })}
             </div>
-            <div className="p-5 border-t border-[var(--color-border-light)] flex gap-3">
-              <button
-                onClick={() => { setRechargeModal(null); setRechargeAmount(''); setRechargeNote(''); }}
-                className="flex-1 py-2.5 text-sm border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] transition-colors"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleRecharge}
-                disabled={recharging || !rechargeAmount}
-                className="btn-primary flex-1 text-sm py-2.5"
-              >
-                <span>{recharging ? '充值中…' : `确认充值 ¥${rechargeAmount || '0'}`}</span>
-              </button>
+            <div>
+              <label htmlFor="rechargeNote" className="block text-sm font-medium text-text-secondary mb-1.5">
+                备注 <span className="text-muted">(可选)</span>
+              </label>
+              <input
+                type="text"
+                id="rechargeNote"
+                name="rechargeNote"
+                value={rechargeNote}
+                onChange={(e) => setRechargeNote(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleRecharge(); }}
+                placeholder="充值备注"
+                autoComplete="off"
+                className="w-full px-4 py-3 rounded-xl border border-border bg-background text-base sm:text-sm outline-none focus:border-brand-strong transition-colors"
+              />
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
     </div>
   );
 }

@@ -14,9 +14,10 @@ export async function GET(req: Request) {
   }
 
   const url = new URL(req.url);
-  const search = url.searchParams.get('search') || '';
+  const search = (url.searchParams.get('search') || '').trim();
   const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
-  const pageSize = 20;
+  // pageSize 默认 20，上限 100，防止一次拖太多行
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(url.searchParams.get('pageSize'))) || 20));
 
   // PG 的 contains 默认大小写敏感，会漏搜；SQLite 不支持 mode 参数
   const insensitive = isPostgres ? ({ mode: 'insensitive' } as const) : {};
