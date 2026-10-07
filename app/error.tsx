@@ -15,35 +15,41 @@ export default function Error({
   }, [error]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--color-cream)]">
-      <div className="text-center px-6 max-w-md">
+    <div className="flex min-h-screen items-center justify-center bg-[var(--color-cream)]">
+      <div className="max-w-md px-6 text-center">
         {/* 品牌标识 */}
-        <h1 className="text-2xl font-light tracking-[0.3em] text-[var(--color-text)] mb-2">
-          SILXINE
-        </h1>
-        <div className="w-12 h-px bg-[var(--color-accent)] mx-auto mb-8" />
+        <p className="mb-2 text-2xl font-light tracking-[0.3em] text-[var(--color-ink)]">SILXINE</p>
+        <div className="mx-auto mb-8 h-px w-12 bg-[var(--color-brand)]" />
 
         {/* 错误信息 */}
         <div className="mb-8">
-          <p className="text-5xl font-light text-[var(--color-accent)] mb-4">Oops</p>
-          <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+          <h1 className="mb-4 text-3xl font-semibold text-[var(--color-ink)]">页面出了点问题</h1>
+          <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
             抱歉，页面遇到了一些问题。
             <br />
-            请稍后重试，或返回首页。
+            请重新加载，或返回首页。
           </p>
+          {error.digest && (
+            <p className="mt-4 text-xs text-[var(--color-text-muted)]">
+              错误编号 <span className="num select-all font-mono">{error.digest}</span>
+              <br />
+              如需反馈，请把编号发给管理员以便排查。
+            </p>
+          )}
         </div>
 
         {/* 操作按钮 */}
-        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+        <div className="flex flex-col justify-center gap-3 sm:flex-row">
           <button
+            type="button"
             onClick={reset}
-            className="px-6 py-2.5 rounded-full bg-[var(--color-accent)] text-white text-sm tracking-wide hover:opacity-90 transition-opacity"
+            className="min-h-11 rounded-full bg-[var(--color-brand-strong)] px-6 text-sm tracking-wide text-white transition-opacity hover:opacity-90"
           >
             重新加载
           </button>
           <Link
             href="/"
-            className="px-6 py-2.5 rounded-full border border-[var(--color-border)] text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] transition-colors"
+            className="inline-flex min-h-11 items-center justify-center rounded-full border border-[var(--color-border)] px-6 text-sm text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-brand-strong)]"
           >
             返回首页
           </Link>
@@ -52,10 +58,8 @@ export default function Error({
         {/* 错误摘要（仅开发环境） */}
         {process.env.NODE_ENV === 'development' && (
           <details className="mt-8 text-left">
-            <summary className="text-xs text-[var(--color-text-muted)] cursor-pointer">
-              错误详情
-            </summary>
-            <pre className="mt-2 p-3 rounded-xl bg-[var(--color-surface)] text-xs text-red-500 overflow-x-auto whitespace-pre-wrap break-words">
+            <summary className="cursor-pointer text-xs text-[var(--color-text-muted)]">错误详情</summary>
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-[var(--color-surface)] p-3 text-xs text-[var(--color-danger)]">
               {error.message}
               {error.stack && `\n\n${error.stack}`}
             </pre>

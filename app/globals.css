@@ -1,9 +1,49 @@
-@import url('https://fonts.googleapis.com/css2?family=Cormorant:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Montserrat:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
-@theme {
-  --font-serif: 'Cormorant', 'Georgia', 'Times New Roman', serif;
-  --font-sans: 'Montserrat', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif;
+/* 字体由 app/layout.tsx 经 next/font/google 自托管（构建期下载），
+   这里只引用它注入的 CSS 变量，不再有阻塞渲染的 Google Fonts @import。 */
+
+/* ===================================
+   设计 token（Tailwind 4 @theme）
+   static：即使没有工具类用到也始终输出为 :root 变量，
+   保证现有的 var(--color-xxx) 写法与新的 bg-brand / text-ink 等工具类共用同一份。
+   完整名单与用途见 docs/handoff/ui-kit-1008.md
+   =================================== */
+@theme static {
+  /* ── 字体 ── */
+  --font-serif: var(--font-cormorant), 'Cormorant', 'Georgia', 'Times New Roman', 'PingFang SC', 'Microsoft YaHei', serif;
+  --font-sans: var(--font-montserrat), 'Montserrat', -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+
+  /* ── 既有色板（沿用旧变量名，工具类现在也可用，如 bg-background / text-text-muted） ── */
+  --color-primary: #3D2E20;        /* 深暖棕 — 替代纯黑 */
+  --color-secondary: #5C4A3A;      /* 中棕 */
+  --color-accent: #C9A87C;         /* 香槟金：仅用于装饰（边框 / 图标 / 大面积底色），不要当小字或白字底 */
+  --color-accent-light: #E8D5B5;   /* 淡香槟 */
+  --color-accent-dark: #A68B5B;    /* 深香槟（对白 3.25:1，只作装饰） */
+  --color-rose: #E8C4B8;           /* 玫瑰粉辅助色 */
+  --color-background: #FBF8F4;     /* 奶油白纸底 */
+  --color-surface: #FFFFFF;
+  --color-border: #EAE4DB;         /* 暖米色边框 */
+  --color-border-light: #F3EDE5;   /* 更柔的暖米 */
+  --color-text: #2C2420;           /* 正文深暖棕 */
+  --color-text-secondary: #6B5A4A; /* 次级文字：白底 6.8:1（原 #7A6B5D 5.14:1，层级拉开） */
+  --color-text-muted: #7D6B58;     /* 弱化文字：白底 5.10:1、奶油底 4.82:1（原 #B0A292 仅 2.49:1） */
+  --color-cream: #FBF8F4;          /* = background 别名（error / not-found 在用，此前未定义） */
+
+  /* ── 语义 token（新页面优先用这一组） ── */
+  --color-brand: #C9A87C;          /* 品牌金（装饰用，= accent） */
+  --color-brand-strong: #8C6D3A;   /* 品牌深金：白字按钮底 / 浅底上的品牌色文字，白底 4.81:1 */
+  --color-brand-soft: #F6EEE1;     /* 品牌浅底：选中态、提示条 */
+  --color-ink: #2C2420;            /* 主文字（= text） */
+  --color-muted: #7D6B58;          /* 弱化文字（= text-muted） */
+  --color-danger: #B91C1C;         /* 错误 / 危险操作，白底 6.47:1 */
+  --color-danger-soft: #FDF1EF;
+  --color-success: #15803D;        /* 成功，白底 5.02:1 */
+  --color-success-soft: #EFF8F1;
+  --color-warning: #A16207;        /* 提醒，白底 4.92:1 */
+  --color-warning-soft: #FBF5E6;
+  --color-overlay: rgba(44, 36, 32, 0.5); /* 弹窗遮罩 */
 }
 
 /* ===================================
@@ -13,20 +53,15 @@
 
 @layer base {
   :root {
-    /* 色彩系统 — 温暖丝绒奶茶色调 */
-    --color-primary: #3D2E20;       /* 深暖棕 — 替代纯黑 */
-    --color-secondary: #5C4A3A;     /* 中棕 — 替代 #1F1F1F */
-    --color-accent: #C9A87C;        /* 香槟金（比冷金更柔和） */
-    --color-accent-light: #E8D5B5;  /* 淡香槟 */
-    --color-accent-dark: #A68B5B;   /* 深香槟 */
-    --color-rose: #E8C4B8;          /* 玫瑰粉（新增辅助色） */
-    --color-background: #FBF8F4;    /* 奶油白纸底 */
-    --color-surface: #FFFFFF;
-    --color-border: #EAE4DB;        /* 暖米色边框 */
-    --color-border-light: #F3EDE5;  /* 更柔的暖米 */
-    --color-text: #2C2420;          /* 深暖棕文字 */
-    --color-text-secondary: #7A6B5D; /* 中棕文字 */
-    --color-text-muted: #B0A292;    /* 淡棕灰 */
+    /* 色彩 token 已迁到文件顶部 @theme static；这里只留非颜色变量 */
+
+    /* 移动端底部固定 CTA 的占位高度：页面有固定底栏时把它设成真实高度（如 72px），
+       Toast / 其它浮层据此避让；没有底栏就是 0 */
+    --mobile-cta-h: 0px;
+
+    /* 层级 */
+    --z-modal: 100;
+    --z-toast: 120;
 
     /* 阴影 — 带暖色 */
     --shadow-sm: 0 2px 8px rgba(60, 46, 32, 0.04);
@@ -62,8 +97,7 @@
   }
 
   body {
-    font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 'SF Pro Display',
-      'PingFang SC', 'Hiragino Sans GB', sans-serif;
+    font-family: var(--font-sans);
     font-weight: 400;
     line-height: 1.6;
     color: var(--color-text);
@@ -81,15 +115,48 @@
 
   h1, h2, h3, h4, h5, h6 {
     /* Cormorant 仅作用于英文，中文 fallback 到 PingFang SC，保持视觉一致 */
-    font-family: 'Cormorant', 'PingFang SC', 'Hiragino Sans GB', serif;
+    font-family: var(--font-serif);
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: -0.02em;
+    /* 中文标题：不孤字、不在词中断开 */
+    text-wrap: balance;
+    word-break: keep-all;
+    overflow-wrap: break-word;
   }
 
+  /* 中文正文：按词断行（遇到溢出才强拆），段落避免孤字 */
+  p, li, dd, label, figcaption, blockquote {
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+  p, li, dd, figcaption, blockquote {
+    text-wrap: pretty;
+  }
+
+  /* 数字、金额、积分不断行；需要时给元素加 .num */
+  .num {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 键盘焦点：用深金描边（对白 / 奶油底 ≥4.4:1，满足非文字对比度 3:1） */
   *:focus-visible {
-    outline: 2px solid var(--color-accent);
+    outline: 2px solid var(--color-brand-strong);
     outline-offset: 2px;
+  }
+
+  /* 减少动态：系统开启「减弱动态效果」时关掉动画 / 过渡 / 平滑滚动 */
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -185,16 +252,6 @@
     backdrop-filter: blur(var(--glass-blur));
     -webkit-backdrop-filter: blur(var(--glass-blur));
     border: 1px solid var(--glass-border);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-    }
   }
 }
 
@@ -358,7 +415,7 @@
 }
 
 .image-thumb-remove:hover {
-  background: var(--color-accent);
+  background: var(--color-brand-strong);
 }
 
 /* 主按钮 — 温暖渐变（告别纯黑）
@@ -375,11 +432,13 @@
     padding: 1rem 2.5rem;
     font-size: 1rem;
     font-weight: 500;
-    font-family: 'Montserrat', sans-serif;
+    font-family: var(--font-sans);
     letter-spacing: 0.04em;
     color: white;
-    background: linear-gradient(135deg, #8B6F47 0%, #C9A87C 100%);
-    border: 1px solid rgba(201,168,124,0.3);
+    /* 1008 对比度修正：旧渐变 #8B6F47→#C9A87C 末端对白字仅 2.24:1；
+       现整段渐变对白字 ≥4.5:1（#6E5430 约 7.5:1 → #8C6D3A 4.81:1），仍是暖金气质 */
+    background: linear-gradient(135deg, #6E5430 0%, #8C6D3A 100%);
+    border: 1px solid rgba(201,168,124,0.35);
     border-radius: 12px;
     cursor: pointer;
     overflow: hidden;
@@ -391,7 +450,7 @@
     content: '';
     position: absolute;
     inset: 0;
-    background: radial-gradient(circle at center, rgba(232,196,184,0.3) 0%, transparent 80%);
+    background: radial-gradient(circle at center, rgba(232,196,184,0.12) 0%, transparent 80%);
     opacity: 0;
     transform: scale(0.8);
     transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
@@ -403,6 +462,7 @@
   }
 
   .btn-primary:hover {
+    background: linear-gradient(135deg, #5C4527 0%, #7A5E31 100%);
     transform: translateY(-2px);
     box-shadow: 0 16px 40px rgba(201,168,124,0.35), inset 0 1px 1px rgba(255,255,255,0.4);
     border-color: rgba(232,196,184,0.8);
@@ -415,7 +475,7 @@
 
   .btn-primary:disabled {
     background: #E5DDD3;
-    color: #B0A292;
+    color: var(--color-text-muted);
     border-color: transparent;
     cursor: not-allowed;
     transform: none;
@@ -446,7 +506,7 @@
   padding: 0 8px;
   font-size: 0.75rem;
   font-weight: 600;
-  font-family: 'Montserrat', sans-serif;
+  font-family: var(--font-sans);
   border-radius: 12px;
   background: var(--color-background);
   color: var(--color-text-secondary);
@@ -454,7 +514,7 @@
 }
 
 .count-badge.active {
-  background: var(--color-accent);
+  background: var(--color-brand-strong);
   color: white;
 }
 
@@ -570,19 +630,19 @@
 }
 
 .feedback-btn.active {
-  border-color: var(--color-accent);
-  background: var(--color-accent);
+  border-color: var(--color-brand-strong);
+  background: var(--color-brand-strong);
   color: white;
 }
 
 .feedback-btn.feedback-up.active {
-  background: #4CAF50;
-  border-color: #4CAF50;
+  background: var(--color-success);
+  border-color: var(--color-success);
 }
 
 .feedback-btn.feedback-down.active {
-  background: #ef5350;
-  border-color: #ef5350;
+  background: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
 .feedback-detail {
@@ -618,8 +678,8 @@
 }
 
 .feedback-tag.active {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  background: var(--color-brand-strong);
+  border-color: var(--color-brand-strong);
   color: white;
 }
 
@@ -642,7 +702,7 @@
   font-size: 12px;
   padding: 6px 14px;
   border-radius: 8px;
-  background: var(--color-accent);
+  background: var(--color-brand-strong);
   color: white;
   border: none;
   cursor: pointer;
@@ -652,10 +712,47 @@
 }
 
 .feedback-submit:hover:not(:disabled) {
-  background: var(--color-accent-dark);
+  background: #6E5430;
 }
 
 .feedback-submit:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* ═══ UI 底座：Modal / Toast 动画（reduced-motion 下由全局规则降级） ═══ */
+
+.ui-modal-overlay {
+  animation: uiOverlayIn 0.18s ease-out both;
+}
+
+.ui-modal-panel {
+  animation: uiPanelIn 0.22s cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+/* <640px 底部抽屉：从下滑入；>=640px 居中淡入放大 */
+@keyframes uiOverlayIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes uiPanelIn {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (min-width: 640px) {
+  @keyframes uiPanelIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+}
+
+.ui-toast {
+  animation: uiToastIn 0.22s cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+
+@keyframes uiToastIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
