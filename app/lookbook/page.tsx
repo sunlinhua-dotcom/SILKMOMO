@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
+import { Camera, History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { UserNav } from '@/components/UserNav';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
@@ -306,6 +306,10 @@ export default function LookbookStudio() {
     : lookbookOk && garmentsOk) && customSizeError === null;
   const totalCostFen = Math.max(1, targetCount) * pricePerImageFen;
   const isBalanceSufficient = balanceFen !== null ? balanceFen >= totalCostFen : false;
+  // 还没有可出图的素材时不展示价格，按钮改为引导文案并禁用
+  const ctaGuideLabel: string | null = targetCount === 0
+    ? (mode === 'swap' && groupGarmentImages.length > 0 ? '再上传场景主图' : '先上传衣服')
+    : null;
   const diffYuan = balanceFen !== null ? ((totalCostFen - balanceFen) / 100).toFixed(2) : '0.00';
 
   // ── 离开页面提醒：已上传图片或正在提交时，关标签页 / 刷新 / 地址栏跳转前让浏览器确认 ──
@@ -640,6 +644,29 @@ export default function LookbookStudio() {
     }
   };
 
+  // ── 手机底部 CTA：把自身高度写进 --mobile-cta-h，主体 padding-bottom 据此避让 ──
+  const mobileCtaRef = useRef<HTMLDivElement>(null);
+  const showMobileCta = balanceStatus !== 'unauthenticated' && balanceStatus !== 'error';
+  useEffect(() => {
+    const root = document.documentElement;
+    const el = mobileCtaRef.current;
+    if (!showMobileCta || !el) {
+      root.style.setProperty('--mobile-cta-h', '0px');
+      return;
+    }
+    const apply = () => root.style.setProperty('--mobile-cta-h', `${el.offsetHeight}px`);
+    apply();
+    if (typeof ResizeObserver === 'undefined') {
+      return () => root.style.setProperty('--mobile-cta-h', '0px');
+    }
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.setProperty('--mobile-cta-h', '0px');
+    };
+  }, [showMobileCta]);
+
   // ── 未登录 / 余额读取失败兜底 ──
   if (balanceStatus === 'unauthenticated' || balanceStatus === 'error') {
     const failed = balanceStatus === 'error';
@@ -686,9 +713,27 @@ export default function LookbookStudio() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 sm:pt-10 pb-24 space-y-6 sm:space-y-8">
-        {/* 双工作台入口 */}
-        <WorkspaceSwitcher active="lookbook" />
+      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 sm:pt-10 pb-[calc(var(--mobile-cta-h,0px)+16px)] space-y-6 sm:space-y-8">
+        {/* 双工作台入口：手机一行紧凑链接（同首页），≥sm 保持原卡片 */}
+        <nav aria-label="工作台切换" className="sm:hidden grid grid-cols-2 gap-2">
+          <Link
+            href="/"
+            className="flex items-center justify-center gap-1.5 min-h-11 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] text-sm font-medium"
+          >
+            <Camera className="w-4 h-4" aria-hidden="true" />
+            产品图
+          </Link>
+          <span
+            aria-current="page"
+            className="flex items-center justify-center gap-1.5 min-h-11 rounded-xl bg-[var(--color-primary)] text-white text-sm font-medium"
+          >
+            <Sparkles className="w-4 h-4" aria-hidden="true" />
+            组图 · 换装
+          </span>
+        </nav>
+        <div className="hidden sm:block">
+          <WorkspaceSwitcher active="lookbook" />
+        </div>
 
         {/* Hero */}
         <div className="text-center pt-2">
@@ -725,9 +770,6 @@ export default function LookbookStudio() {
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div>
                   <h3 className="text-sm font-semibold text-[var(--color-text)]">① 上传产品参考图</h3>
-                  <p className="text-xs text-[var(--color-text-muted)] mt-1 leading-relaxed">
-                    仅用于识别服装细节，其背景/滤镜不会出现在成图中。
-                  </p>
                 </div>
                 {productReferenceImages.length > 0 && (
                   <span className="shrink-0 text-xs text-brand-strong font-medium tabular-nums">
@@ -1001,7 +1043,7 @@ export default function LookbookStudio() {
         />
 
         {/* ⑦ 摘要 + 生成 CTA */}
-        <div className="sticky bottom-0 pt-2 pb-4 bg-gradient-to-t from-[var(--color-background)] via-[var(--color-background)] to-transparent">
+        <div ref={mobileCtaRef} className="sticky bottom-0 pt-2 pb-4 bg-gradient-to-t from-[var(--color-background)] via-[var(--color-background)] to-transparent">
           <p className="text-xs text-[var(--color-text-muted)] text-center mb-2">
             {mode === 'swap' ? (
               <>
@@ -1014,7 +1056,7 @@ export default function LookbookStudio() {
               <>已上传 {validProductGroups.length} 个产品组 · 将生成 {validProductGroups.length} 张</>
             )}
           </p>
-          {loggedIn && !isBalanceSufficient ? (
+          {loggedIn && targetCount > 0 && !isBalanceSufficient ? (
             <>
               <Link
                 href="/billing"
@@ -1030,9 +1072,9 @@ export default function LookbookStudio() {
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={isGenerating || !loggedIn || !canGenerate}
+              disabled={isGenerating || !loggedIn || !canGenerate || ctaGuideLabel !== null}
               className={`w-full flex items-center justify-center gap-2 rounded-xl py-4 text-sm font-medium transition-all duration-300 btn-primary ${
-                (isGenerating || !canGenerate) ? 'opacity-60 cursor-not-allowed' : ''
+                (isGenerating || !canGenerate || ctaGuideLabel !== null) ? 'opacity-60 cursor-not-allowed' : ''
               }`}
             >
               {isGenerating ? (
@@ -1042,6 +1084,8 @@ export default function LookbookStudio() {
                 </>
               ) : !loggedIn ? (
                 <span>加载中…</span>
+              ) : ctaGuideLabel !== null ? (
+                <span>{ctaGuideLabel}</span>
               ) : (
                 <>
                   <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
