@@ -4,8 +4,12 @@ import Link from 'next/link';
 import { Camera, Sparkles } from 'lucide-react';
 
 /**
- * 双工作台入口：产品图工作台(/) 与 组图·换装(/lookbook) 是两个完全独立的入口。
+ * 双工作台入口：产品图工作台(/) 与 组图·换装(/lookbook) 是两个完全独立的路由。
  * 放在两个页面顶部，当前所在的一张高亮，另一张是跳转链接。
+ *
+ * 语义：这是页面导航而不是同页切换，所以用 <nav> + 列表 + aria-current="page"，
+ * 不用 tablist / radiogroup（那两种要求同页面板与方向键漫游，和真实行为不符）。
+ * 当前页那张不再是链接（点了只会原地刷新），键盘不会 Tab 到它。
  */
 export function WorkspaceSwitcher({ active }: { active: 'product' | 'lookbook' }) {
   const cards = [
@@ -26,39 +30,46 @@ export function WorkspaceSwitcher({ active }: { active: 'product' | 'lookbook' }
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-      {cards.map(c => {
-        const isActive = c.key === active;
-        const Icon = c.icon;
-        return (
-          <Link
-            key={c.key}
-            href={c.href}
-            aria-current={isActive ? 'page' : undefined}
-            className={`relative flex items-start gap-3 sm:gap-4 p-4 sm:p-5 rounded-2xl sm:rounded-[1.75rem] transition-[background-color,border-color,box-shadow] duration-500 overflow-hidden ${
-              isActive
-                ? 'bg-[#3D2E20] text-white shadow-xl sm:shadow-2xl cursor-default'
-                : 'bg-[#FAFAFA] border border-transparent hover:border-[var(--color-border)] text-[var(--color-text)]'
-            }`}
-          >
-            <div className={`mt-0.5 w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl flex items-center justify-center flex-shrink-0 ${
-              isActive ? 'bg-white/10 text-white' : 'bg-white text-[var(--color-primary)] shadow-sm'
-            }`}>
-              <Icon className="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
-            </div>
-            <div className="min-w-0 relative z-10">
-              <div className="font-serif text-base sm:text-lg tracking-wide flex items-center gap-2">
-                {c.title}
-                {isActive && <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 rounded-full bg-white/15">当前</span>}
+    <nav aria-label="工作台切换">
+      <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+        {cards.map(c => {
+          const isActive = c.key === active;
+          const Icon = c.icon;
+          const cardClass = `relative flex min-w-0 items-start gap-3 sm:gap-4 p-4 sm:p-5 rounded-2xl sm:rounded-[1.75rem] transition-[background-color,border-color,box-shadow] duration-500 overflow-hidden ${
+            isActive
+              ? 'bg-primary text-white shadow-xl sm:shadow-2xl'
+              : 'bg-background border border-border hover:border-brand-strong text-ink'
+          }`;
+          const body = (
+            <>
+              <div className={`mt-0.5 w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl flex items-center justify-center flex-shrink-0 ${
+                isActive ? 'bg-white/10 text-white' : 'bg-surface text-primary shadow-sm'
+              }`}>
+                <Icon className="w-4 h-4 sm:w-5 sm:h-5" aria-hidden="true" />
               </div>
-              <div className={`text-[11px] sm:text-xs mt-1 leading-relaxed ${isActive ? 'text-white/70' : 'text-[var(--color-text-muted)]'}`}>
-                {c.desc}
+              <div className="min-w-0 relative z-10">
+                <div className="font-serif text-base sm:text-lg tracking-wide flex flex-wrap items-center gap-x-2 gap-y-1">
+                  {c.title}
+                  {isActive && <span className="text-[10px] tracking-widest uppercase px-1.5 py-0.5 rounded-full bg-white/15">当前</span>}
+                </div>
+                <div className={`text-[11px] sm:text-xs mt-1 leading-relaxed ${isActive ? 'text-white/80' : 'text-muted'}`}>
+                  {c.desc}
+                </div>
               </div>
-            </div>
-            {isActive && <div className="absolute -bottom-8 -right-8 w-24 h-24 bg-[var(--color-accent)]/20 rounded-full blur-3xl pointer-events-none" />}
-          </Link>
-        );
-      })}
-    </div>
+              {isActive && <div className="absolute -bottom-8 -right-8 w-24 h-24 bg-brand/20 rounded-full blur-3xl pointer-events-none" aria-hidden="true" />}
+            </>
+          );
+          return (
+            <li key={c.key} className="min-w-0">
+              {isActive ? (
+                <div aria-current="page" className={cardClass}>{body}</div>
+              ) : (
+                <Link href={c.href} className={cardClass}>{body}</Link>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
   );
 }
