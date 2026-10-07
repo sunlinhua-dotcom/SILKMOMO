@@ -24,8 +24,7 @@ import {
   DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE,
   ETHNICITY_LABELS, SKU_LABELS,
 } from '@/lib/models';
-import { getRandomWaitingMessage } from '@/lib/api';
-import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, X, RefreshCcw, AlertTriangle, Ban } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, Loader, Wand2, Settings2, RefreshCcw, AlertTriangle, Ban, Zap } from 'lucide-react';
 import { Logo } from '@/components/Logo';
 import { ImageLightbox } from '@/components/ImageLightbox';
 import { AIChatSidebar } from '@/components/AIChatBox';
@@ -42,10 +41,47 @@ import {
   shouldScheduleAutomaticFill,
 } from '@/lib/generation-recovery';
 import { fetchPendingImageWithRetry } from '@/lib/pending-fetch';
+import { Modal } from '@/components/ui/Modal';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { useToast } from '@/components/ui/Toast';
+import { ContactAdmin } from '@/components/ContactAdmin';
+import { useBalance, refreshBalance } from '@/hooks/useBalance';
+import { GenerationProgress } from '@/components/task/GenerationProgress';
+import { RotatingTips } from '@/components/task/RotatingTips';
+import { InputThumb } from '@/components/task/InputThumb';
+import { ShotNotices, type ShotNotice } from '@/components/task/ShotNotices';
 
 // ═══ SSE 事件类型 ═══
 type GenerationPhase = 'idle' | 'analyzing' | 'generating' | 'done' | 'error' | 'cancelled';
 interface GenerationError { shotIndex: number; message: string; fatal: boolean; }
+
+/** 开流前就被服务端拒绝（HTTP 4xx/5xx）：携带状态码，方便区分 429 / 413 并给出友好文案。 */
+class GenerationHttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'GenerationHttpError';
+    this.status = status;
+  }
+}
+
+/** 服务端幂等命中时推的三种非致命说明，只当「该镜次的提示」展示，不算失败。 */
+const IDEMPOTENT_NOTICE_PATTERN = /已生成并交付过|上一次请求仍在生成中|上一次请求未完成/;
+
+/** 「余额不足，去充值」按钮的统一样式（警告色底，白字对比度 ≥4.9:1） */
+const RECHARGE_BUTTON_CLASS =
+  'inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-warning)] px-6 py-3 text-sm font-medium text-white transition-opacity hover:opacity-90 sm:w-auto';
+
+function formatYuan(fen: number): string {
+  return `¥${(fen / 100).toFixed(2)}`;
+}
+
+/** 把耗时秒数说成人话：不足一分钟说「约 N 秒」，其余向上取整到半分钟。 */
+function formatEtaText(seconds: number): string {
+  if (seconds < 60) return `约 ${Math.max(10, Math.round(seconds / 5) * 5)} 秒`;
+  const halfMinutes = Math.ceil(seconds / 30) / 2;
+  return `约 ${Number.isInteger(halfMinutes) ? halfMinutes : halfMinutes.toFixed(1)} 分钟`;
+}
 interface ProductGroupPayload {
   images: Array<{ data: string; mimeType: string }>;
   label?: string;
@@ -100,6 +136,7 @@ function buildFriendlyUnexpectedErrorMessage(successCount: number, remainingCoun
 
 function getKnownUserFacingErrorMessage(error: unknown): string | null {
   if (!(error instanceof Error)) return null;
+  if (error instanceof GenerationHttpError) return error.message;
   return /登录已过期|请重新登录|服务响应异常/.test(error.message) ? error.message : null;
 }
 
@@ -204,7 +241,7 @@ async function releasePendingImage(pendingId: string): Promise<void> {
  *
  * 这条路径专治「图已生成成功但没送达」：以前那种情况图就永久丢了（用户只能重新生成并再付
  * 一次钱），现在服务端会把图留在交接缓冲里，进任务页就能补回来。
- * 幂等：同一 shotIndex 本地已有 result 就跳过，不会重复插入。
+ * 幂等：同一 shotIndex 本地已有 result 且内容一致才视为重复；内容不同＝新付费的图，旧图降级为备份。
  */
 interface PendingRecoveryResult {
   ok: boolean;
@@ -263,13 +300,31 @@ async function recoverPendingImages(
           continue;
         }
         const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
-        const already = local.some(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
-        if (already) {
-          void releasePendingImage(meta.id);
-          continue;
-        }
+        const existingResult = local.find(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
+        // 本地同镜次已有 result，不等于这张 pending 是它的重复：
+        // 用户重做某镜次并付费后，若这一轮没送达，生成收尾会先把旧图（result_backup）还原成 result，
+        // 随后补拉发现「同 shotIndex 已有 result」——旧逻辑直接 DELETE，等于把刚付费的新图丢了。
+        // 所以先把 pending 取回来比对内容：一模一样才是重复（释放即可）；不一样就是新付费的图，
+        // 旧图降级为 result_backup（保留可还原），新图作为 result 入库。
         const fetched = await fetchPendingImage(meta.id);
         if (!fetched) throw new Error(`待取图片 ${meta.id} 未能取回`);
+        if (existingResult) {
+          if (existingResult.data === fetched.data) {
+            void releasePendingImage(meta.id);
+            continue;
+          }
+          const staleBackups = await db.images
+            .where('projectId').equals(taskId)
+            .filter(i => i.type === 'result_backup' && i.shotIndex === persistedShotIndex)
+            .toArray();
+          for (const backup of staleBackups) {
+            if (backup.id !== undefined) await db.images.delete(backup.id);
+          }
+          if (existingResult.id !== undefined) {
+            await db.images.update(existingResult.id, { type: 'result_backup' });
+          }
+          existingResult.type = 'result_backup';
+        }
         await db.images.add({
           projectId: taskId,
           type: 'result',
@@ -290,6 +345,14 @@ async function recoverPendingImages(
         void releasePendingImage(meta.id);
       }
 
+      if (expectedShotIndexes.length > 0) {
+        // 仅诊断：缺口的补齐交给生成路径（recoveryGate / finalizeGeneration），这里不据此改库
+        const haveShots = new Set(local.filter(i => i.type === 'result').map(i => i.shotIndex ?? 0));
+        const stillMissing = expectedShotIndexes.filter(shot => !haveShots.has(shot));
+        if (stillMissing.length > 0) {
+          console.log(`[交接缓冲] 补拉后本地仍缺镜次 ${stillMissing.join(',')}，交给生成路径处理`);
+        }
+      }
       if (recoveredShotIndexes.length > 0) {
         console.log(`[交接缓冲] 补回 ${recoveredShotIndexes.length} 张此前未送达的图`);
       }
@@ -333,6 +396,9 @@ export default function TaskDetailPage() {
   const params = useParams();
   const router = useRouter();
   const taskId = Number(params.id);
+  const toast = useToast();
+  const confirm = useConfirm();
+  const { balanceFen, status: balanceStatus } = useBalance();
 
   const [project, setProject] = useState<Project | null>(null);
   const [images, setImages] = useState<ImageItem[]>([]);
@@ -355,11 +421,13 @@ export default function TaskDetailPage() {
   // ═══ SSE 实时状态 ═══
   const [generationPhase, setGenerationPhase] = useState<GenerationPhase>('idle');
   const [generationErrors, setGenerationErrors] = useState<GenerationError[]>([]);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [secondsLeft, setSecondsLeft] = useState(0);
+  // 秒表 / 剩余时间的每秒刷新放在 <GenerationProgress> 内部；页面只记起点和预计完成时刻（极少变化）
+  const [startedAt, setStartedAt] = useState(0);
+  const [etaDeadline, setEtaDeadline] = useState(0);
+  // 服务端幂等命中的「该镜次的提示」（非失败）
+  const [shotNotices, setShotNotices] = useState<ShotNotice[]>([]);
   const [liveImages, setLiveImages] = useState<ImageItem[]>([]); // 生成中实时追加的图片
   const abortControllerRef = useRef<AbortController | null>(null);
-  const elapsedTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 防止双击 重做 同一张图：第一次点击在 setGenerating(true) 之前还有窗口期，
   // 用 ref 立刻置位，第二次点击直接 return（避免备份图被自己刚生成的"备份"匹配并物理删除）
   const regenLockRef = useRef(false);
@@ -372,6 +440,13 @@ export default function TaskDetailPage() {
   const pendingAutoRetryRunIdRef = useRef<string | null>(null);
   // "调整参数重新生成"（含 AI 聊天整任务重做）的同步锁
   const regenParamsLockRef = useRef(false);
+  // ?autostart=1 自动开跑的同步锁：React 严格模式会重复执行 effect，刷新 / 后退也会再进来，
+  // 一旦做出「跑 / 不跑」的决定就置位，整个组件生命周期内不再重复，避免重复扣费。
+  const autostartHandledRef = useRef(false);
+  // AI 触发整任务重做时确认框正在显示，避免连续触发叠出多个确认
+  const aiConfirmingRef = useRef(false);
+  // 余额不足时的充值引导弹窗（值为这次动作需要的费用，null = 关闭）
+  const [rechargeNeedFen, setRechargeNeedFen] = useState<number | null>(null);
 
   // --- 调整参数面板 State ---
   const [showAdjustPanel, setShowAdjustPanel] = useState(false);
@@ -459,10 +534,6 @@ export default function TaskDetailPage() {
 
   useEffect(() => {
     loadTaskData();
-    const interval = setInterval(() => {
-      setWaitingMessage(getRandomWaitingMessage());
-    }, 4000);
-    return () => clearInterval(interval);
   }, [loadTaskData]);
 
   // 「快速重做」入口：URL 带 ?redo=1 时，结果加载好后滚动到生成结果区（只执行一次）
@@ -490,13 +561,21 @@ export default function TaskDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generating]);
 
-  // 组件卸载时清理 SSE 连接和计时器，避免泄漏
+  // 生成中离开 / 刷新页面会中断这条连接：加浏览器原生的离开提醒，生成结束后移除。
+  // （图已生成但没送达的话，重进任务页会自动补拉，不会白扣费。）
+  useEffect(() => {
+    if (!generating) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [generating]);
+
+  // 组件卸载时清理 SSE 连接，避免泄漏
   useEffect(() => {
     return () => {
-      if (elapsedTimerRef.current) {
-        clearInterval(elapsedTimerRef.current);
-        elapsedTimerRef.current = null;
-      }
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
@@ -701,7 +780,8 @@ export default function TaskDetailPage() {
     setWarningMessage(null);
     setGenerationErrors([]);
     setGenerationPhase('analyzing');
-    setElapsedSeconds(0);
+    setShotNotices([]);
+    setWaitingMessage('');
 
     // —— 初始化预估剩余时间(按引擎区分:GPT Image 2 实测 ~150-235s/张,Gemini ~20-35s/张;
     //     之前不分引擎统一按 15s/张 估算,GPT 会出现"预计剩余 17 秒"实跑 4 分钟的误导)——
@@ -715,18 +795,13 @@ export default function TaskDetailPage() {
       : (selectedShotIndexes.length === 1
           ? etaFirstShotSec
           : etaFirstShotSec + (selectedShotIndexes.length - 1) * etaPerShotSec);
-    setSecondsLeft(initialSeconds);
+    // 秒表本体在 <GenerationProgress> 里自己走；这里只记起点和预计完成时刻
+    const timerStart = Date.now();
+    setStartedAt(timerStart);
+    setEtaDeadline(timerStart + initialSeconds * 1000);
 
     setLiveImages([]);
     setTrialDone(false);
-
-    // —— 计时器 ——
-    const timerStart = Date.now();
-    if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
-    elapsedTimerRef.current = setInterval(() => {
-      setElapsedSeconds(Math.round((Date.now() - timerStart) / 1000));
-      setSecondsLeft(prev => Math.max(0, prev - 1));
-    }, 1000);
 
     // —— AbortController（取消用）——
     const cancelController = new AbortController();
@@ -881,7 +956,21 @@ export default function TaskDetailPage() {
         throw new Error('登录已过期，请重新登录后再试');
       }
       if (!response.ok || !response.body) {
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        // 服务端开流前拒绝：429 = 同一账号在途生成过多，413 = 请求体过大。
+        // 响应体是 JSON `{error}`，解析出来给用户看人话，不再把原始 JSON 糊在页面上。
+        // 这类错误不进「连接中断」分支，也不会被自动补齐重试（lastErrorWasStall 保持 false）。
+        const rawBody = await response.text().catch(() => '');
+        let serverMessage = '';
+        try {
+          const parsed = JSON.parse(rawBody) as { error?: unknown };
+          if (typeof parsed.error === 'string') serverMessage = parsed.error.trim();
+        } catch { /* 不是 JSON，用下面的兜底文案 */ }
+        const friendly = response.status === 429
+          ? (serverMessage || '同时在生成的任务太多了，请等当前任务完成后再试')
+          : response.status === 413
+            ? (serverMessage || '上传的图片总体积太大，请减少参考图数量或压缩后重试')
+            : (serverMessage || `服务暂时无法处理这次请求（HTTP ${response.status}），请稍后重试`);
+        throw new GenerationHttpError(response.status, friendly);
       }
       // 兜底：若被中间层重定向到登录页（HTML 200），不能当成空 SSE 流静默吞掉
       const sseContentType = response.headers.get('content-type') || '';
@@ -1026,7 +1115,7 @@ export default function TaskDetailPage() {
 
               // 动态修正预估剩余时间：整组剩余数量 × 单张预估（按引擎）
               const remaining = Math.max(0, grandTotal - overallCurrent);
-              setSecondsLeft(remaining * etaPerShotSec);
+              setEtaDeadline(Date.now() + remaining * etaPerShotSec * 1000);
 
               // 实时写入 IndexedDB + 追加到 liveImages
               // 只有产品图才按镜次查 shotConfig；场景组图的 shotIndex 是「参考图序号(1..N)」，
@@ -1091,6 +1180,19 @@ export default function TaskDetailPage() {
                 fatal: payload.fatal as boolean,
               };
               console.error(`[SSE] 错误事件:`, errPayload);
+              if (
+                payload.fatal !== true
+                && typeof errPayload.message === 'string'
+                && IDEMPOTENT_NOTICE_PATTERN.test(errPayload.message)
+              ) {
+                // 幂等命中：服务端没有重复出图，也没有重复扣费。这只是「该镜次的提示」，
+                // 不是生成失败，不进失败列表；也不置 lastErrorWasStall，所以不会触发自动补齐循环。
+                // 图若已交付，收尾时的补拉 / 刷新页面即可取回。
+                setShotNotices(prev => [...prev, { shotIndex: errPayload.shotIndex, message: errPayload.message }]);
+                lastFatalError = errPayload.message;
+                lastErrorWasStall = false;
+                continue;
+              }
               setGenerationErrors(prev => [...prev, errPayload]);
               if (payload.fatal) {
                 const msg = payload.message as string;
@@ -1214,8 +1316,6 @@ export default function TaskDetailPage() {
         setGenerationPhase('error');
       }
     } finally {
-      if (elapsedTimerRef.current) clearInterval(elapsedTimerRef.current);
-      setSecondsLeft(0);
       abortControllerRef.current = null;
 
       // 数据安全：扫描所有 backup，按 shotIndex 对应是否有新 result 决定
@@ -1330,6 +1430,8 @@ export default function TaskDetailPage() {
       } finally {
         startLockRef.current = false;
         setGenerating(false);
+        // 扣费 / 退款都已落定：刷新右上与各处共享的余额
+        void refreshBalance();
       }
     }
   };
@@ -1603,14 +1705,113 @@ export default function TaskDetailPage() {
 
   const getShotCount = () => {
     if (!project) return 7;
-    // 组图：目标张数 = lookbook 参考图张数
-    if (project.moduleType === 'scene' && project.sceneGroup) {
-      return getSceneGroupMode(project) === 'products'
-        ? buildProductGroupsFromImages(inputImages.products).length
-        : inputImages.sceneRefs.length;
+    if (project.moduleType === 'scene') {
+      // 组图：目标张数 = lookbook 参考图张数
+      if (project.sceneGroup) {
+        return getSceneGroupMode(project) === 'products'
+          ? buildProductGroupsFromImages(inputImages.products).length
+          : inputImages.sceneRefs.length;
+      }
+      // 单张场景图：永远 1 张（以前落到下面按产品镜次解析，会算出 5 张）
+      return 1;
     }
     return parseSelectedShots(project.selectedShots).length;
   };
+
+  // ── 费用与余额 ──
+  // 单价口径与首页、服务端一致：getGenerationCostFen(引擎, 画质)。
+  // 请求实际用的是 newEngine / newQuality（见 handleStartGeneration 的 effectiveEngine），所以标价也按它们算。
+  const unitCostFen = getGenerationCostFen(newEngine, newQuality);
+  const fullRunCount = getShotCount();
+  const fullRunCostFen = fullRunCount * unitCostFen;
+  const affordability = (costFen: number): 'ok' | 'insufficient' | 'unknown' => {
+    if (balanceStatus !== 'ready' || balanceFen === null) return 'unknown';
+    return balanceFen >= costFen ? 'ok' : 'insufficient';
+  };
+  /** 花钱动作的统一入口：已确认余额不足就引导充值，不发请求；余额未知时放行（服务端会再校验）。 */
+  const runPaidAction = (costFen: number, action: () => void) => {
+    if (affordability(costFen) === 'insufficient') {
+      setRechargeNeedFen(costFen);
+      return;
+    }
+    action();
+  };
+  /** 预计耗时（秒）：与生成中的 ETA 同一口径——首张 + 其余张数 × 单张。 */
+  const estimateRunSeconds = (count: number) => {
+    const first = newEngine === 'openai' ? getGenerationQualityEtaSeconds(newQuality) : 25;
+    const perShot = newEngine === 'openai' ? getGenerationQualityEtaSeconds(newQuality) : 15;
+    return first + Math.max(0, count - 1) * perShot;
+  };
+
+  // AI 聊天触发「整任务重做」：先把张数和费用讲清楚，用户确认才开跑。
+  const handleAiTriggerGenerate = async () => {
+    if (!project || generating || aiConfirmingRef.current || startLockRef.current || regenParamsLockRef.current) return;
+    if (affordability(fullRunCostFen) === 'insufficient') {
+      setRechargeNeedFen(fullRunCostFen);
+      return;
+    }
+    const customPrompt = pendingChatPromptRef.current;
+    aiConfirmingRef.current = true;
+    let confirmed = false;
+    try {
+      confirmed = await confirm({
+        title: 'AI 将重做整个任务',
+        message: `将按当前设置重新生成全部 ${fullRunCount} 张，预计扣费 ${formatYuan(fullRunCostFen)}（失败的镜次自动退款）。${
+          project.status === 'pending' ? '' : '已有的图会保留为备份，可在每张图上还原。'
+        }`,
+        confirmText: `确认重做 · ${formatYuan(fullRunCostFen)}`,
+      });
+    } finally {
+      aiConfirmingRef.current = false;
+    }
+    // 等待确认期间用户可能已经手动开跑了别的生成，再核一次同步锁
+    if (!confirmed || startLockRef.current || abortControllerRef.current) return;
+    pendingChatPromptRef.current = '';
+    if (project.status === 'pending') {
+      // 待生成任务：直接开始（newBodyType/newSkinTone 等覆盖在 handleStartGeneration 里持久化）
+      void handleStartGeneration(undefined, customPrompt || undefined);
+    } else {
+      // 已有结果的任务：走调整参数路径 —— 会先把旧结果转成备份再重做，
+      // 否则新旧 result 在同 shotIndex 堆积、zip 下载同名互相覆盖；
+      // 同时该路径会持久化 chat 设置的 newBodyType/newSkinTone
+      void handleRegenerateWithNewParams(customPrompt || undefined);
+    }
+  };
+
+  // ?autostart=1：首页「快速生成」建好任务后跳过来，在这里自动全量开跑一次（等同点「全部生成」，
+  // 不是「先试 1 张」——首页标价按全量算）。同步 ref 锁保证严格模式双调用 / 刷新 / 后退都不会重复扣费。
+  useEffect(() => {
+    if (loading || !project || autostartHandledRef.current) return;
+    if (new URLSearchParams(window.location.search).get('autostart') !== '1') return;
+    const clearParam = () => router.replace(`/task/${taskId}`, { scroll: false });
+
+    // 任务已经开过跑（刷新 / 后退回到带参数的地址）：只清掉参数，绝不再跑
+    if (project.status !== 'pending' || images.length > 0 || generating) {
+      autostartHandledRef.current = true;
+      clearParam();
+      return;
+    }
+    if (inputImages.products.length === 0) {
+      autostartHandledRef.current = true;
+      clearParam();
+      toast.error('缺少产品输入图，没有自动开始，请补充输入图后手动生成');
+      return;
+    }
+    if (balanceStatus === 'loading') return; // 等余额确认后再决定，不抢跑
+    autostartHandledRef.current = true;
+    clearParam();
+    if (balanceStatus !== 'ready' || balanceFen === null) {
+      toast.info('暂时无法确认余额，没有自动开始，请点击下方按钮手动生成');
+      return;
+    }
+    if (balanceFen < fullRunCostFen) {
+      toast.error(`余额不足：全部生成需要 ${formatYuan(fullRunCostFen)}，当前余额 ${formatYuan(balanceFen)}，没有自动开始`);
+      return;
+    }
+    void handleStartGeneration();
+    // handleStartGeneration 依赖当前渲染的 state（每次渲染都是新闭包），故不进依赖数组
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, project, images.length, generating, inputImages.products.length, balanceStatus, balanceFen, fullRunCostFen, router, taskId, toast]);
 
   const productGroupLabels = (() => {
     if (!project || project.moduleType !== 'scene' || !project.sceneGroup || getSceneGroupMode(project) !== 'products') {
@@ -1672,27 +1873,35 @@ export default function TaskDetailPage() {
     return '场景图';
   })();
 
-  // 进度条宽度：
-  // - analyzing：固定 8% 起步
-  // - 收尾窗口（图都到齐、等 done 事件）：100%
-  // - 生成中：取「已完成镜次占比」与「按已耗时/预计时间的估算占比」的较大值。
-  //   单张长任务（GPT 一张 ~2-3 分钟）上游不返回中途进度，靠 timeFrac 让进度条
-  //   随秒表匀速往前爬，不至于卡在起点显得僵住；估算值封顶 95%，真正出图/收尾才到 100%。
-  const progressBarWidth = (() => {
-    if (generationPhase === 'analyzing') return '8%';
-    if (isFinishingUp) return '100%';
-    const shotFrac = liveImages.length / Math.max(progress.total, 1);
-    const denom = elapsedSeconds + secondsLeft;
-    const timeFrac = denom > 0 ? elapsedSeconds / denom : 0;
-    const frac = Math.min(0.95, Math.max(shotFrac, timeFrac));
-    return `${Math.max(8, frac * 100)}%`;
-  })();
+  const previewInput = (src: string, label: string) => setPreviewImage({ src, label });
+
+  /** 「生成剩余 N 张 · ¥x」：试生成后 / 组图部分完成后补齐用；余额不足时变成充值入口。 */
+  const renderRemainingButton = (remainingCount: number) => {
+    const costFen = remainingCount * unitCostFen;
+    if (affordability(costFen) === 'insufficient') {
+      return (
+        <button type="button" onClick={() => setRechargeNeedFen(costFen)} className={RECHARGE_BUTTON_CLASS}>
+          <Zap className="w-4 h-4" aria-hidden="true" />
+          余额不足，去充值
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        onClick={() => runPaidAction(costFen, () => void handleGenerateRemaining())}
+        className="btn-primary text-sm px-5 py-2.5"
+      >
+        <Wand2 className="w-4 h-4" strokeWidth={1.5} aria-hidden="true" />
+        <span>生成剩余 {remainingCount} 张 · <span className="num">{formatYuan(costFen)}</span></span>
+      </button>
+    );
+  };
 
   const currentEngineId: ImageEngine = project.engine === 'openai' ? 'openai' : 'gemini';
   const currentEngineName = ENGINES.find(e => e.id === currentEngineId)?.name ?? 'Gemini Flash Image';
   const currentQuality = normalizeGenerationQuality(project.generationQuality);
   const currentQualityLabel = getGenerationQualityLabel(currentQuality);
-  const pendingUnitCostFen = getGenerationCostFen(newEngine, newQuality);
 
   const paramChips = (
     <div className="flex flex-wrap gap-2">
@@ -1773,20 +1982,7 @@ export default function TaskDetailPage() {
             pendingChatPromptRef.current = actions.prompt;
           }
         }}
-        onTriggerGenerate={() => {
-          if (generating) return;
-          const customPrompt = pendingChatPromptRef.current;
-          pendingChatPromptRef.current = '';
-          if (project.status === 'pending') {
-            // 待生成任务：直接开始（newBodyType/newSkinTone 等覆盖在 handleStartGeneration 里持久化）
-            handleStartGeneration(undefined, customPrompt || undefined);
-          } else {
-            // 已有结果的任务：走调整参数路径 —— 会先把旧结果转成备份再重做，
-            // 否则新旧 result 在同 shotIndex 堆积、zip 下载同名互相覆盖；
-            // 同时该路径会持久化 chat 设置的 newBodyType/newSkinTone
-            handleRegenerateWithNewParams(customPrompt || undefined);
-          }
-        }}
+        onTriggerGenerate={() => void handleAiTriggerGenerate()}
       />
 
       {/* 桌面端：主内容向右偏移以避让 AI 侧边栏（72 * 4 = 288px） */}
@@ -1803,37 +1999,37 @@ export default function TaskDetailPage() {
               <span className="text-lg font-semibold tracking-tight">SILXINE</span>
             </Link>
 
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               {/* 项目名称和状态 */}
               <h1 className="hidden sm:block text-base font-medium truncate max-w-[150px] text-[var(--color-text)]">
                 {project.name}
               </h1>
 
               {/* 模块类型标签 */}
-              <span className="text-xs font-medium px-2.5 py-1 rounded-lg bg-[var(--color-background)] text-[var(--color-text-secondary)]">
+              <span className="hidden sm:inline-block text-xs font-medium px-2.5 py-1 rounded-lg bg-[var(--color-background)] text-[var(--color-text-secondary)]">
                 {moduleType === 'product' ? '产品图' : '场景图'}
               </span>
 
               {project.status === 'pending' && (
-                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-background)] rounded-full">
+                <span className="flex shrink-0 items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-background)] rounded-full">
                   <Clock className="w-3.5 h-3.5 text-[var(--color-text-muted)]" aria-hidden="true" />
                   等待生成
                 </span>
               )}
               {project.status === 'processing' && (
-                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-accent)]/10 rounded-full text-[var(--color-accent)] tabular-nums">
+                <span className="num flex shrink-0 items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-brand-soft)] rounded-full text-[var(--color-brand-strong)]">
                   <Loader className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
                   {liveImages.length}/{progress.total}
                 </span>
               )}
               {project.status === 'completed' && (
-                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-green-50 rounded-full text-green-600">
+                <span className="flex shrink-0 items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-success-soft)] rounded-full text-[var(--color-success)]">
                   <CheckCircle className="w-3.5 h-3.5" aria-hidden="true" />
                   已完成
                 </span>
               )}
               {project.status === 'failed' && (
-                <span className="flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-red-50 rounded-full text-red-500">
+                <span className="flex shrink-0 items-center gap-1.5 px-3 py-1 text-xs font-medium bg-[var(--color-danger-soft)] rounded-full text-[var(--color-danger)]">
                   <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
                   失败
                 </span>
@@ -1842,8 +2038,10 @@ export default function TaskDetailPage() {
               {/* 调整参数按钮 */}
               {(project.status === 'completed' || project.status === 'failed') && !generating && (
                 <button
+                  type="button"
                   onClick={() => setShowAdjustPanel(true)}
-                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-[var(--color-accent)] text-white rounded-xl hover:bg-[var(--color-accent-dark)] transition-colors"
+                  aria-label="调整参数"
+                  className="flex min-h-10 shrink-0 items-center gap-2 px-3 sm:px-4 py-2 text-sm font-medium bg-[var(--color-brand-strong)] text-white rounded-xl hover:opacity-90 transition-opacity"
                 >
                   <Settings2 className="w-4 h-4" aria-hidden="true" />
                   <span className="hidden sm:inline">调整参数</span>
@@ -1854,122 +2052,145 @@ export default function TaskDetailPage() {
         </div>
       </header>
 
-      {/* 调整参数面板 (Modal) */}
-      {showAdjustPanel && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-[var(--color-surface)] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl border border-[var(--color-border-light)]">
-            {/* 头部 */}
-            <div className="flex items-center justify-between p-5 border-b border-[var(--color-border-light)]">
-              <h2 className="text-lg font-semibold">调整参数，重新生成</h2>
+      {/* 调整参数面板：统一用 <Modal>（Esc 关闭、焦点陷阱与归还、滚动锁、手机端底部抽屉） */}
+      <Modal
+        open={showAdjustPanel}
+        onClose={() => setShowAdjustPanel(false)}
+        title="调整参数，重新生成"
+        size="lg"
+        footer={
+          <div className="flex w-full flex-col gap-2">
+            {affordability(fullRunCostFen) === 'insufficient' ? (
               <button
-                onClick={() => setShowAdjustPanel(false)}
-                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[var(--color-background)] transition-colors"
-                aria-label="关闭参数调整面板"
+                type="button"
+                onClick={() => setRechargeNeedFen(fullRunCostFen)}
+                className={RECHARGE_BUTTON_CLASS}
               >
-                <X className="w-5 h-5 text-[var(--color-text-muted)]" aria-hidden="true" />
+                <Zap className="w-5 h-5" aria-hidden="true" />
+                余额不足，去充值
               </button>
-            </div>
-
-            {/* 内容 */}
-            <div className="p-5 space-y-6">
-              {/* 当前参数概览 */}
-              <div className="text-sm text-[var(--color-text-secondary)] space-y-1">
-                {isFollowSceneGroupTask ? (
-                  <div className="font-medium text-[var(--color-text)]">肤色·体型·发型跟随场景图</div>
-                ) : (
-                  <>
-                    <div>当前模特: <span className="font-medium text-[var(--color-text)]">{currentModelName}</span></div>
-                    <div>当前体型: <span className="font-medium text-[var(--color-text)]">{currentBodyTypeName}</span></div>
-                    <div>当前肤色: <span className="font-medium text-[var(--color-text)]">{currentSkinToneName}</span></div>
-                  </>
-                )}
-              </div>
-
-              {/* 生图引擎选择 */}
-              <div>
-                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">生图引擎</h3>
-                <EngineSelector
-                  selected={newEngine}
-                  onSelect={setNewEngine}
-                  variant="full"
-                />
-                {newEngine === 'openai' && (
-                  <GPTQualitySelector
-                    value={newQuality}
-                    onChange={setNewQuality}
-                    variant="full"
-                  />
-                )}
-              </div>
-
-              {!isFollowSceneGroupTask && (
-                <>
-                  {/* 模特选择 */}
-                  <div>
-                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择模特</h3>
-                    <ModelSelector
-                      selectedModel={newModelId}
-                      onSelect={setNewModelId}
-                    />
-                  </div>
-
-                  {/* 体型选择（三选） */}
-                  <div>
-                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">体型选择</h3>
-                    <BodyTypeSelector
-                      selectedBodyType={newBodyType}
-                      onSelect={setNewBodyType}
-                    />
-                  </div>
-
-                  {/* 肤色选择（三选）— 新增 */}
-                  <div>
-                    <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">肤色选择</h3>
-                    <SkinToneSelector
-                      selectedSkinTone={newSkinTone}
-                      onSelect={setNewSkinTone}
-                    />
-                  </div>
-                </>
-              )}
-
-              {/* 风格参考上传 */}
-              <div>
-                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">
-                  更换{moduleType === 'scene' ? '场景' : '背景'}参考 <span className="text-[var(--color-text-muted)]">(可选)</span>
-                </h3>
-                <ImageUploader
-                  title=""
-                  description={moduleType === 'scene'
-                    ? '上传新的场景参考图，将覆盖原有设置'
-                    : '上传新的背景参考图，将覆盖原有设置'
-                  }
-                  maxFiles={5}
-                  images={newStyleImages}
-                  onImagesChange={setNewStyleImages}
-                  variant="gray"
-                />
-              </div>
-            </div>
-
-            {/* 底部 */}
-            <div className="p-5 border-t border-[var(--color-border-light)]">
+            ) : (
               <button
-                onClick={() => handleRegenerateWithNewParams()}
+                type="button"
+                onClick={() => runPaidAction(fullRunCostFen, () => void handleRegenerateWithNewParams())}
                 className="btn-primary w-full"
               >
-                <RefreshCcw className="w-5 h-5" />
-                开始重新生成
+                <RefreshCcw className="w-5 h-5" aria-hidden="true" />
+                <span>开始重新生成 · {fullRunCount} 张 · <span className="num">{formatYuan(fullRunCostFen)}</span></span>
               </button>
-              <p className="text-xs text-[var(--color-text-muted)] mt-3 text-center">
-                {isFollowSceneGroupTask
-                  ? '将使用原有的产品图与场景图重新生成，肤色·体型·发型继续跟随场景图'
-                  : '将使用原有的产品图，配合新的模特/体型/肤色参数重新生成'}
-              </p>
-            </div>
+            )}
+            <p className="text-center text-xs text-[var(--color-text-muted)]">
+              {isFollowSceneGroupTask
+                ? '将使用原有的产品图与场景图重新生成，肤色·体型·发型继续跟随场景图'
+                : '将使用原有的产品图，配合新的模特/体型/肤色参数重新生成'}
+              ；旧图保留为备份，失败的镜次自动退款。
+            </p>
+          </div>
+        }
+      >
+        <div className="space-y-6 pt-2">
+          {/* 当前参数概览 */}
+          <div className="text-sm text-[var(--color-text-secondary)] space-y-1">
+            {isFollowSceneGroupTask ? (
+              <div className="font-medium text-[var(--color-text)]">肤色·体型·发型跟随场景图</div>
+            ) : (
+              <>
+                <div>当前模特: <span className="font-medium text-[var(--color-text)]">{currentModelName}</span></div>
+                <div>当前体型: <span className="font-medium text-[var(--color-text)]">{currentBodyTypeName}</span></div>
+                <div>当前肤色: <span className="font-medium text-[var(--color-text)]">{currentSkinToneName}</span></div>
+              </>
+            )}
+          </div>
+
+          {/* 生图引擎选择 */}
+          <div>
+            <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">生图引擎</h3>
+            <EngineSelector
+              selected={newEngine}
+              onSelect={setNewEngine}
+              variant="full"
+            />
+            {newEngine === 'openai' && (
+              <GPTQualitySelector
+                value={newQuality}
+                onChange={setNewQuality}
+                variant="full"
+              />
+            )}
+          </div>
+
+          {!isFollowSceneGroupTask && (
+            <>
+              {/* 模特选择 */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">选择模特</h3>
+                <ModelSelector
+                  selectedModel={newModelId}
+                  onSelect={setNewModelId}
+                />
+              </div>
+
+              {/* 体型选择（三选） */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">体型选择</h3>
+                <BodyTypeSelector
+                  selectedBodyType={newBodyType}
+                  onSelect={setNewBodyType}
+                />
+              </div>
+
+              {/* 肤色选择（三选） */}
+              <div>
+                <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">肤色选择</h3>
+                <SkinToneSelector
+                  selectedSkinTone={newSkinTone}
+                  onSelect={setNewSkinTone}
+                />
+              </div>
+            </>
+          )}
+
+          {/* 风格参考上传 */}
+          <div>
+            <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-3">
+              更换{moduleType === 'scene' ? '场景' : '背景'}参考 <span className="text-[var(--color-text-muted)]">(可选)</span>
+            </h3>
+            <ImageUploader
+              title=""
+              description={moduleType === 'scene'
+                ? '上传新的场景参考图，将覆盖原有设置'
+                : '上传新的背景参考图，将覆盖原有设置'
+              }
+              maxFiles={5}
+              images={newStyleImages}
+              onImagesChange={setNewStyleImages}
+              variant="gray"
+            />
           </div>
         </div>
-      )}
+      </Modal>
+
+      {/* 余额不足：引导联系管理员充值（与首页口径一致） */}
+      <Modal
+        open={rechargeNeedFen !== null}
+        onClose={() => setRechargeNeedFen(null)}
+        title="余额不足"
+        size="sm"
+      >
+        <div className="space-y-4 pt-1">
+          <p>
+            这次操作需要 <span className="num font-semibold text-[var(--color-ink)]">{formatYuan(rechargeNeedFen ?? 0)}</span>
+            {balanceFen !== null && (
+              <>
+                ，当前余额 <span className="num font-semibold text-[var(--color-ink)]">{formatYuan(balanceFen)}</span>
+                ，还差 <span className="num font-semibold text-[var(--color-danger)]">{formatYuan(Math.max(0, (rechargeNeedFen ?? 0) - balanceFen))}</span>
+              </>
+            )}
+            。
+          </p>
+          <ContactAdmin variant="card" note="目前为人工核账充值，复制管理员微信号添加后即可快速到账。" />
+        </div>
+      </Modal>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* ===== [E] 结果 UI · 生成中（SSE 实时） · 开始 ===== */}
@@ -1977,52 +2198,51 @@ export default function TaskDetailPage() {
         {generating && (
           <div className="mb-8">
             {/* 主进度卡 */}
-            <div className="mb-4 text-center py-10 px-6 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
+            <div className="mb-4 text-center py-10 px-4 sm:px-6 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
               <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-[var(--color-accent)] to-[var(--color-accent-light)] flex items-center justify-center shadow-lg">
                 {generationPhase === 'analyzing'
-                  ? <Loader className="w-8 h-8 text-white animate-spin" strokeWidth={1.5} />
-                  : <Wand2 className="w-8 h-8 text-white animate-pulse" strokeWidth={1.5} />
+                  ? <Loader className="w-8 h-8 text-white animate-spin" strokeWidth={1.5} aria-hidden="true" />
+                  : <Wand2 className="w-8 h-8 text-white animate-pulse" strokeWidth={1.5} aria-hidden="true" />
                 }
               </div>
 
-              <h2 className="text-xl font-semibold mb-1">{phaseTitle}</h2>
+              <h2 aria-live="polite" className="text-xl font-semibold mb-1">{phaseTitle}</h2>
 
               <p className="text-sm text-[var(--color-text-secondary)] mb-6">
                 {generationPhase === 'analyzing'
                   ? '这将帮助 AI 更精准地还原面料细节'
-                  : waitingMessage
+                  : <RotatingTips override={waitingMessage} />
                 }
               </p>
 
-              <div className="max-w-sm mx-auto">
-                <div className="h-2 bg-[var(--color-background)] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-[var(--color-accent)] to-[var(--color-accent-light)] transition-all duration-700 rounded-full"
-                    style={{ width: progressBarWidth }}
-                  />
-                </div>
-                <div className="flex justify-between items-center mt-2">
-                  <p className="text-xs text-[var(--color-text-muted)]">{phaseSubLabel}</p>
-                  <p className="text-xs text-[var(--color-text-muted)] flex items-center gap-2">
-                    <span>已耗时 {elapsedSeconds}s</span>
-                    {secondsLeft > 0 && <span className="text-[var(--color-accent)] font-medium">预计剩余时间：{secondsLeft} 秒</span>}
-                    {elapsedSeconds > (currentEngineId === 'openai' ? 300 : 90) && <span className="text-amber-500 ml-1">（响应较慢，请稍候）</span>}
-                  </p>
-                </div>
-              </div>
+              {/* 秒表与进度条的每秒刷新封装在这个小组件里，不再带动整页重渲 */}
+              <GenerationProgress
+                startedAt={startedAt}
+                etaDeadline={etaDeadline}
+                analyzing={generationPhase === 'analyzing'}
+                finishing={isFinishingUp}
+                shotFrac={liveImages.length / Math.max(progress.total, 1)}
+                subLabel={phaseSubLabel}
+                slowAfterSec={currentEngineId === 'openai' ? 300 : 90}
+              />
+
+              <p className="mt-3 text-xs text-[var(--color-text-muted)]">
+                生成期间请保持页面开启；失败的镜次会自动退款。
+              </p>
 
               {moduleType === 'product' && liveImages.length >= 1 && progress.total > 1 && (
-                <div className="mt-6 max-w-sm mx-auto p-3.5 rounded-2xl bg-gradient-to-r from-[var(--color-accent)]/10 to-[var(--color-accent-light)]/5 border border-[var(--color-accent)]/20 text-[var(--color-accent)] text-xs text-center animate-fade-in shadow-sm flex items-center justify-center gap-2">
+                <div className="mt-6 max-w-sm mx-auto p-3.5 rounded-2xl bg-[var(--color-brand-soft)] border border-[var(--color-brand)]/40 text-[var(--color-brand-strong)] text-xs text-center animate-fade-in shadow-sm flex items-center justify-center gap-2">
                   <span>✨ 模特身份已成功锚定！正在以此模特渲染剩余的镜次…</span>
                 </div>
               )}
 
               {/* 取消按钮 */}
               <button
+                type="button"
                 onClick={cancelGeneration}
-                className="mt-6 flex items-center gap-1.5 mx-auto text-xs text-[var(--color-text-muted)] hover:text-red-500 transition-colors"
+                className="mt-4 flex min-h-11 items-center gap-1.5 mx-auto px-3 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-danger)] transition-colors"
               >
-                <Ban className="w-3.5 h-3.5" />
+                <Ban className="w-3.5 h-3.5" aria-hidden="true" />
                 取消生成
               </button>
             </div>
@@ -2031,7 +2251,7 @@ export default function TaskDetailPage() {
             {liveImages.length > 0 && (
               <div className="mb-4">
                 <h3 className="text-xs font-medium text-[var(--color-text-muted)] mb-3 flex items-center gap-1.5">
-                  <CheckCircle className="w-3.5 h-3.5 text-green-500" />
+                  <CheckCircle className="w-3.5 h-3.5 text-[var(--color-success)]" aria-hidden="true" />
                   已完成 {liveImages.length} 张（生成中实时追加）
                 </h3>
                 <ResultGallery
@@ -2051,17 +2271,20 @@ export default function TaskDetailPage() {
               </div>
             )}
 
+            {/* 服务端幂等命中的镜次提示（不是失败） */}
+            <ShotNotices notices={shotNotices} />
+
             {/* 错误汇总（非 fatal，生成仍在继续）。这里只做信息展示——同一条 SSE 流还在跑，
                 无法中途单独重试某一张；失败镜次的单张重试在生成结束后用「补生成剩余」或失败态的
                 「重试这张」完成。 */}
             {generationErrors.filter(e => !e.fatal).length > 0 && (
-              <div className="p-4 bg-amber-50 rounded-2xl border border-amber-200">
+              <div className="p-4 bg-[var(--color-warning-soft)] rounded-2xl border border-[var(--color-warning)]/30">
                 <div className="flex items-center gap-2 mb-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-500" />
-                  <p className="text-sm font-medium text-amber-700">部分镜次生成失败（生成继续，稍后可补生成）</p>
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-[var(--color-warning)]" aria-hidden="true" />
+                  <p className="text-sm font-medium text-[var(--color-warning)]">部分镜次生成失败（生成继续，稍后可补生成）</p>
                 </div>
                 {generationErrors.filter(e => !e.fatal).map((e, i) => (
-                  <p key={i} className="text-xs text-amber-600 font-mono mt-1 break-all">
+                  <p key={i} className="text-xs text-[var(--color-warning)] font-mono mt-1 break-all">
                     镜次 #{e.shotIndex}: {e.message}
                   </p>
                 ))}
@@ -2079,99 +2302,49 @@ export default function TaskDetailPage() {
           </h2>
           <div className="flex gap-3 overflow-x-auto pb-2">
             {inputImages.products.map(img => (
-              <div key={img.id} className="flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '产品' })}
-                  className="w-20 h-20 rounded-xl overflow-hidden border-2 border-[var(--color-accent)] shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
-                  title="点击放大"
-                >
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt="产品"
-                    width={80}
-                    height={80}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-                <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">产品</p>
-              </div>
+              <InputThumb
+                key={img.id}
+                image={img}
+                label="产品"
+                className="border-2 border-[var(--color-accent)]"
+                onPreview={previewInput}
+              />
             ))}
             {inputImages.modelRefs.map(img => (
-              <div key={img.id} className="flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '模特参考' })}
-                  className="w-20 h-20 rounded-xl overflow-hidden border border-purple-300 shadow-sm cursor-zoom-in hover:scale-105 transition-transform block"
-                  title="点击放大"
-                >
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt="模特参考"
-                    width={80}
-                    height={80}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-                <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">模特参考</p>
-              </div>
+              <InputThumb
+                key={img.id}
+                image={img}
+                label="模特参考"
+                className="border border-[var(--color-secondary)]"
+                onPreview={previewInput}
+              />
             ))}
             {inputImages.bgRefs.map(img => (
-              <div key={img.id} className="flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '背景参考' })}
-                  className="w-20 h-20 rounded-xl overflow-hidden border border-[var(--color-border)] opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
-                  title="点击放大"
-                >
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt="背景参考"
-                    width={80}
-                    height={80}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-                <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">背景</p>
-              </div>
+              <InputThumb
+                key={img.id}
+                image={img}
+                label="背景参考"
+                className="border border-[var(--color-border)] opacity-80 hover:opacity-100"
+                onPreview={previewInput}
+              />
             ))}
             {inputImages.sceneRefs.map(img => (
-              <div key={img.id} className="flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '场景参考' })}
-                  className="w-20 h-20 rounded-xl overflow-hidden border border-green-300 opacity-80 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
-                  title="点击放大"
-                >
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt="场景参考"
-                    width={80}
-                    height={80}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-                <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">场景</p>
-              </div>
+              <InputThumb
+                key={img.id}
+                image={img}
+                label="场景参考"
+                className="border border-[var(--color-success)]/50 opacity-80 hover:opacity-100"
+                onPreview={previewInput}
+              />
             ))}
             {inputImages.accessories.map(img => (
-              <div key={img.id} className="flex-shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPreviewImage({ src: `data:${img.mimeType};base64,${img.data}`, label: '配件' })}
-                  className="w-20 h-20 rounded-xl overflow-hidden border border-dashed border-[var(--color-border)] opacity-60 cursor-zoom-in hover:scale-105 hover:opacity-100 transition-all block"
-                  title="点击放大"
-                >
-                  <img
-                    src={`data:${img.mimeType};base64,${img.data}`}
-                    alt="配件"
-                    width={80}
-                    height={80}
-                    className="w-full h-full object-cover"
-                  />
-                </button>
-                <p className="text-[10px] text-[var(--color-text-muted)] text-center mt-1">配件</p>
-              </div>
+              <InputThumb
+                key={img.id}
+                image={img}
+                label="配件"
+                className="border border-dashed border-[var(--color-border)] opacity-60 hover:opacity-100"
+                onPreview={previewInput}
+              />
             ))}
           </div>
 
@@ -2181,7 +2354,7 @@ export default function TaskDetailPage() {
         {/* 开始生成按钮 */}
         {project.status === 'pending' && !generating && (
           <div className="mb-12 text-center py-12 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
-            <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[#1a1a1a] flex items-center justify-center">
+            <div className="w-16 h-16 mx-auto mb-6 rounded-full bg-gradient-to-br from-[var(--color-primary)] to-[var(--color-ink)] flex items-center justify-center">
               <Wand2 className="w-8 h-8 text-[var(--color-accent)]" strokeWidth={1.5} aria-hidden="true" />
             </div>
             <h2 className="text-xl font-semibold mb-3">
@@ -2221,37 +2394,61 @@ export default function TaskDetailPage() {
             </div>
 
             {moduleType === 'product' && getShotCount() > 1 ? (
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 px-4">
                 {/* 推荐：先试 1 张 */}
-                <button
-                  onClick={handleTrialGeneration}
-                  className="btn-primary"
-                >
-                  <Wand2 className="w-5 h-5" strokeWidth={1.5} />
-                  <span>先试 1 张（推荐）</span>
-                </button>
+                {affordability(unitCostFen) === 'insufficient' ? (
+                  <button type="button" onClick={() => setRechargeNeedFen(unitCostFen)} className={RECHARGE_BUTTON_CLASS}>
+                    <Zap className="w-5 h-5" aria-hidden="true" />
+                    余额不足，去充值
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => runPaidAction(unitCostFen, () => void handleTrialGeneration())}
+                    className="btn-primary"
+                  >
+                    <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
+                    <span>先试 1 张 · <span className="num">{formatYuan(unitCostFen)}</span>（推荐）</span>
+                  </button>
+                )}
                 {/* 全量生成 */}
-                <button
-                  onClick={() => handleStartGeneration()}
-                  className="flex items-center gap-2 px-6 py-3 text-sm font-medium border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
-                >
-                  {getGenerateLabel()}
-                </button>
+                {affordability(fullRunCostFen) === 'insufficient' ? (
+                  <button type="button" onClick={() => setRechargeNeedFen(fullRunCostFen)} className={RECHARGE_BUTTON_CLASS}>
+                    <Zap className="w-5 h-5" aria-hidden="true" />
+                    余额不足，去充值（全部需 {formatYuan(fullRunCostFen)}）
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => runPaidAction(fullRunCostFen, () => void handleStartGeneration())}
+                    className="flex min-h-11 items-center justify-center gap-2 px-6 py-3 text-sm font-medium border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
+                  >
+                    <span>{getGenerateLabel()} · <span className="num">{formatYuan(fullRunCostFen)}</span></span>
+                  </button>
+                )}
               </div>
             ) : (
-              <button
-                onClick={() => handleStartGeneration()}
-                className="btn-primary"
-              >
-                <Wand2 className="w-5 h-5" strokeWidth={1.5} />
-                {getGenerateLabel()}
-              </button>
+              affordability(fullRunCostFen) === 'insufficient' ? (
+                <button type="button" onClick={() => setRechargeNeedFen(fullRunCostFen)} className={RECHARGE_BUTTON_CLASS}>
+                  <Zap className="w-5 h-5" aria-hidden="true" />
+                  余额不足，去充值（需 {formatYuan(fullRunCostFen)}）
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => runPaidAction(fullRunCostFen, () => void handleStartGeneration())}
+                  className="btn-primary"
+                >
+                  <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
+                  <span>{getGenerateLabel()} · <span className="num">{formatYuan(fullRunCostFen)}</span></span>
+                </button>
+              )
             )}
 
-            <p className="text-xs text-[var(--color-text-muted)] mt-4">
+            <p className="text-xs text-[var(--color-text-muted)] mt-4 px-4">
               {moduleType === 'product' && getShotCount() > 1
-                ? `先试 1 张确认效果（¥${(pendingUnitCostFen / 100).toFixed(2)}），满意后再生成剩余 ${getShotCount() - 1} 张`
-                : '预计需要 1-2 分钟，请保持页面开启'
+                ? `先试 1 张确认效果（${formatYuan(unitCostFen)}，预计${formatEtaText(estimateRunSeconds(1))}），满意后再生成剩余 ${getShotCount() - 1} 张（${formatYuan((getShotCount() - 1) * unitCostFen)}）。全部生成预计${formatEtaText(estimateRunSeconds(getShotCount()))}，请保持页面开启`
+                : `预计${formatEtaText(estimateRunSeconds(fullRunCount))}（${newEngine === 'openai' ? `GPT 单张约 ${getGenerationQualityEtaSeconds(newQuality)} 秒，` : ''}视网络与排队可能更久），请保持页面开启`
               }
             </p>
           </div>
@@ -2263,28 +2460,23 @@ export default function TaskDetailPage() {
             只剩会把已生成图降级重做的「调整参数」)。trialDone 作同会话兜底。 */}
         {!generating && moduleType === 'product' && (project.status === 'completed' || trialDone)
           && images.length > 0 && images.length < getShotCount() && (
-          <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-accent)]/30 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-brand)]/40 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium text-[var(--color-text)]">✅ 试生成完成 — 效果满意吗？</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-1">
                 满意就继续生成剩余 {getShotCount() - images.length} 张，不满意可以调整参数重试
               </p>
             </div>
-            <div className="flex gap-3">
+            <div className="flex flex-col sm:flex-row gap-3">
               <button
+                type="button"
                 onClick={() => setShowAdjustPanel(true)}
-                className="flex items-center gap-2 px-4 py-2.5 text-sm border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
+                className="flex min-h-11 items-center justify-center gap-2 px-4 py-2.5 text-sm border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-background)] text-[var(--color-text-secondary)] transition-colors"
               >
-                <Settings2 className="w-4 h-4" />
+                <Settings2 className="w-4 h-4" aria-hidden="true" />
                 调整参数
               </button>
-              <button
-                onClick={() => void handleGenerateRemaining()}
-                className="btn-primary text-sm px-5 py-2.5"
-              >
-                <Wand2 className="w-4 h-4" strokeWidth={1.5} />
-                生成剩余 {getShotCount() - images.length} 张
-              </button>
+              {renderRemainingButton(getShotCount() - images.length)}
             </div>
           </div>
         )}
@@ -2292,20 +2484,14 @@ export default function TaskDetailPage() {
         {/* 组图·部分完成（如大批量分批 / 中途失败）→ 生成剩余。张数多时 GPT 单条 SSE 跑不完，靠此续跑补齐 */}
         {!generating && moduleType === 'scene' && project.sceneGroup && project.status === 'completed'
           && images.length > 0 && getShotCount() > 0 && images.length < getShotCount() && (
-          <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-accent)]/30 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="mb-8 p-5 bg-[var(--color-surface)] rounded-2xl border border-[var(--color-brand)]/40 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium text-[var(--color-text)]">已完成 {images.length} / {getShotCount()} 张组图</p>
               <p className="text-xs text-[var(--color-text-muted)] mt-1">
                 还差 {getShotCount() - images.length} 张（张数多时会分批完成）——点下方补齐剩余。
               </p>
             </div>
-            <button
-              onClick={() => void handleGenerateRemaining()}
-              className="btn-primary text-sm px-5 py-2.5"
-            >
-              <Wand2 className="w-4 h-4" strokeWidth={1.5} />
-              生成剩余 {getShotCount() - images.length} 张
-            </button>
+            {renderRemainingButton(getShotCount() - images.length)}
           </div>
         )}
 
@@ -2316,13 +2502,13 @@ export default function TaskDetailPage() {
             {/* 混款告警：卖家把两件不同单品混在一次上传里，出图会串味。
                 不是失败、不打断生成，所以单独一条黄条，和错误提示区分开。 */}
             {warningMessage && (
-              <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
+              <div className="mb-5 p-4 bg-[var(--color-warning-soft)] rounded-2xl border border-[var(--color-warning)]/30">
                 <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                  <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] mt-0.5 shrink-0" aria-hidden="true" />
                   <div className="flex-1">
-                    <p className="text-sm text-amber-800 font-medium">这次上传的产品图像是不止一件单品</p>
-                    <p className="text-sm text-amber-700 break-words mt-1">{warningMessage}</p>
-                    <p className="text-xs text-amber-600 mt-1.5">
+                    <p className="text-sm text-[var(--color-warning)] font-medium">这次上传的产品图像是不止一件单品</p>
+                    <p className="text-sm text-[var(--color-warning)] break-words mt-1">{warningMessage}</p>
+                    <p className="text-xs text-[var(--color-warning)] mt-1.5">
                       混在一起会让出图串味。建议每件单品单独建一个任务重新生成。
                     </p>
                   </div>
@@ -2332,14 +2518,15 @@ export default function TaskDetailPage() {
             {/* 部分成功提示：任务"已完成"但中途有镜次失败 / 余额不足。
                 不渲染的话余额不足等 fatal 信息在已完成任务上完全不可见 */}
             {!generating && project.status === 'completed' && displayErrorMessage && (
-              <div className="mb-5 p-4 bg-amber-50 rounded-2xl border border-amber-200">
+              <div className="mb-5 p-4 bg-[var(--color-warning-soft)] rounded-2xl border border-[var(--color-warning)]/30">
                 <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                  <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] mt-0.5 shrink-0" aria-hidden="true" />
                   {/* 仅展示错误信息;"生成剩余"入口已由上方持久化条件的面板统一提供,此处不再重复按钮 */}
-                  <p className="text-sm text-amber-700 break-words flex-1">{displayErrorMessage}</p>
+                  <p className="text-sm text-[var(--color-warning)] break-words flex-1">{displayErrorMessage}</p>
                 </div>
               </div>
             )}
+            {!generating && <ShotNotices notices={shotNotices} />}
             <h2 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-3 flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
               生成结果 · {images.length} 张
@@ -2396,18 +2583,18 @@ export default function TaskDetailPage() {
         {/* 失败状态 */}
         {project.status === 'failed' && images.length === 0 && (
           <div className="text-center py-16 bg-[var(--color-surface)] rounded-3xl border border-[var(--color-border-light)]">
-            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-50 flex items-center justify-center">
-              <XCircle className="w-8 h-8 text-red-400" />
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-[var(--color-danger-soft)] flex items-center justify-center">
+              <XCircle className="w-8 h-8 text-[var(--color-danger)]" aria-hidden="true" />
             </div>
             <h2 className="text-xl font-semibold mb-2">生成失败</h2>
 
             {/* 优先展示具体错误信息 */}
             {displayErrorMessage ? (
               <div className="max-w-lg mx-auto mb-6">
-                <div className="p-4 bg-red-50 rounded-2xl border border-red-100">
+                <div className="p-4 bg-[var(--color-danger-soft)] rounded-2xl border border-[var(--color-danger)]/20">
                   <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
-                    <p className="text-sm text-red-700 text-left break-words">{displayErrorMessage}</p>
+                    <AlertTriangle className="w-4 h-4 text-[var(--color-danger)] mt-0.5 shrink-0" aria-hidden="true" />
+                    <p className="text-sm text-[var(--color-danger)] text-left break-words">{displayErrorMessage}</p>
                   </div>
                 </div>
               </div>
@@ -2424,14 +2611,15 @@ export default function TaskDetailPage() {
                   <p className="text-xs font-medium text-[var(--color-text-muted)] mb-2">错误详情</p>
                   {generationErrors.map((e, i) => (
                     <div key={i} className="flex items-center justify-between gap-3 mt-1.5">
-                      <p className="text-xs text-red-600 font-mono break-all">
+                      <p className="text-xs text-[var(--color-danger)] font-mono break-all">
                         {e.shotIndex >= 0 ? `镜次 #${e.shotIndex}: ` : ''}{e.message}
                       </p>
                       {e.shotIndex > 0 && (
                         <button
+                          type="button"
                           onClick={() => handleRetryFailedShot(e.shotIndex)}
                           disabled={generating}
-                          className="shrink-0 text-xs px-3 py-1 rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] disabled:opacity-40 transition-colors"
+                          className="shrink-0 min-h-9 text-xs px-3 py-1 rounded-full border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] disabled:opacity-40 transition-colors"
                         >
                           重试这张
                         </button>
@@ -2451,6 +2639,10 @@ export default function TaskDetailPage() {
             >
               重试
             </button>
+            <p className="mt-3 px-4 text-xs text-[var(--color-text-muted)]">
+              重试只补生成缺失的镜次，按每张 <span className="num">{formatYuan(unitCostFen)}</span> 计费，失败自动退款；
+              如页面提示「连接中断」，请先刷新页面，已生成但未送达的图会自动补回。
+            </p>
           </div>
         )}
         {/* ===== [E] 结果 UI · 失败状态 · 结束 ===== */}
