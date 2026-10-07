@@ -1,4 +1,4 @@
-import Dexie, { Table } from 'dexie';
+import Dexie, { type Table } from 'dexie';
 
 // ===== 类型定义 =====
 
@@ -108,6 +108,104 @@ export interface LibraryImageRow {
   category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory';
 }
 
+// ===== 存储配额（QuotaExceededError）=====
+// 浏览器存储写满时，IndexedDB 抛 QuotaExceededError；Dexie 往往再包一层
+// （AbortError / DatabaseClosedError / BulkError，原错误在 .inner / .failures 里）。
+// 这里统一识别，调用方据此给出「存储已满」提示，而不是静默失败。
+
+export const STORAGE_FULL_MESSAGE = '浏览器存储已满，请在图库里删除一些旧图后再试';
+
+/** 存储配额不足的可识别错误：withQuotaGuard 会把底层配额错误统一转成它 */
+export class StorageQuotaError extends Error {
+  constructor(message: string = STORAGE_FULL_MESSAGE, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'StorageQuotaError';
+    if (options && 'cause' in options) (this as { cause?: unknown }).cause = options.cause;
+  }
+}
+
+const QUOTA_ERROR_NAMES = new Set([
+  'QuotaExceededError',
+  'NS_ERROR_DOM_QUOTA_REACHED', // Firefox
+  'StorageQuotaError',
+]);
+
+/**
+ * 判断任意错误是否由存储配额耗尽引起。
+ * 会沿 inner / cause / BulkError.failures 向下找（带深度上限，防环）。
+ */
+export function isStorageQuotaError(error: unknown, depth = 0): boolean {
+  if (!error || typeof error !== 'object' || depth > 5) return false;
+  const e = error as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    inner?: unknown;
+    cause?: unknown;
+    failures?: unknown;
+  };
+  if (typeof e.name === 'string' && QUOTA_ERROR_NAMES.has(e.name)) return true;
+  // 旧版 DOMException：QUOTA_EXCEEDED_ERR = 22，Firefox = 1014
+  if (e.code === 22 || e.code === 1014) return true;
+  if (
+    typeof e.message === 'string' &&
+    /quota\s*(has been\s*)?(exceeded|reached)|exceeded the quota|QuotaExceeded/i.test(e.message)
+  ) {
+    return true;
+  }
+  if (isStorageQuotaError(e.inner, depth + 1)) return true;
+  if (isStorageQuotaError(e.cause, depth + 1)) return true;
+  if (Array.isArray(e.failures)) {
+    return e.failures.some((f) => isStorageQuotaError(f, depth + 1));
+  }
+  return false;
+}
+
+/** 包住一次写操作：配额错误统一抛 StorageQuotaError，其余错误原样抛出 */
+export async function withQuotaGuard<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (isStorageQuotaError(e)) throw new StorageQuotaError(STORAGE_FULL_MESSAGE, { cause: e });
+    throw e;
+  }
+}
+
+// 首次写入时申请一次「持久化存储」，降低浏览器在存储紧张时清掉本地图库的概率。失败一律忽略。
+let persistRequested = false;
+export function requestPersistentStorageOnce(): void {
+  if (persistRequested || typeof navigator === 'undefined') return;
+  persistRequested = true;
+  try {
+    void Promise.resolve(navigator.storage?.persist?.()).catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+// ===== 图库去重指纹 =====
+// 去重指纹：只取 base64 前 100 字符会把同源/同模板图片（头部相同）误判为重复而静默丢弃。
+// 用 体积 + 像素尺寸 + 长度 + 尾部 64 字符 组合，区分度足够且无需哈希全量。
+export function libraryFingerprint(e: { size: number; width: number; height: number; base64: string }): string {
+  return `${e.size}_${e.width}x${e.height}_${e.base64.length}_${e.base64.slice(-64)}`;
+}
+
+/** 从 incoming 里去掉与 existing 指纹相同的，以及 incoming 内部重复的；返回保留项与被跳过的个数 */
+export function dedupeByFingerprint<T extends { size: number; width: number; height: number; base64: string }>(
+  incoming: T[],
+  existingFingerprints: Set<string>,
+): { unique: T[]; skipped: number } {
+  const seen = new Set(existingFingerprints);
+  const unique: T[] = [];
+  for (const item of incoming) {
+    const key = libraryFingerprint(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(item);
+  }
+  return { unique, skipped: incoming.length - unique.length };
+}
+
 // ===== Dexie 数据库类 =====
 
 export class SilkMomoDB extends Dexie {
@@ -148,6 +246,12 @@ export class SilkMomoDB extends Dexie {
       stylePacks: '++id, createdAt',
       libraryImages: 'id, addedAt'
     });
+
+    // 任一张表第一次写入时申请持久化存储（hook 只触发副作用，不改写入内容；不涉及 schema / version）
+    const onFirstWrite = () => { requestPersistentStorageOnce(); };
+    for (const table of [this.projects, this.images, this.stylePacks, this.libraryImages]) {
+      table.hook('creating', onFirstWrite);
+    }
   }
 }
 

@@ -8,7 +8,13 @@
  */
 
 import type { CompressedImage } from './image-compressor';
-import { db, type LibraryImageRow } from './db';
+import {
+  db,
+  dedupeByFingerprint,
+  libraryFingerprint,
+  withQuotaGuard,
+  type LibraryImageRow,
+} from './db';
 
 // ═══════════════════════════════════════
 // 图库（Image Library）
@@ -45,7 +51,7 @@ function migrateLegacyLibrary(): Promise<void> {
             // 关键顺序：必须先写成功 IndexedDB，再删 localStorage 源。
             // 否则写失败时源被删 → 图库永久丢失。
             try {
-              if (rows.length > 0) await db.libraryImages.bulkPut(rows);
+              if (rows.length > 0) await withQuotaGuard(() => db.libraryImages.bulkPut(rows));
               window.localStorage.removeItem(LEGACY_IMAGE_LIBRARY_KEY);
             } catch (e) {
               // 写入失败：保留 localStorage 源，不置 done，下次调用重试（bulkPut 幂等）
@@ -73,49 +79,94 @@ export async function getLibraryImages(): Promise<LibraryImage[]> {
   }
 }
 
-/** 将压缩后的图片添加到图库 */
+/** 图库张数（只数个数，不读 base64） */
+export async function countLibraryImages(): Promise<number> {
+  try {
+    await migrateLegacyLibrary();
+    return await db.libraryImages.count();
+  } catch {
+    return 0;
+  }
+}
+
+export interface SaveToLibraryResult {
+  /** 实际新写入的张数 */
+  added: number;
+  /** 因与图库已有图片重复而跳过的张数 */
+  skipped: number;
+}
+
+/**
+ * 收集图库里「与 wanted 指纹相同」的已有指纹。
+ * 不整表 toArray：用游标逐行只算指纹、不保留 base64；wanted 全部命中后提前结束。
+ * （图库没有指纹索引，且不允许新增 Dexie version，所以这已是现有字段下的最小读取量。）
+ */
+async function findExistingFingerprints(wanted: Set<string>): Promise<Set<string>> {
+  const found = new Set<string>();
+  if (wanted.size === 0) return found;
+  await db.libraryImages
+    .toCollection()
+    .until(() => found.size >= wanted.size)
+    .each(row => {
+      const key = libraryFingerprint(row);
+      if (wanted.has(key)) found.add(key);
+    });
+  return found;
+}
+
+/**
+ * 保存到图库，并把失败原因抛出去（存储已满抛 StorageQuotaError，用 isStorageQuotaError 识别）。
+ * 与 addToLibrary 的区别：不吞错、不返回整库数据。
+ */
+export async function saveToLibrary(
+  images: CompressedImage[],
+  category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory'
+): Promise<SaveToLibraryResult> {
+  await migrateLegacyLibrary();
+  if (images.length === 0) return { added: 0, skipped: 0 };
+
+  const now = Date.now();
+  const newEntries: LibraryImage[] = images.map((img, i) => ({
+    id: `img_${now}_${i}_${Math.random().toString(36).slice(2, 8)}`,
+    dataUrl: img.dataUrl,
+    base64: img.base64,
+    mimeType: img.mimeType,
+    size: img.size,
+    width: img.width,
+    height: img.height,
+    originalSize: img.originalSize ?? img.size,
+    addedAt: now + i, // 同一批内保持先后顺序，排序稳定
+    category,
+  }));
+
+  const wanted = new Set(newEntries.map(libraryFingerprint));
+  const existing = await findExistingFingerprints(wanted);
+  const { unique, skipped } = dedupeByFingerprint(newEntries, existing);
+
+  if (unique.length > 0) {
+    await withQuotaGuard(() => db.libraryImages.bulkAdd(unique));
+  }
+
+  // 超出上限时删除最旧的（只取主键，不读图片数据）
+  const total = await db.libraryImages.count();
+  if (total > MAX_LIBRARY_IMAGES) {
+    const overflowIds = await db.libraryImages
+      .orderBy('addedAt')
+      .limit(total - MAX_LIBRARY_IMAGES)
+      .primaryKeys();
+    await db.libraryImages.bulkDelete(overflowIds);
+  }
+
+  return { added: unique.length, skipped };
+}
+
+/** 将压缩后的图片添加到图库（兼容旧签名：吞错，返回整库数据；需要错误信息请用 saveToLibrary） */
 export async function addToLibrary(
   images: CompressedImage[],
   category?: 'product' | 'model_ref' | 'bg_ref' | 'scene_ref' | 'accessory'
 ): Promise<LibraryImage[]> {
   try {
-    await migrateLegacyLibrary();
-    const existing = await db.libraryImages.toArray();
-
-    const newEntries: LibraryImage[] = images.map(img => ({
-      id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      dataUrl: img.dataUrl,
-      base64: img.base64,
-      mimeType: img.mimeType,
-      size: img.size,
-      width: img.width,
-      height: img.height,
-      originalSize: img.originalSize ?? img.size,
-      addedAt: Date.now(),
-      category,
-    }));
-
-    // 去重指纹：只取 base64 前 100 字符会把同源/同模板图片(头部相同)误判为重复而静默丢弃。
-    // 改用 体积 + 像素尺寸 + 长度 + 尾部 64 字符 组合，区分度足够且无需哈希全量。
-    const fp = (e: { size: number; width: number; height: number; base64: string }) =>
-      `${e.size}_${e.width}x${e.height}_${e.base64.length}_${e.base64.slice(-64)}`;
-    const existingFingerprints = new Set(existing.map(fp));
-    const uniqueNew = newEntries.filter(n => !existingFingerprints.has(fp(n)));
-
-    if (uniqueNew.length > 0) {
-      await db.libraryImages.bulkAdd(uniqueNew);
-    }
-
-    // 超出上限时删除最旧的
-    const total = await db.libraryImages.count();
-    if (total > MAX_LIBRARY_IMAGES) {
-      const overflow = await db.libraryImages
-        .orderBy('addedAt')
-        .limit(total - MAX_LIBRARY_IMAGES)
-        .toArray();
-      await db.libraryImages.bulkDelete(overflow.map(o => o.id));
-    }
-
+    await saveToLibrary(images, category);
     return await db.libraryImages.orderBy('addedAt').reverse().toArray();
   } catch (e) {
     console.warn('图库写入失败:', e);
@@ -131,6 +182,11 @@ export async function removeFromLibrary(imageId: string): Promise<LibraryImage[]
   } catch {
     return [];
   }
+}
+
+/** 删除单张并把失败抛出去（removeFromLibrary 失败时会返回空数组，调用方分不清「删光了」还是「出错了」） */
+export async function deleteLibraryImage(imageId: string): Promise<void> {
+  await db.libraryImages.delete(imageId);
 }
 
 /** 清空图库 */
