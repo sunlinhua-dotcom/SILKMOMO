@@ -1,12 +1,10 @@
 import type { NextConfig } from "next";
 
+// 生产环境不放 'unsafe-eval'；dev 的 React 调试 / HMR 需要 eval
+const isProd = process.env.NODE_ENV === 'production';
+
 const nextConfig: NextConfig = {
   output: 'standalone',
-  experimental: {
-    serverActions: {
-      bodySizeLimit: '50mb',
-    },
-  },
 
   // VibeSec: 安全 Headers
   async headers() {
@@ -34,11 +32,11 @@ const nextConfig: NextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+              `script-src 'self' 'unsafe-inline'${isProd ? '' : " 'unsafe-eval'"}`,
               "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
               "font-src 'self' https://fonts.gstatic.com data:",
               "img-src 'self' data: blob: https:",
-              "connect-src 'self' https://api.apiyi.com https://*.googleapis.com",
+              "connect-src 'self'",
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self'",

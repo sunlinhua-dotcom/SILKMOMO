@@ -12,17 +12,14 @@
     "test:lookbook": "node --test __tests__/lookbook-ui.test.mjs __tests__/scene-follow-swap.test.mjs",
     "test:face": "node --test __tests__/model-face-*.test.mjs __tests__/face-analysis.test.mjs",
     "test:delivery": "node --test __tests__/pending-*.test.mjs __tests__/generation-recovery.test.mjs __tests__/sse-backpressure.test.mjs",
-    "test:billing": "node --test __tests__/generation-billing.test.mjs __tests__/model-face-billing.test.mjs",
+    "test:billing": "node --test __tests__/generation-billing.test.mjs __tests__/model-face-billing.test.mjs __tests__/generation-billing-replay.test.mjs",
     "test:prompts": "node --test __tests__/prompt-snapshot.test.mjs __tests__/scene-follow-swap.test.mjs __tests__/model-face-identity.test.mjs"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
-    "@prisma/adapter-better-sqlite3": "^7.7.0",
     "@prisma/adapter-pg": "^7.6.0",
     "@prisma/client": "^7.6.0",
     "@types/file-saver": "^2.0.7",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.9.0",
     "dexie": "^4.3.0",
     "dotenv": "^17.4.0",
     "file-saver": "^2.0.5",
@@ -37,12 +34,14 @@
     "sharp": "^0.34.5"
   },
   "devDependencies": {
+    "@prisma/adapter-better-sqlite3": "^7.7.0",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
     "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "better-sqlite3": "^12.9.0",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",

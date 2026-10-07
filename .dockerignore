@@ -5,5 +5,15 @@ data
 public/aesthetic_database
 *.zip
 *.xlsx
+*.pptx
 .env
 .env.local
+refs
+verify
+new0701
+docs
+微信图片*
+.claude
+prisma/dev.db
+tsconfig.tsbuildinfo
+__tests__
