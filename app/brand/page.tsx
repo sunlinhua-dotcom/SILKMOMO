@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import Link from 'next/link';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Save, RotateCcw, Camera, Trees, Sparkles } from 'lucide-react';
-import { Logo } from '@/components/Logo';
+import { Save, RotateCcw, Camera, Trees, Sparkles, RefreshCw, AlertTriangle } from 'lucide-react';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
 import { ModelSelector } from '@/components/ModelSelector';
 import { BodyTypeSelector } from '@/components/BodyTypeSelector';
 import { SkinToneSelector } from '@/components/SkinToneSelector';
@@ -19,6 +20,9 @@ interface BrandProfileForm {
   defaultEngine: ImageEngine;
 }
 
+// 与 lib/brand-memory.ts 的 BRAND_LIMITS.name 保持一致（该文件依赖 prisma，不能进客户端包）
+const NAME_MAX = 64;
+
 const INITIAL_FORM: BrandProfileForm = {
   name: '默认品牌',
   defaultModelId: '',
@@ -28,241 +32,304 @@ const INITIAL_FORM: BrandProfileForm = {
   defaultEngine: 'gemini',
 };
 
+type LoadStatus = 'loading' | 'ready' | 'error';
+
 export default function BrandSettingsPage() {
   const router = useRouter();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [form, setForm] = useState<BrandProfileForm>(INITIAL_FORM);
-  const [loading, setLoading] = useState(true);
+  const [loadStatus, setLoadStatus] = useState<LoadStatus>('loading');
   const [saving, setSaving] = useState(false);
   const [savedHint, setSavedHint] = useState(false);
 
-  useEffect(() => {
-    fetch('/api/brand')
-      .then(async (r) => {
-        if (r.status === 401) {
-          router.push('/login');
-          return null;
-        }
-        if (!r.ok) return null;
-        return r.json();
-      })
-      .then((data) => {
-        if (data?.profile) {
-          setForm({
-            name: data.profile.name || '默认品牌',
-            defaultModelId: data.profile.defaultModelId || '',
-            defaultBodyType: (data.profile.defaultBodyType as BrandProfileForm['defaultBodyType']) || 'standard',
-            defaultSkinTone: (data.profile.defaultSkinTone as BrandProfileForm['defaultSkinTone']) || 'light',
-            defaultModule: (data.profile.defaultModule as BrandProfileForm['defaultModule']) || 'product',
-            defaultEngine: data.profile.defaultEngine === 'openai' ? 'openai' : 'gemini',
-          });
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+  const loadProfile = useCallback(async () => {
+    setLoadStatus('loading');
+    try {
+      const r = await fetch('/api/brand', { cache: 'no-store' });
+      if (r.status === 401) {
+        router.push('/login');
+        return;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      if (!data?.profile) throw new Error('响应缺少 profile');
+      setForm({
+        name: data.profile.name || '默认品牌',
+        defaultModelId: data.profile.defaultModelId || '',
+        defaultBodyType: (data.profile.defaultBodyType as BrandProfileForm['defaultBodyType']) || 'standard',
+        defaultSkinTone: (data.profile.defaultSkinTone as BrandProfileForm['defaultSkinTone']) || 'light',
+        defaultModule: (data.profile.defaultModule as BrandProfileForm['defaultModule']) || 'product',
+        defaultEngine: data.profile.defaultEngine === 'openai' ? 'openai' : 'gemini',
+      });
+      setLoadStatus('ready');
+    } catch (e) {
+      console.error('加载品牌档案失败:', e);
+      setLoadStatus('error');
+    }
   }, [router]);
 
-  const handleSave = async () => {
+  useEffect(() => {
+    void loadProfile();
+  }, [loadProfile]);
+
+  /** 提交到服务端；成功返回 true。后端 400 的中文 error 原样给用户看。 */
+  const persist = async (payload: BrandProfileForm, failPrefix: string): Promise<boolean> => {
     setSaving(true);
     try {
       const res = await fetch('/api/brand', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
+      if (res.status === 401) {
+        router.push('/login');
+        return false;
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        alert(`保存失败: ${err.error || res.statusText}`);
-        return;
+        toast.error(`${failPrefix}：${err.error || '服务器返回异常，请稍后重试'}`);
+        return false;
       }
       setSavedHint(true);
       setTimeout(() => setSavedHint(false), 2000);
+      return true;
     } catch (e) {
-      alert(`保存失败: ${e instanceof Error ? e.message : '网络错误'}`);
+      toast.error(`${failPrefix}：${e instanceof Error ? e.message : '网络错误'}`);
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSave = async () => {
+    if (loadStatus !== 'ready') return;
+    if (await persist(form, '保存失败')) toast.success('品牌偏好已保存');
   };
 
   const handleReset = async () => {
-    if (!confirm('确定重置为默认值？这会清空当前的品牌偏好（之后生成时会重新自动学习）。')) return;
-    // 文案承诺"清空品牌偏好"，所以重置必须立即保存到服务端，
-    // 只重置本地表单的话用户离开页面后服务端偏好原封不动
-    setForm(INITIAL_FORM);
-    setSaving(true);
-    try {
-      const res = await fetch('/api/brand', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(INITIAL_FORM),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert(`重置失败: ${err.error || res.statusText}`);
-        return;
-      }
-      setSavedHint(true);
-      setTimeout(() => setSavedHint(false), 2000);
-    } catch (e) {
-      alert(`重置失败: ${e instanceof Error ? e.message : '网络错误'}`);
-    } finally {
-      setSaving(false);
+    if (loadStatus !== 'ready') return;
+    const ok = await confirm({
+      title: '重置为默认值？',
+      message: '这会清空当前的品牌偏好（之后生成时会重新自动学习）。',
+      confirmText: '重置',
+      danger: true,
+    });
+    if (!ok) return;
+    // 文案承诺"清空品牌偏好"，所以重置必须立即保存到服务端；
+    // 成功后才改本地表单，失败时界面仍与服务端一致
+    if (await persist(INITIAL_FORM, '重置失败')) {
+      setForm(INITIAL_FORM);
+      toast.success('已重置为默认值');
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
+  const locked = loadStatus !== 'ready' || saving;
 
   return (
     <div className="min-h-screen bg-[var(--color-background)]">
-      <header className="sticky top-0 z-50 glass border-b border-[var(--color-border-light)]">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-3 group">
-            <ArrowLeft className="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-text)] transition-colors" />
-            <Logo width={32} height={32} />
-            <span className="text-lg font-semibold tracking-tight">SILXINE</span>
-          </Link>
-          <h1 className="text-sm font-medium text-[var(--color-text-secondary)]">品牌设置</h1>
-        </div>
-      </header>
+      <PageHeader title="品牌设置" />
 
-      <main className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12 space-y-10">
+      <main className="mx-auto max-w-4xl space-y-8 px-4 py-6 sm:space-y-10 sm:px-6 sm:py-12">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-[var(--color-accent)]" />
-            <span className="text-[10px] tracking-widest uppercase text-[var(--color-accent)]">Brand Memory</span>
+            <Sparkles className="h-4 w-4 text-[var(--color-brand-strong)]" aria-hidden="true" />
+            <span className="text-xs uppercase tracking-widest text-[var(--color-brand-strong)]">Brand Memory</span>
           </div>
-          <h2 className="font-serif text-2xl sm:text-3xl text-[var(--color-primary)] tracking-tight">默认偏好</h2>
+          <h2 className="font-serif text-2xl tracking-tight text-[var(--color-primary)] sm:text-3xl">默认偏好</h2>
           <p className="text-sm text-[var(--color-text-muted)]">
             这里设置的内容会作为主页生成时的默认值。每次手动选择也会被静默记住，下次自动回填。
           </p>
         </div>
 
-        {/* 品牌名称 */}
-        <div className="space-y-2">
-          <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">品牌名称</label>
-          <input
-            type="text"
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            placeholder="如：SILXINE 主线 / 副牌青涩"
-            className="w-full text-base font-serif text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/50 border-0 border-b border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:ring-0 px-2 py-3 bg-transparent transition-colors"
-          />
-        </div>
-
-        {/* 默认模式 */}
-        <div className="space-y-3">
-          <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认模式</label>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4">
+        {loadStatus === 'error' && (
+          <div
+            role="alert"
+            className="flex flex-col gap-3 rounded-2xl border border-[var(--color-danger)]/30 bg-[var(--color-danger-soft)] p-4 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <p className="flex items-start gap-2 text-sm text-[var(--color-danger)]">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>品牌档案加载失败。为避免用默认值覆盖你已保存的内容，保存与重置已暂时禁用。</span>
+            </p>
             <button
-              onClick={() => setForm({ ...form, defaultModule: 'product' })}
-              className={`relative flex items-center gap-3 p-4 rounded-2xl transition-all duration-300 ${
-                form.defaultModule === 'product'
-                  ? 'bg-[#3D2E20] text-white shadow-lg'
-                  : 'bg-[#FAFAFA] border border-transparent hover:border-[var(--color-border)] text-[var(--color-text)]'
-              }`}
+              type="button"
+              onClick={() => void loadProfile()}
+              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl border border-[var(--color-danger)]/40 px-4 text-sm font-medium text-[var(--color-danger)] transition-colors hover:bg-white/60"
             >
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                form.defaultModule === 'product' ? 'bg-white/10' : 'bg-white shadow-sm text-[var(--color-primary)]'
-              }`}>
-                <Camera className="w-4 h-4" />
-              </div>
-              <div className="text-left">
-                <div className="font-serif text-base">产品图</div>
-                <div className={`text-[10px] mt-0.5 ${form.defaultModule === 'product' ? 'text-white/60' : 'text-[var(--color-text-muted)]'}`}>电商主图</div>
-              </div>
-            </button>
-
-            <button
-              onClick={() => setForm({ ...form, defaultModule: 'scene' })}
-              className={`relative flex items-center gap-3 p-4 rounded-2xl transition-all duration-300 ${
-                form.defaultModule === 'scene'
-                  ? 'bg-[#3D2E20] text-white shadow-lg'
-                  : 'bg-[#FAFAFA] border border-transparent hover:border-[var(--color-border)] text-[var(--color-text)]'
-              }`}
-            >
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                form.defaultModule === 'scene' ? 'bg-white/10' : 'bg-white shadow-sm text-[var(--color-primary)]'
-              }`}>
-                <Trees className="w-4 h-4" />
-              </div>
-              <div className="text-left">
-                <div className="font-serif text-base">场景图</div>
-                <div className={`text-[10px] mt-0.5 ${form.defaultModule === 'scene' ? 'text-white/60' : 'text-[var(--color-text-muted)]'}`}>生活方式</div>
-              </div>
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              重试
             </button>
           </div>
-        </div>
+        )}
 
-        {/* 默认生图引擎 */}
-        <div className="space-y-3">
-          <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认生图引擎</label>
-          <EngineSelector
-            selected={form.defaultEngine}
-            onSelect={(engine) => setForm({ ...form, defaultEngine: engine })}
-            variant="full"
-          />
-        </div>
+        {loadStatus === 'loading' && (
+          <p className="flex items-center gap-2 text-sm text-[var(--color-text-muted)]" role="status">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-brand-strong)] border-t-transparent" />
+            正在加载你的品牌档案…
+          </p>
+        )}
 
-        {/* 默认模特 */}
-        <div className="space-y-3">
-          <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认模特</label>
-          <ModelSelector
-            selectedModel={form.defaultModelId}
-            onSelect={(id) => setForm({ ...form, defaultModelId: id })}
-          />
-        </div>
-
-        {/* 默认体型 + 肤色 */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          <div className="space-y-3">
-            <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认体型</label>
-            <BodyTypeSelector
-              selectedBodyType={form.defaultBodyType}
-              onSelect={(v) => setForm({ ...form, defaultBodyType: v })}
+        <fieldset
+          disabled={locked}
+          aria-busy={loadStatus === 'loading'}
+          className={`m-0 min-w-0 space-y-8 border-0 p-0 transition-opacity sm:space-y-10 ${
+            loadStatus !== 'ready' ? 'opacity-50' : ''
+          }`}
+        >
+          {/* 品牌名称 */}
+          <div className="space-y-2">
+            <div className="flex items-baseline justify-between gap-3">
+              <label
+                htmlFor="brand-name"
+                className="text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]"
+              >
+                品牌名称
+              </label>
+              <span
+                className={`num text-xs ${
+                  form.name.length >= NAME_MAX ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-muted)]'
+                }`}
+                aria-live="polite"
+              >
+                {form.name.length} / {NAME_MAX}
+              </span>
+            </div>
+            <input
+              id="brand-name"
+              type="text"
+              value={form.name}
+              maxLength={NAME_MAX}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="如：SILXINE 主线 / 副牌青涩"
+              className="w-full border-0 border-b border-[var(--color-border-light)] bg-transparent px-2 py-3 font-serif text-base text-[var(--color-text)] transition-colors placeholder:text-[var(--color-text-muted)]/70 focus:border-[var(--color-brand-strong)] focus:ring-0"
             />
           </div>
+
+          {/* 默认模式 */}
+          <div className="space-y-3" role="group" aria-labelledby="brand-module-label">
+            <span
+              id="brand-module-label"
+              className="block text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]"
+            >
+              默认模式
+            </span>
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
+              {(
+                [
+                  { id: 'product', title: '产品图', sub: '电商主图', Icon: Camera },
+                  { id: 'scene', title: '场景图', sub: '生活方式', Icon: Trees },
+                ] as const
+              ).map(({ id, title, sub, Icon }) => {
+                const active = form.defaultModule === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setForm({ ...form, defaultModule: id })}
+                    className={`relative flex min-h-14 items-center gap-3 rounded-2xl p-4 transition-all duration-300 disabled:cursor-not-allowed ${
+                      active
+                        ? 'bg-[var(--color-primary)] text-white shadow-lg'
+                        : 'border border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] hover:border-[var(--color-brand-strong)]'
+                    }`}
+                  >
+                    <div
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                        active ? 'bg-white/10' : 'bg-[var(--color-brand-soft)] text-[var(--color-brand-strong)]'
+                      }`}
+                    >
+                      <Icon className="h-4 w-4" aria-hidden="true" />
+                    </div>
+                    <div className="text-left">
+                      <div className="font-serif text-base">{title}</div>
+                      <div className={`mt-0.5 text-xs ${active ? 'text-white/75' : 'text-[var(--color-text-muted)]'}`}>
+                        {sub}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 默认生图引擎 */}
           <div className="space-y-3">
-            <label className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">默认肤色</label>
-            <SkinToneSelector
-              selectedSkinTone={form.defaultSkinTone}
-              onSelect={(v) => setForm({ ...form, defaultSkinTone: v })}
+            <span className="block text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]">
+              默认生图引擎
+            </span>
+            <EngineSelector
+              selected={form.defaultEngine}
+              onSelect={(engine) => setForm({ ...form, defaultEngine: engine })}
+              variant="full"
             />
           </div>
-        </div>
+
+          {/* 默认模特 */}
+          <div className="space-y-3">
+            <span className="block text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]">
+              默认模特
+            </span>
+            <ModelSelector
+              selectedModel={form.defaultModelId}
+              onSelect={(id) => setForm({ ...form, defaultModelId: id })}
+            />
+          </div>
+
+          {/* 默认体型 + 肤色 */}
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            <div className="space-y-3">
+              <span className="block text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]">
+                默认体型
+              </span>
+              <BodyTypeSelector
+                selectedBodyType={form.defaultBodyType}
+                onSelect={(v) => setForm({ ...form, defaultBodyType: v })}
+              />
+            </div>
+            <div className="space-y-3">
+              <span className="block text-xs font-medium uppercase tracking-widest text-[var(--color-text-secondary)]">
+                默认肤色
+              </span>
+              <SkinToneSelector
+                selectedSkinTone={form.defaultSkinTone}
+                onSelect={(v) => setForm({ ...form, defaultSkinTone: v })}
+              />
+            </div>
+          </div>
+        </fieldset>
 
         {/* 操作区 */}
-        <div className="flex items-center justify-between gap-4 pt-6 border-t border-[var(--color-border-light)]">
+        <div className="flex flex-wrap items-center justify-between gap-4 border-t border-[var(--color-border-light)] pt-6">
           <button
-            onClick={handleReset}
-            disabled={saving}
-            className="flex items-center gap-2 px-4 py-2.5 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] transition-colors disabled:opacity-50"
+            type="button"
+            onClick={() => void handleReset()}
+            disabled={locked}
+            className="flex min-h-11 items-center gap-2 px-4 text-sm text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-secondary)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <RotateCcw className="w-4 h-4" />
+            <RotateCcw className="h-4 w-4" aria-hidden="true" />
             重置为默认值
           </button>
 
           <div className="flex items-center gap-3">
             {savedHint && (
-              <span className="text-xs text-[var(--color-accent)] animate-fade-in">已保存 ✓</span>
+              <span className="animate-fade-in text-xs text-[var(--color-success)]" role="status">
+                已保存 ✓
+              </span>
             )}
             <button
-              onClick={handleSave}
-              disabled={saving}
-              className="btn-primary"
+              type="button"
+              onClick={() => void handleSave()}
+              disabled={locked}
+              className="btn-primary disabled:cursor-not-allowed disabled:opacity-60"
             >
               {saving ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
                   <span>保存中...</span>
                 </>
               ) : (
                 <>
-                  <Save className="w-4 h-4" strokeWidth={1.5} />
+                  <Save className="h-4 w-4" strokeWidth={1.5} aria-hidden="true" />
                   <span>保存</span>
                 </>
               )}
