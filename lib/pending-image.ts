@@ -64,8 +64,8 @@ export async function storePendingImage(input: {
       },
       select: { id: true },
     });
-    // 顺手清一次过期的：没有定时任务，挂在写入路径上最省事，失败也不影响主流程
-    sweepExpiredPendingImages().catch(() => { /* 清理失败不影响出图 */ });
+    // 过期清理不再挂在写入路径上（每次落库多一条 DELETE）：由 lib/billing-reconcile.ts
+    // 的 5 分钟清扫统一调用 sweepExpiredPendingImages()。
     return row.id;
   } catch (err) {
     console.log('[pending-image] 落库失败，回退直推:', err instanceof Error ? err.message : err);

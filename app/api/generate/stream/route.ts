@@ -11,7 +11,7 @@
 
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { checkBalance, deductBalance, refundBalance } from '@/lib/billing';
+import { checkBalance, deductBalance, hasGenerationConsume, markGenerationFulfilled, refundBalance } from '@/lib/billing';
 import { formatGenerationDeductionError } from '@/lib/generation-billing-core';
 import {
   getGenerationCostFen,
@@ -36,7 +36,19 @@ import { findPendingImageByIdempotencyKey, storePendingImage } from '@/lib/pendi
 import { preparePendingDelivery } from '@/lib/pending-delivery-core';
 import { createSseBackpressureObserver } from '@/lib/sse-backpressure';
 import { getRandomFavoriteModelFace } from '@/lib/model-face-library';
-import { resolveIdempotentGeneration } from '@/lib/generation-idempotency';
+import {
+  IDEMPOTENT_BLOCKED_MESSAGES,
+  generationIdempotencyKey,
+  resolveIdempotentGeneration,
+} from '@/lib/generation-idempotency';
+import {
+  GENERATION_BUSY_MESSAGE,
+  RequestBodyTooLargeError,
+  getGenerationConcurrencyLimiter,
+  getMaxGenerationBodyBytes,
+  readJsonBodyWithLimit,
+  requestBodyTooLargeMessage,
+} from '@/lib/generation-concurrency';
 
 const VALID_SHOT_INDEXES = new Set(PRODUCT_SHOTS.map(s => s.index));
 
@@ -189,7 +201,8 @@ function sseEvent(type: string, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-type StreamPush = (type: string, data: unknown) => void;
+/** 返回 true＝已成功入队推给客户端；false＝客户端已断开，事件被丢弃。 */
+type StreamPush = (type: string, data: unknown) => boolean;
 
 function startPhaseBeat(push: StreamPush, phase: string, meta: Record<string, unknown>): () => void {
   const t0 = Date.now();
@@ -242,7 +255,7 @@ async function deliverResult(
     total: number;
     idempotencyKey?: string;
   },
-): Promise<void> {
+): Promise<{ stored: boolean; pushed: boolean }> {
   const prepared = await preparePendingDelivery(storePendingImage, {
     kind: 'result',
     userId,
@@ -255,7 +268,7 @@ async function deliverResult(
     idempotencyKey: payload.idempotencyKey,
   });
 
-  push('result', {
+  const pushed = push('result', {
     shotIndex: payload.shotIndex,
     ...prepared.payload,
     width: payload.width,
@@ -263,6 +276,43 @@ async function deliverResult(
     current: payload.current,
     total: payload.total,
   });
+  // stored＝结果已落 pending（客户端断开也能重连补拉）；pushed＝已推给客户端
+  return { stored: prepared.pendingId !== null, pushed };
+}
+
+/**
+ * 交付并结算一张已扣费的图。
+ *   - 结果已写入 pending 或已成功推给客户端 → 履约：写 fulfilledAt、保留扣费
+ *     （即使此刻客户端已断开——图还在 pending，重连即可补拉，退款会让用户白拿一张图）；
+ *   - 只有「pending 没存成且推流也失败」→ 用户拿不到图，才退款。
+ * 返回是否已交付。
+ */
+async function settleDelivery(
+  push: StreamPush,
+  ctx: {
+    userId: string;
+    taskId: number;
+    costFen: number;
+    chargeLabel: string;
+    idempotencyKey: string | undefined;
+    consumeTransactionId: string | undefined;
+  },
+  payload: Parameters<typeof deliverResult>[3],
+): Promise<boolean> {
+  const outcome = await deliverResult(push, ctx.userId, ctx.taskId, payload);
+  if (outcome.stored || outcome.pushed) {
+    if (ctx.idempotencyKey) await markGenerationFulfilled(ctx.consumeTransactionId);
+    return true;
+  }
+  await refundBalance(
+    ctx.userId,
+    ctx.costFen,
+    `${ctx.chargeLabel} 投递失败退款`,
+    ctx.taskId,
+    ctx.idempotencyKey,
+    ctx.consumeTransactionId,
+  );
+  return false;
 }
 
 async function deliverAnchor(
@@ -286,33 +336,57 @@ async function deliverAnchor(
 }
 // ===== [E] 交付与 pending 入库 · 结束 =====
 
-function generationIdempotencyKey(
-  userId: string,
-  taskId: number,
-  shotIndex: number,
-  runId: string | undefined,
-): string | undefined {
-  return runId ? `${userId}:${taskId}:${shotIndex}:${runId}` : undefined;
-}
-
-async function redeliverIdempotentResult(
+/**
+ * 幂等命中（deduct 发现同一 runId+镜次已有 consume）后的处理。**永远不会继续生成**：
+ *   - pending 还在 → 补发 id（pending 在但履约标记缺失时顺手补标记）；
+ *   - 已履约但 pending 没了（客户端取走，或用户 DELETE 了）→ 提示已交付，不扣费不出图；
+ *   - 未履约且仍在在途窗口 → 提示上一次还在生成；超窗口 → 孤儿，提示等自动退款。
+ * 旧实现找不到 pending 就沿用旧扣费继续出图，用户 DELETE 自己的 pending 后用同一 runId 可无限免费重放。
+ * 非 fatal：只影响这一个镜次，其余镜次照常。
+ */
+async function handleIdempotentHit(
   push: StreamPush,
   userId: string,
   idempotencyKey: string,
+  deduction: { consumeTransactionId?: string; fulfilledAt?: Date | null; createdAt?: Date | null },
   meta: { shotIndex: number; current: number; total: number },
-): Promise<boolean> {
+): Promise<'redelivered' | 'blocked'> {
   const resolution = await resolveIdempotentGeneration({
     findPending: () => findPendingImageByIdempotencyKey(userId, idempotencyKey),
+    fulfilledAt: deduction.fulfilledAt,
+    createdAt: deduction.createdAt,
   });
-  if (resolution.action === 'generate') return false;
-  const { pending } = resolution;
-  push('result', {
+  if (resolution.action === 'redeliver') {
+    const { pending } = resolution;
+    push('result', {
+      ...meta,
+      pendingId: pending.id,
+      width: pending.width,
+      height: pending.height,
+    });
+    if (!deduction.fulfilledAt) await markGenerationFulfilled(deduction.consumeTransactionId);
+    return 'redelivered';
+  }
+  push('error', {
     ...meta,
-    pendingId: pending.id,
-    width: pending.width,
-    height: pending.height,
+    message: IDEMPOTENT_BLOCKED_MESSAGES[resolution.action],
+    fatal: false,
   });
-  return true;
+  return 'blocked';
+}
+
+/**
+ * 开工前余额预检。带 runId 也必须预检（否则零余额用户能白嫖扣费前的服装分析、身份锚等上游调用）；
+ * 唯一豁免：首镜的幂等键已有 consume（同一次生成的重试/补发，钱早已扣过）。
+ * 返回 null＝豁免。
+ */
+async function preflightBalanceCheck(
+  userId: string,
+  costFen: number,
+  firstShotKey: string | undefined,
+) {
+  if (firstShotKey && await hasGenerationConsume(userId, firstShotKey)) return null;
+  return checkBalance(userId, costFen);
 }
 
 async function generationDeductionErrorMessage(
@@ -333,6 +407,22 @@ async function generationDeductionErrorMessage(
 // POST 处理
 // ═══════════════════════════════════════
 
+function busyResponse(): Response {
+  return new Response(JSON.stringify({ error: GENERATION_BUSY_MESSAGE }), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+  });
+}
+
+/** Prisma 的错误原文（含表名 / SQL / 连接信息）不能透传给客户端。 */
+function isPrismaError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  const code = (err as { code?: unknown }).code;
+  return (typeof name === 'string' && name.startsWith('PrismaClient'))
+    || (typeof code === 'string' && /^P\d{4}$/.test(code));
+}
+
 export async function POST(req: NextRequest) {
   // ===== [A] 鉴权 · 开始 =====
   // 鉴权
@@ -342,10 +432,23 @@ export async function POST(req: NextRequest) {
   }
   // ===== [A] 鉴权 · 结束 =====
 
+  // 每人并发上限：先在解析大请求体之前挡一道（便宜），真正占位在开流前原子完成。
+  const limiter = getGenerationConcurrencyLimiter();
+  if (limiter.isFull(auth.userId)) {
+    return busyResponse();
+  }
+
   let body: GenerateStreamRequest;
+  const maxBodyBytes = getMaxGenerationBodyBytes();
   try {
-    body = await req.json();
-  } catch {
+    body = await readJsonBodyWithLimit(req, maxBodyBytes) as GenerateStreamRequest;
+  } catch (err) {
+    if (err instanceof RequestBodyTooLargeError) {
+      return new Response(JSON.stringify({ error: requestBodyTooLargeMessage(maxBodyBytes) }), { status: 413 });
+    }
+    return new Response(JSON.stringify({ error: '请求体解析失败' }), { status: 400 });
+  }
+  if (!body || typeof body !== 'object') {
     return new Response(JSON.stringify({ error: '请求体解析失败' }), { status: 400 });
   }
 
@@ -381,6 +484,11 @@ export async function POST(req: NextRequest) {
     quality: rawQuality,
     anchorImage: clientAnchorImage,
   } = body;
+
+  // taskId 是 Dexie 项目 id（正整数）；它还参与幂等键和 Prisma Int 列，必须在入口卡死。
+  if (typeof taskId !== 'number' || !Number.isInteger(taskId) || taskId <= 0) {
+    return new Response(JSON.stringify({ error: 'taskId 非法' }), { status: 400 });
+  }
 
   const engine = normalizeBackend(rawEngine);
   const quality = normalizeGenerationQuality(rawQuality);
@@ -469,6 +577,9 @@ export async function POST(req: NextRequest) {
   // ═══ SSE 流式响应 ═══
   // 客户端断开检测：req.signal 在请求被中断时触发 aborted
   // 配合 enqueue 抛错检测构成双重保险
+  const slot = limiter.tryAcquire(auth.userId);
+  if (!slot) return busyResponse();
+
   const stream = new ReadableStream({
     async start(controller) {
       // 用 closure 状态记录客户端是否已断开；循环每轮检查
@@ -480,14 +591,16 @@ export async function POST(req: NextRequest) {
         log: data => console.warn('[sse-backpressure]', { taskId, ...data }),
       });
 
-      const push = (type: string, data: unknown) => {
-        if (clientClosed) return;
+      const push: StreamPush = (type, data) => {
+        if (clientClosed) return false;
         try {
           controller.enqueue(new TextEncoder().encode(sseEvent(type, data)));
           observeBackpressure(controller.desiredSize);
+          return true;
         } catch {
           // controller 已关闭 / 客户端已断开
           clientClosed = true;
+          return false;
         }
       };
 
@@ -529,7 +642,12 @@ export async function POST(req: NextRequest) {
           const declaredWidth = outputSize === 'custom' ? customWidth : outputSizeConfig.width;
           const declaredHeight = outputSize === 'custom' ? customHeight : outputSizeConfig.height;
 
-          const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+          // 带 runId 也要预检（首镜幂等键已有 consume 才豁免）；见 preflightBalanceCheck
+          const preflightBalance = await preflightBalanceCheck(
+            auth.userId,
+            costFen,
+            generationIdempotencyKey(auth.userId, taskId, shotConfigs[0]?.index ?? 0, runId),
+          );
           if (preflightBalance && !preflightBalance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
             const firstShot = shotConfigs[0];
@@ -624,6 +742,7 @@ export async function POST(req: NextRequest) {
               taskId,
               requestedApiModel,
               idempotencyKey,
+              { awaitFulfillment: true },
             );
             // ===== [F] 计费预扣（产品图每镜次） · 结束 =====
             if (!deduction.success) {
@@ -646,12 +765,13 @@ export async function POST(req: NextRequest) {
               break;
             }
             if (deduction.idempotent && idempotencyKey) {
-              const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+              // 同一 runId+镜次已有 consume：只补发/提示，绝不沿用旧扣费再出图（见 handleIdempotentHit）
+              const hit = await handleIdempotentHit(push, auth.userId, idempotencyKey, deduction, {
                 shotIndex: shot.index,
                 current: i + 1,
                 total,
               });
-              if (reused) {
+              if (hit === 'redelivered') {
                 recordGeneration({
                   userId: auth.userId, taskId, module: 'product', shotIndex: shot.index,
                   promptText: '(idempotent pending redelivery)',
@@ -660,8 +780,10 @@ export async function POST(req: NextRequest) {
                   success: true, apiLatencyMs: 0,
                 }).catch(err => console.error('[recordGeneration]', err));
                 successCount++;
-                continue;
+              } else {
+                failedCount++;
               }
+              continue;
             }
 
             // —— 从这里起，钱已扣；任何失败 / 异常 / 客户端断开都必须退款 ——
@@ -737,7 +859,32 @@ export async function POST(req: NextRequest) {
             // 持久化生成记录到 Postgres（无论成败）—— 只记一条，反映最终交付结果。
             // 出图成功但客户端已断开属于「没交付」，记为失败（disconnect），否则同一镜次会
             // 既记一条 success 又记一条 disconnect 失败，污染成功率统计。
-            const deliveredButDisconnected = result.success && !!result.data && clientClosed;
+            // 先交付并结算，再按最终结果记一条生成记录（只记一条，反映真实交付结果）。
+            // 交付＝结果已写入 pending 或已推给客户端；出图成功但客户端已断开时结果仍在 pending，
+            // 算成功、保留扣费（旧版这里直接退款，用户重连还能取走图＝白拿一张）。
+            let delivered = false;
+            if (result.success && result.data) {
+              // 锚定首张"有模特"的成功图（无模特的面料特写不能当模特身份锚点）
+              if (!anchorImage && shot.hasModel) {
+                anchorImage = { data: result.data, mimeType: 'image/png' };
+              }
+              delivered = await settleDelivery(push, {
+                userId: auth.userId,
+                taskId,
+                costFen,
+                chargeLabel,
+                idempotencyKey,
+                consumeTransactionId: deduction.consumeTransactionId,
+              }, {
+                shotIndex: shot.index,
+                data: result.data,
+                width: resultWidth,
+                height: resultHeight,
+                current: i + 1,
+                total,
+                idempotencyKey,
+              });
+            }
             recordGeneration({
               userId: auth.userId,
               taskId,
@@ -749,39 +896,16 @@ export async function POST(req: NextRequest) {
               skinTone,
               aspectRatio,
               apiModel: resultApiModel,
-              success: result.success && !deliveredButDisconnected,
+              success: result.success && delivered,
               apiLatencyMs: shotLatency,
-              errorMessage: deliveredButDisconnected
+              errorMessage: result.success && !delivered
                 ? 'client disconnected before delivery'
-                : (result.success ? undefined : result.error),
+                : (result.success ? undefined : (result.detail ?? result.error)),
             }).catch(err => console.error('[recordGeneration] 失败:', err));
 
             if (result.success && result.data) {
-              // 关键：生成成功但客户端已断开 → push 会被吞，IndexedDB 也写不进去 → 用户付了钱拿不到图。
-              // 主动退款（记录已在上面记为 disconnect 失败，这里不再重复记）。
-              if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
-                failedCount++;
-                break;
-              }
-              // 锚定首张"有模特"的成功图（无模特的面料特写不能当模特身份锚点）
-              if (!anchorImage && shot.hasModel) {
-                anchorImage = { data: result.data, mimeType: 'image/png' };
-              }
-              await deliverResult(push, auth.userId, taskId, {
-                shotIndex: shot.index,
-                data: result.data,
-                width: resultWidth,
-                height: resultHeight,
-                current: i + 1,
-                total,
-                idempotencyKey,
-              });
-              // 上面的闸门只挡住"推流前就已知的断开"。若断连是由 push 内 enqueue 抛错
-              // 才暴露的（心跳 25s 一次，req.signal 未必先到），这里是唯一的感知时机——
-              // 漏掉就会扣了钱、图没送到、还不退款。successCount 也必须等复查通过再加。
-              if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
+              if (!delivered) {
+                // pending 没存成且推流也失败（settleDelivery 已退款）：用户拿不到图，停止后续镜次
                 failedCount++;
                 break;
               }
@@ -863,7 +987,11 @@ export async function POST(req: NextRequest) {
             }
             const total = targetIndexes.length;
 
-            const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+            const preflightBalance = await preflightBalanceCheck(
+              auth.userId,
+              costFen,
+              generationIdempotencyKey(auth.userId, taskId, targetIndexes[0] ?? 0, runId),
+            );
             if (preflightBalance && !preflightBalance.sufficient) {
               const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}），已停止生成`;
               const firstTarget = targetIndexes[0] ?? 0;
@@ -1101,7 +1229,7 @@ export async function POST(req: NextRequest) {
                 push,
                 '正在核对余额',
                 phaseMeta,
-                () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel, idempotencyKey),
+                () => deductBalance(auth.userId, costFen, chargeLabel, taskId, requestedApiModel, idempotencyKey, { awaitFulfillment: true }),
               );
               // ===== [F] 计费预扣（组图每张） · 结束 =====
               if (!deduction.success) {
@@ -1118,12 +1246,13 @@ export async function POST(req: NextRequest) {
                 break;
               }
               if (deduction.idempotent && idempotencyKey) {
-                const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+                // 同一 runId+镜次已有 consume：只补发/提示，绝不沿用旧扣费再出图（见 handleIdempotentHit）
+                const hit = await handleIdempotentHit(push, auth.userId, idempotencyKey, deduction, {
                   shotIndex: refSeq,
                   current: i + 1,
                   total,
                 });
-                if (reused) {
+                if (hit === 'redelivered') {
                   recordGeneration({
                     userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
                     promptText: '(idempotent pending redelivery)',
@@ -1132,8 +1261,10 @@ export async function POST(req: NextRequest) {
                     success: true, apiLatencyMs: 0,
                   }).catch(err => console.error('[recordGeneration]', err));
                   successCount++;
-                  continue;
+                } else {
+                  failedCount++;
                 }
+                continue;
               }
 
               // —— 钱已扣：任何失败/异常/断开都必须退款 ——
@@ -1210,29 +1341,20 @@ export async function POST(req: NextRequest) {
 
               logTimings();
               const resultApiModel = result.model || resolveApiModel(result.backend);
-              const deliveredButDisconnected = result.success && !!result.data && clientClosed;
-              recordGeneration({
-                userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
-                promptText: prompt,
-                modelId, bodyType, skinTone, aspectRatio,
-                apiModel: resultApiModel,
-                success: result.success && !deliveredButDisconnected,
-                apiLatencyMs: shotLatency,
-                errorMessage: deliveredButDisconnected
-                  ? 'client disconnected before delivery'
-                  : (result.success ? undefined : result.error),
-              }).catch(err => console.error('[recordGeneration] 失败:', err));
-
+              // 先交付并结算再记录（理由同产品图分支）：已写入 pending / 已推给客户端＝成功，保留扣费
+              let delivered = false;
               if (result.success && result.data) {
-                if (clientClosed) {
-                  await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
-                  failedCount++;
-                  break;
-                }
                 if (shouldUseSceneGroupAnchor && !anchorImage) {
                   anchorImage = { data: result.data, mimeType: 'image/png' };
                 }
-                await deliverResult(push, auth.userId, taskId, {
+                delivered = await settleDelivery(push, {
+                  userId: auth.userId,
+                  taskId,
+                  costFen,
+                  chargeLabel,
+                  idempotencyKey,
+                  consumeTransactionId: deduction.consumeTransactionId,
+                }, {
                   shotIndex: refSeq,
                   data: result.data,
                   width: resultWidth,
@@ -1241,9 +1363,22 @@ export async function POST(req: NextRequest) {
                   total,
                   idempotencyKey,
                 });
-                // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
-                if (clientClosed) {
-                  await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, deduction.consumeTransactionId);
+              }
+              recordGeneration({
+                userId: auth.userId, taskId, module: 'scene', shotIndex: refSeq,
+                promptText: prompt,
+                modelId, bodyType, skinTone, aspectRatio,
+                apiModel: resultApiModel,
+                success: result.success && delivered,
+                apiLatencyMs: shotLatency,
+                errorMessage: result.success && !delivered
+                  ? 'client disconnected before delivery'
+                  : (result.success ? undefined : (result.detail ?? result.error)),
+              }).catch(err => console.error('[recordGeneration] 失败:', err));
+
+              if (result.success && result.data) {
+                if (!delivered) {
+                  // pending 没存成且推流也失败（settleDelivery 已退款）
                   failedCount++;
                   break;
                 }
@@ -1261,7 +1396,11 @@ export async function POST(req: NextRequest) {
             }
           // ===== [C] 组图分支 · 结束 =====
           } else {
-          const preflightBalance = runId ? null : await checkBalance(auth.userId, costFen);
+          const preflightBalance = await preflightBalanceCheck(
+            auth.userId,
+            costFen,
+            generationIdempotencyKey(auth.userId, taskId, 0, runId),
+          );
           if (preflightBalance && !preflightBalance.sufficient) {
             const errMsg = `余额不足（当前 ¥${(preflightBalance.balanceFen / 100).toFixed(2)}）`;
             push('error', {
@@ -1336,6 +1475,7 @@ export async function POST(req: NextRequest) {
             taskId,
             requestedApiModel,
             idempotencyKey,
+            { awaitFulfillment: true },
           );
           // ===== [F] 计费预扣（单张场景图） · 结束 =====
           if (!sceneDeduction.success) {
@@ -1359,12 +1499,13 @@ export async function POST(req: NextRequest) {
             return;
           }
           if (sceneDeduction.idempotent && idempotencyKey) {
-            const reused = await redeliverIdempotentResult(push, auth.userId, idempotencyKey, {
+            // 同一 runId 已有 consume：只补发/提示，绝不沿用旧扣费再出图（见 handleIdempotentHit）
+            const hit = await handleIdempotentHit(push, auth.userId, idempotencyKey, sceneDeduction, {
               shotIndex: 0,
               current: 1,
               total: 1,
             });
-            if (reused) {
+            if (hit === 'redelivered') {
               recordGeneration({
                 userId: auth.userId, taskId, module: 'scene', shotIndex: 0,
                 promptText: '(idempotent pending redelivery)',
@@ -1372,14 +1513,14 @@ export async function POST(req: NextRequest) {
                 apiModel: requestedApiModel,
                 success: true, apiLatencyMs: 0,
               }).catch(err => console.error('[recordGeneration]', err));
-              push('done', {
-                successCount: 1,
-                failedCount: 0,
-                totalSeconds: Math.round((Date.now() - startTime) / 1000),
-              });
-              controller.close();
-              return;
             }
+            push('done', {
+              successCount: hit === 'redelivered' ? 1 : 0,
+              failedCount: hit === 'redelivered' ? 0 : 1,
+              totalSeconds: Math.round((Date.now() - startTime) / 1000),
+            });
+            controller.close();
+            return;
           }
 
           const modelConfig = modelId ? MODELS.find(m => m.id === modelId) : undefined;
@@ -1445,7 +1586,25 @@ export async function POST(req: NextRequest) {
           const sceneApiModel = result.model || resolveApiModel(result.backend);
 
           // 持久化生成记录到 Postgres —— 只记一条，反映最终交付结果（理由同产品图分支）
-          const sceneDeliveredButDisconnected = result.success && !!result.data && clientClosed;
+          let sceneDelivered = false;
+          if (result.success && result.data) {
+            sceneDelivered = await settleDelivery(push, {
+              userId: auth.userId,
+              taskId,
+              costFen,
+              chargeLabel,
+              idempotencyKey,
+              consumeTransactionId: sceneDeduction.consumeTransactionId,
+            }, {
+              shotIndex: 0,
+              data: result.data,
+              width: resultWidth,
+              height: resultHeight,
+              current: 1,
+              total: 1,
+              idempotencyKey,
+            });
+          }
           recordGeneration({
             userId: auth.userId,
             taskId,
@@ -1456,36 +1615,17 @@ export async function POST(req: NextRequest) {
             skinTone,
             aspectRatio,
             apiModel: sceneApiModel,
-            success: result.success && !sceneDeliveredButDisconnected,
+            success: result.success && sceneDelivered,
             apiLatencyMs: sceneShotLatency,
-            errorMessage: sceneDeliveredButDisconnected
+            errorMessage: result.success && !sceneDelivered
               ? 'client disconnected before delivery'
-              : (result.success ? undefined : result.error),
+              : (result.success ? undefined : (result.detail ?? result.error)),
           }).catch(err => console.error('[recordGeneration] 失败:', err));
 
           if (result.success && result.data) {
-            // 客户端已断开 → push 会被吞 → 用户付了钱拿不到图。主动退款（记录已在上面记为 disconnect 失败）。
-            if (clientClosed) {
-              await refundBalance(auth.userId, costFen, `${chargeLabel} 客户端断开退款`, taskId, idempotencyKey, sceneDeduction.consumeTransactionId);
-              failedCount = 1;
-            } else {
-              await deliverResult(push, auth.userId, taskId, {
-                shotIndex: 0,
-                data: result.data,
-                width: resultWidth,
-                height: resultHeight,
-                current: 1,
-                total: 1,
-                idempotencyKey,
-              });
-              // 同产品图分支：push 内 enqueue 抛错是断连的唯一感知点，漏掉＝扣了钱不退款。
-              if (clientClosed) {
-                await refundBalance(auth.userId, costFen, `${chargeLabel} 投递失败退款`, taskId, idempotencyKey, sceneDeduction.consumeTransactionId);
-                failedCount = 1;
-              } else {
-                successCount = 1;
-              }
-            }
+            // 已写入 pending / 已推给客户端＝成功并保留扣费；两者都失败 settleDelivery 已退款
+            if (sceneDelivered) successCount = 1;
+            else failedCount = 1;
           } else {
             failedCount = 1;
             await refundBalance(
@@ -1526,7 +1666,10 @@ export async function POST(req: NextRequest) {
         });
 
       } catch (err) {
-        const msg = err instanceof Error ? err.message : '服务器内部错误';
+        if (isPrismaError(err)) console.error('[stream] 数据库错误（原文不下发客户端）:', err);
+        const msg = isPrismaError(err)
+          ? '服务暂时不可用，请稍后重试'
+          : (err instanceof Error ? err.message : '服务器内部错误');
         // 走到这里说明所有 inner try/catch 都没接住的"框架级"异常（如 push 抛错、modelConfig 查找失败、
         // analyzeProductImage 之外的 setup 错误等）。钱在每个扣费点的 inner try/catch 都已经处理过，
         // 这里只补一行 recordGeneration 让 admin 失败监控可以看到。
@@ -1540,6 +1683,7 @@ export async function POST(req: NextRequest) {
         push('error', { shotIndex: -1, current: 0, total: 0, message: msg, fatal: true });
         push('done', { successCount, failedCount: failedCount + 1, totalSeconds: Math.round((Date.now() - startTime) / 1000) });
       } finally {
+        slot.release(); // 每人并发名额：任何退出路径（含 return / 抛错）都必须释放
         clearInterval(heartbeat);
         clearInterval(backpressureMonitor);
         req.signal.removeEventListener('abort', onAbort);

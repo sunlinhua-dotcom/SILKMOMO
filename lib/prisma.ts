@@ -18,6 +18,12 @@ const PG_POOL_TIMEOUTS = {
   keepAlive: true,
 } as const;
 
+/** 连接池上限。默认 10；多副本部署时按「数据库总连接数 / 副本数」下调。 */
+function getPgPoolMax(): number {
+  const parsed = Number(process.env.PG_POOL_MAX ?? 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
+}
+
 function getDatabaseUrl(): string | undefined {
   return (
     process.env.DATABASE_URL ||
@@ -57,7 +63,7 @@ function createPrismaClient(): PrismaClient {
   const { Pool } = require('pg');
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { PrismaPg } = require('@prisma/adapter-pg');
-  const pool = new Pool({ connectionString, ...PG_POOL_TIMEOUTS });
+  const pool = new Pool({ connectionString, max: getPgPoolMax(), ...PG_POOL_TIMEOUTS });
   const adapter = new PrismaPg(pool);
   console.log('[Prisma] 使用 PostgreSQL');
   return new PrismaClient({ adapter });
@@ -83,6 +89,8 @@ export const isPostgres = (() => {
 
 export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+// 生产环境也缓存：Next 的多个 bundle / 热重载 / instrumentation 都可能各自 import 本模块，
+// 不挂 globalThis 就会各建一个连接池。
+globalForPrisma.prisma = prisma;
 
 export default prisma;

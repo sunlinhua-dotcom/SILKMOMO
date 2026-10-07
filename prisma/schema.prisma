@@ -35,11 +35,18 @@ model Transaction {
   apiModel       String? // API 模型名
   projectId      Int? // 关联的项目 ID
   idempotencyKey String?  @unique // 后台任务计费事件键；普通流水为空
+  // 履约时间：出图类 consume 在「结果已写入 pending」或「已成功推给客户端」时写入。
+  // 为空 = 尚未履约（在途，或进程被杀的孤儿）。已履约的幂等命中绝不再出图；
+  // 超窗口仍为空的由 lib/billing-reconcile.ts 清扫退款。
+  // 非出图类 consume（AI 助手等）创建时即写入，历史 consume 由迁移回填为 createdAt。
+  fulfilledAt    DateTime?
   createdAt      DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
-  @@index([userId])
+  @@index([userId, createdAt]) // 用户流水分页：where userId order by createdAt desc
+  @@index([type, createdAt]) // 管理后台按类型 + 时间窗口聚合
+  @@index([type, fulfilledAt, createdAt]) // 孤儿清扫：type=consume AND fulfilledAt IS NULL AND createdAt < cutoff
   @@index([createdAt])
 }
 
@@ -114,9 +121,9 @@ model GenerationRecord {
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
-  @@index([taskId])
-  @@index([promptHash])
-  @@index([rating])
+  @@index([userId, taskId, createdAt]) // by-task 查询：where userId + taskId order by createdAt desc
+  @@index([success, createdAt]) // 管理后台失败监控：success + 时间窗口
+  @@index([rating]) // 保留：getQualityAnalytics 有 where rating = ±1 / != 0（管理后台）
   @@index([module, shotIndex])
   @@index([createdAt])
 }
@@ -216,7 +223,6 @@ model ModelFaceGenerationJob {
   items ModelFaceGenerationItem[]
 
   @@index([userId, createdAt])
-  @@index([status])
   @@index([status, leaseUntil])
 }
 

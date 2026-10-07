@@ -6,6 +6,8 @@ import prisma from './prisma';
 import {
   deductGenerationBalanceInTransaction,
   refundGenerationBalanceInTransaction,
+  retryWithBackoff,
+  toSafeBillingError,
 } from './generation-billing-core';
 export { PRICING, RECHARGE_PACKAGES } from './billing-constants'
 
@@ -36,11 +38,15 @@ export async function deductBalance(
   projectId?: number,
   apiModel: string = 'gemini-3.1-flash-image-preview',
   idempotencyKey?: string,
+  options: { awaitFulfillment?: boolean } = {},
 ): Promise<{
   success: boolean;
   balanceAfter: number;
   idempotent?: boolean;
   consumeTransactionId?: string;
+  /** 仅幂等命中：既有 consume 的履约时间（空＝未履约）与创建时间。 */
+  fulfilledAt?: Date | null;
+  createdAt?: Date | null;
   error?: string;
 }> {
   try {
@@ -52,6 +58,7 @@ export async function deductBalance(
       projectId,
       apiModel,
       idempotencyKey,
+      awaitFulfillment: options.awaitFulfillment,
     }));
 
     return {
@@ -59,6 +66,8 @@ export async function deductBalance(
       balanceAfter: result.balanceAfter,
       idempotent: result.idempotent,
       consumeTransactionId: result.consumeTransactionId,
+      fulfilledAt: result.fulfilledAt,
+      createdAt: result.createdAt,
     };
   } catch (error) {
     // 两个并发请求都在事务内查不到键时，唯一索引决定胜者；败者事务整体回滚（含扣款），
@@ -66,7 +75,7 @@ export async function deductBalance(
     if (idempotencyKey && typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
       const existing = await prisma.transaction.findUnique({
         where: { idempotencyKey },
-        select: { id: true, userId: true, type: true, balanceAfter: true },
+        select: { id: true, userId: true, type: true, balanceAfter: true, fulfilledAt: true, createdAt: true },
       });
       if (existing?.userId === userId && existing.type === 'consume') {
         return {
@@ -74,12 +83,60 @@ export async function deductBalance(
           balanceAfter: existing.balanceAfter,
           idempotent: true,
           consumeTransactionId: existing.id,
+          fulfilledAt: existing.fulfilledAt,
+          createdAt: existing.createdAt,
         };
       }
     }
-    const msg = error instanceof Error ? error.message : '扣费失败';
-    return { success: false, balanceAfter: 0, error: msg };
+    // Prisma / 连接错误原文只进日志，不透传给客户端
+    logUnexpectedBillingError('deduct', error, idempotencyKey);
+    return { success: false, balanceAfter: 0, error: toSafeBillingError(error) };
   }
+}
+
+/** 把非预期的扣费错误（可能含 Prisma 原文、SQL、连接串片段）只写服务端日志。 */
+function logUnexpectedBillingError(op: string, error: unknown, idempotencyKey?: string) {
+  if (toSafeBillingError(error, '') !== '') return; // 业务内的已知错误（余额不足等）无需告警
+  console.error('[billing] 非预期的扣费错误', {
+    op,
+    idempotencyKey,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/** 该出图幂等键是否已有本人的 consume（用于带 runId 的余额预检豁免：重试同一次生成不需要余额）。 */
+export async function hasGenerationConsume(userId: string, idempotencyKey: string): Promise<boolean> {
+  const row = await prisma.transaction.findUnique({
+    where: { idempotencyKey },
+    select: { userId: true, type: true },
+  });
+  return row?.userId === userId && row.type === 'consume';
+}
+
+/**
+ * 出图结果已「写入 pending」或「已成功推给客户端」后调用：写入 fulfilledAt。
+ * 只改仍为空的 consume（updateMany 条件含 fulfilledAt: null），所以重复调用无副作用。
+ * 失败只打日志并返回 false——此时孤儿清扫会先查 pending，查到就补标记而不是退款。
+ */
+export async function markGenerationFulfilled(consumeTransactionId: string | undefined): Promise<boolean> {
+  if (!consumeTransactionId) return false;
+  const result = await retryWithBackoff(
+    () => prisma.transaction.updateMany({
+      where: { id: consumeTransactionId, type: 'consume', fulfilledAt: null },
+      data: { fulfilledAt: new Date() },
+    }),
+    { retries: 2, baseDelayMs: 150 },
+  );
+  if (!result.ok) {
+    console.error('[billing] fulfilled_mark_failed', JSON.stringify({
+      event: 'fulfilled_mark_failed',
+      consumeTransactionId,
+      attempts: result.attempts,
+      error: result.error instanceof Error ? result.error.message.slice(0, 200) : 'unknown',
+    }));
+    return false;
+  }
+  return true;
 }
 
 // ═══ 自定义金额扣费（AI 分析等非生图场景）═══
@@ -116,6 +173,7 @@ export async function deductCustom(
           balanceAfter: after.balanceFen,
           description,
           apiModel,
+          fulfilledAt: new Date(), // 非出图类消费创建即履约，不进孤儿清扫
         },
       });
 
@@ -124,8 +182,8 @@ export async function deductCustom(
 
     return { success: true, balanceAfter: result.balanceAfter };
   } catch (error) {
-    const msg = error instanceof Error ? error.message : '扣费失败';
-    return { success: false, balanceAfter: 0, error: msg };
+    logUnexpectedBillingError('deductCustom', error);
+    return { success: false, balanceAfter: 0, error: toSafeBillingError(error) };
   }
 }
 
@@ -140,29 +198,32 @@ export async function refundBalance(
 ): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
   if (amountFen <= 0) return { success: true, balanceAfter: 0 };
 
-  try {
-    const result = await prisma.$transaction(tx => refundGenerationBalanceInTransaction(tx, {
-      userId,
-      amountFen,
-      description,
-      projectId,
-      idempotencyKey,
-      consumeTransactionId,
-    }));
+  // 进程内指数退避重试 3 次（300 / 600 / 1200ms）。退款失败＝用户的钱静默蒸发，
+  // 重试后仍失败才放弃；放弃时有幂等键的由孤儿清扫（lib/billing-reconcile.ts）兜底。
+  const outcome = await retryWithBackoff(() => prisma.$transaction(tx => refundGenerationBalanceInTransaction(tx, {
+    userId,
+    amountFen,
+    description,
+    projectId,
+    idempotencyKey,
+    consumeTransactionId,
+  })));
 
-    return { success: true, balanceAfter: result.balanceAfter };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : '退款失败';
-    // 退款失败意味着用户的钱静默蒸发，必须留下可对账的痕迹
-    console.error('[billing] 退款失败（需人工对账）', {
-      userId,
-      amountFen,
-      description,
-      projectId,
-      error: msg,
-    });
-    return { success: false, balanceAfter: 0, error: msg };
-  }
+  if (outcome.ok) return { success: true, balanceAfter: outcome.value.balanceAfter };
+
+  const msg = outcome.error instanceof Error ? outcome.error.message : '退款失败';
+  // 一行结构化日志，供人工对账：含幂等键（出图键已内含 userId）与金额，不含描述等其余信息。
+  console.error('[billing] refund_failed', JSON.stringify({
+    event: 'refund_failed',
+    idempotencyKey: idempotencyKey ?? null,
+    consumeTransactionId: consumeTransactionId ?? null,
+    amountFen,
+    projectId: projectId ?? null,
+    userId: idempotencyKey ? undefined : userId,
+    attempts: outcome.attempts,
+    error: msg.slice(0, 200),
+  }));
+  return { success: false, balanceAfter: 0, error: '退款失败' };
 }
 
 // ═══ 充值（管理员操作）═══

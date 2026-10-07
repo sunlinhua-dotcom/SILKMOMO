@@ -58,7 +58,12 @@ test('same generation idempotency key debits once and reports a reusable deliver
   const duplicate = await billing.deductGenerationBalanceInTransaction(tx, input);
 
   assert.deepEqual(first, { balanceAfter: 380, idempotent: false, consumeTransactionId: 'tx-1' });
-  assert.deepEqual(duplicate, { balanceAfter: 380, idempotent: true, consumeTransactionId: 'tx-1' });
+  // 幂等命中额外带回既有 consume 的 fulfilledAt / createdAt，供路由判断已履约 / 在途 / 孤儿
+  assert.equal(duplicate.balanceAfter, 380);
+  assert.equal(duplicate.idempotent, true);
+  assert.equal(duplicate.consumeTransactionId, 'tx-1');
+  assert.ok(duplicate.fulfilledAt instanceof Date, '没有 awaitFulfillment 的扣费创建即履约');
+  assert.equal(duplicate.createdAt, null);
   assert.equal(state.balanceFen, 380);
   assert.equal(state.ledger.length, 1);
 });
@@ -137,13 +142,22 @@ test('an idempotency race waits for the winning pending delivery', async () => {
   assert.equal(reads, 3);
 });
 
-test('an idempotent debit without pending falls through to generation instead of a fatal refresh error', async () => {
-  const result = await idempotency.resolveIdempotentGeneration({
-    findPending: async () => null,
-    wait: async () => {},
-    attempts: 2,
-  });
-  assert.deepEqual(result, { action: 'generate' });
+test('an idempotent debit without pending never falls through to generation (P0 free-replay fix)', async () => {
+  const now = Date.now();
+  const none = async () => null;
+  const wait = async () => {};
+  // 已履约（pending 被取走 / 被用户 DELETE）→ 不再生成
+  assert.deepEqual(await idempotency.resolveIdempotentGeneration({
+    findPending: none, fulfilledAt: new Date(now - 1000), createdAt: new Date(now - 5000), wait, attempts: 2,
+  }), { action: 'already-delivered' });
+  // 未履约、在途窗口内 → 提示仍在生成，不生成
+  assert.deepEqual(await idempotency.resolveIdempotentGeneration({
+    findPending: none, fulfilledAt: null, createdAt: new Date(now - 5000), wait, attempts: 2,
+  }), { action: 'in-flight' });
+  // 未履约、超窗口 → 孤儿，不生成
+  assert.deepEqual(await idempotency.resolveIdempotentGeneration({
+    findPending: none, fulfilledAt: null, createdAt: new Date(now - 3600_000), wait, attempts: 2,
+  }), { action: 'orphan' });
 });
 
 test('insufficient deduction errors preserve the current balance wording', () => {
@@ -155,4 +169,7 @@ test('insufficient deduction errors preserve the current balance wording', () =>
     billing.formatGenerationDeductionError('数据库不可用', 0, false),
     '扣费失败: 数据库不可用',
   );
+  // Prisma 原文等非白名单错误不透传
+  assert.equal(billing.toSafeBillingError(new Error('Invalid `prisma.user.updateMany()` invocation')), billing.GENERIC_BILLING_ERROR);
+  assert.equal(billing.toSafeBillingError(new Error('余额不足')), '余额不足');
 });
