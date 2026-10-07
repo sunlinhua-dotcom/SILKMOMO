@@ -38,10 +38,37 @@ export interface BackendInput {
   allowRetryOn5xx?: boolean;
 }
 
+/**
+ * 失败类别（机器可读）。调用方要做分类 / 统计请看这个字段，不要再去匹配 error 文案。
+ */
+export type BackendErrorKind =
+  | 'config'               // 通道未配置
+  | 'timeout'              // 等满超时窗口
+  | 'network'              // 连接失败 / 读 body 中断
+  | 'rate_limit'           // 上游 429
+  | 'upstream_unavailable' // 上游 5xx
+  | 'upstream_rejected'    // 上游其它 4xx
+  | 'moderation'           // 上游或模型的内容审核 / 安全策略拒绝
+  | 'bad_response'         // 响应无法解析 / 缺少图片
+  | 'download';            // 兜底按 URL 取图失败
+
 export interface BackendResult {
   success: boolean;
   data?: string;     // base64 PNG
+  /**
+   * 给用户看的通用中文文案：不含上游原文、不含任何 key / URL。
+   * 是否追加「已自动退款」由调用方（route.ts）决定。
+   */
   error?: string;
+  /** 失败类别，见 BackendErrorKind。 */
+  errorKind?: BackendErrorKind;
+  /** 上游 HTTP 状态码（仅 HTTP 层失败时有）。 */
+  httpStatus?: number;
+  /**
+   * 经 sanitizeError 脱敏、截断到 300 字的上游原文，仅供服务端日志 / recordGeneration 落库排障。
+   * 严禁下发给客户端。
+   */
+  detail?: string;
   backend: 'gemini' | 'openai';
   model?: string;    // 实际调用的上游模型名（用于真实计费归因，而非硬编码）
 }
@@ -108,13 +135,76 @@ const GEMINI_TIMEOUT_SEC = Math.round(GEMINI_TIMEOUT_MS / 1000);
 const OPENAI_TIMEOUT_MS = 360_000;
 
 // 防止 API key 随错误信息外泄（例如 base URL 配错时，fetch 抛出的
-// TypeError 会带上完整含 ?key= 的 URL，并被透传到 SSE error 事件）。
-// 两个令牌都要脱敏。
-function sanitizeError(msg: string): string {
+// TypeError 会带上完整含 ?key= 的 URL）。
+// 两个令牌都要脱敏；另外 URL 里的 ?key= / &key= 一律打码，Bearer 令牌也打码，
+// 这样即使上游把 key 回显到错误体里、或 env 里没配的别的 key 也不会进日志。
+export function sanitizeError(msg: string): string {
   let out = msg;
   if (API_KEY) out = out.split(API_KEY).join('***');
   if (OPENAI_API_KEY && OPENAI_API_KEY !== API_KEY) out = out.split(OPENAI_API_KEY).join('***');
-  return out;
+  return out
+    .replace(/([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"'<>]+/gi, '$1***')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***');
+}
+
+const MODERATION_RE = /moderation|content[_ -]?policy|safety[_ -]?(?:system|violation)|sensitive|审核|违规|敏感/i;
+
+/** 上游非 2xx：只对客户端给通用文案 + 状态码，原文脱敏后放 detail / 日志。 */
+function httpFailure(backend: ImageBackend, status: number, errorText: string): BackendResult {
+  const detail = sanitizeError(errorText.slice(0, 300));
+  let errorKind: BackendErrorKind;
+  let error: string;
+  if (status === 429) {
+    errorKind = 'rate_limit';
+    error = '出图服务繁忙，请求过于频繁（上游 429），请稍后重试';
+  } else if (status >= 500) {
+    errorKind = 'upstream_unavailable';
+    error = `出图服务暂时不可用（上游 ${status}），请稍后重试`;
+  } else if (status === 413) {
+    errorKind = 'upstream_rejected';
+    error = '参考图体积过大（上游 413），请换小一些的图片后重试';
+  } else if (MODERATION_RE.test(errorText)) {
+    errorKind = 'moderation';
+    error = `图片或描述可能触发内容审核（上游 ${status}），请更换参考图后重试`;
+  } else {
+    errorKind = 'upstream_rejected';
+    error = `出图服务拒绝了本次请求（上游 ${status}），请稍后重试`;
+  }
+  return { success: false, error, errorKind, httpStatus: status, detail, backend };
+}
+
+/** fetch 抛错 / 读 body 中断：通用文案，原文只进日志与 detail。 */
+function networkFailure(backend: ImageBackend, err: unknown, timeoutSec: number): BackendResult {
+  const msg = err instanceof Error ? err.message : '网络连接失败';
+  const isTimeout = /abort|timeout/i.test(msg);
+  return {
+    success: false,
+    error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}，请稍后重试`,
+    errorKind: isTimeout ? 'timeout' : 'network',
+    detail: sanitizeError(msg).slice(0, 300),
+    backend,
+  };
+}
+
+function badResponse(backend: ImageBackend, error: string, detail?: string): BackendResult {
+  return { success: false, error, errorKind: 'bad_response', detail: detail ? sanitizeError(detail).slice(0, 300) : undefined, backend };
+}
+
+type JsonRead =
+  | { ok: true; data: Record<string, unknown> | null }
+  | { ok: false; kind: 'read' | 'parse'; err: unknown };
+
+/**
+ * response.json() 一次读完；用异常类型区分「读 body 时被 abort / 断连」和「内容不是 JSON」。
+ * （非 2xx 分支仍用 response.text() 读错误正文，那里需要原文做日志。）
+ */
+async function readJsonBody(response: Response): Promise<JsonRead> {
+  try {
+    return { ok: true, data: (await response.json()) as Record<string, unknown> | null };
+  } catch (err) {
+    const isParse = err instanceof SyntaxError || (err as { name?: string })?.name === 'SyntaxError';
+    return { ok: false, kind: isParse ? 'parse' : 'read', err };
+  }
 }
 
 function upstreamErrorCategory(error: unknown): string {
@@ -142,7 +232,7 @@ export async function generateImage(
   const backend = normalizeBackend(backendOverride ?? null);
   const requiredKey = backend === 'openai' ? OPENAI_API_KEY : API_KEY;
   if (!requiredKey) {
-    return { success: false, error: 'API Key 未配置', backend };
+    return { success: false, error: 'API Key 未配置', errorKind: 'config', backend };
   }
   const normalizedInput = await normalizeBackendReferenceImages(input);
   return backend === 'openai'
@@ -150,28 +240,62 @@ export async function generateImage(
     : generateWithGemini(normalizedInput);
 }
 
-async function normalizeImageList(images: ImageInput[] | undefined, label: string): Promise<ImageInput[] | undefined> {
-  if (!images) return undefined;
-  const normalized: ImageInput[] = [];
-  for (let i = 0; i < images.length; i += 1) {
-    normalized.push(images[i].skipNormalization
-      ? images[i]
-      : await normalizeReferenceImage(images[i], `${label}[${i}]`));
-  }
-  return normalized;
+/** 参考图归一化并发度：sharp 吃 CPU + libuv 线程池，3 路足够把一组图的 4~6 张重复图压到最短。 */
+const NORMALIZE_CONCURRENCY = 3;
+
+/** 并发执行 fn，最多 limit 路同时在飞；结果顺序与 items 一致。 */
+async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 async function normalizeBackendReferenceImages(input: BackendInput): Promise<BackendInput> {
+  // 把所有待归一化的图摊平成一条任务队列（跨类别共享同一个并发上限），再按原位置装回。
+  // 单个任务内部失败会原样返回原图（见 normalizeReferenceImage），所以这里不会 reject。
+  type Slot = { list: ImageInput[] | undefined; label: string };
+  const slots: Record<'product' | 'model' | 'bg' | 'scene' | 'accessory', Slot> = {
+    product: { list: input.productImages, label: 'product' },
+    model: { list: input.modelRefImages, label: 'model' },
+    bg: { list: input.bgRefImages, label: 'background' },
+    scene: { list: input.sceneRefImages, label: input.sceneAsEditBase ? 'scene-base' : 'scene' },
+    accessory: { list: input.accessoryImages, label: 'accessory' },
+  };
+  const jobs: Array<{ slot: keyof typeof slots | 'anchor'; index: number; img: ImageInput; label: string }> = [];
+  for (const [slot, { list, label }] of Object.entries(slots) as Array<[keyof typeof slots, Slot]>) {
+    (list ?? []).forEach((img, index) => jobs.push({ slot, index, img, label: `${label}[${index}]` }));
+  }
+  // anchor 一律归一化（沿用旧行为：不看 skipNormalization）
+  if (input.anchorImage) {
+    jobs.push({ slot: 'anchor', index: 0, img: input.anchorImage, label: 'anchor' });
+  }
+
+  const done = await mapWithConcurrency(jobs, NORMALIZE_CONCURRENCY, job =>
+    job.slot !== 'anchor' && job.img.skipNormalization ? Promise.resolve(job.img) : normalizeReferenceImage(job.img, job.label));
+
+  const rebuilt: Record<keyof typeof slots, ImageInput[]> = { product: [], model: [], bg: [], scene: [], accessory: [] };
+  let anchorImage: ImageInput | undefined;
+  jobs.forEach((job, i) => {
+    if (job.slot === 'anchor') anchorImage = done[i];
+    else rebuilt[job.slot][job.index] = done[i];
+  });
+
   return {
     ...input,
-    productImages: (await normalizeImageList(input.productImages, 'product')) ?? [],
-    modelRefImages: await normalizeImageList(input.modelRefImages, 'model'),
-    bgRefImages: await normalizeImageList(input.bgRefImages, 'background'),
-    sceneRefImages: await normalizeImageList(input.sceneRefImages, input.sceneAsEditBase ? 'scene-base' : 'scene'),
-    accessoryImages: await normalizeImageList(input.accessoryImages, 'accessory'),
-    anchorImage: input.anchorImage
-      ? await normalizeReferenceImage(input.anchorImage, 'anchor')
-      : undefined,
+    productImages: rebuilt.product,
+    modelRefImages: input.modelRefImages ? rebuilt.model : undefined,
+    bgRefImages: input.bgRefImages ? rebuilt.bg : undefined,
+    sceneRefImages: input.sceneRefImages ? rebuilt.scene : undefined,
+    accessoryImages: input.accessoryImages ? rebuilt.accessory : undefined,
+    anchorImage,
     // Mask dimensions must match the first final image buffer exactly; never normalize it here.
     maskImage: input.maskImage,
   };
@@ -181,11 +305,21 @@ async function normalizeBackendReferenceImages(input: BackendInput): Promise<Bac
 // Gemini 通道（保留现有行为）
 // ═══════════════════════════════════════════════
 
-async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<BackendResult> {
+async function generateWithGemini(input: BackendInput): Promise<BackendResult> {
   const model = input.promptPurpose === 'derived-anchor' ? DERIVED_ANCHOR_MODEL : GEMINI_MODEL;
   const url = `${APIYI_BASE}/v1beta/models/${model}:generateContent?key=${API_KEY}`;
-  const parts = buildGeminiParts(input);
+  // 请求体（含全部参考图 base64）只序列化一次，重试直接复用同一个字符串
+  const body = JSON.stringify({
+    contents: [{ parts: buildGeminiParts(input) }],
+    generationConfig: {
+      responseModalities: ['IMAGE', 'TEXT'],
+      imageConfig: { aspectRatio: input.aspectRatio, image_size: '2K' },
+    },
+  });
+  return callGemini(model, url, body, 0);
+}
 
+async function callGemini(model: string, url: string, body: string, retryCount: number): Promise<BackendResult> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -193,13 +327,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
       headers: { 'Content-Type': 'application/json' },
       signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       cache: 'no-store',
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          responseModalities: ['IMAGE', 'TEXT'],
-          imageConfig: { aspectRatio: input.aspectRatio, image_size: '2K' },
-        },
-      }),
+      body,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : '网络连接失败';
@@ -207,9 +335,9 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
     logUpstreamError('gemini', err);
     if (isTimeout && retryCount < MAX_RETRIES) {
       console.log(`[gemini] 超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
-      return generateWithGemini(input, retryCount + 1);
+      return callGemini(model, url, body, retryCount + 1);
     }
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${GEMINI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
+    return networkFailure('gemini', err, GEMINI_TIMEOUT_SEC);
   }
 
   if (!response.ok) {
@@ -217,46 +345,42 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
     console.log(`[upstream-error] backend=gemini category=HTTP_${response.status} raw=${sanitizeError(errorText.slice(0, 300))}`);
     if ((response.status === 503 || response.status === 429) && retryCount < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 3000));
-      return generateWithGemini(input, retryCount + 1);
+      return callGemini(model, url, body, retryCount + 1);
     }
-    return { success: false, error: `Gemini API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'gemini' };
+    return httpFailure('gemini', response.status, errorText);
   }
 
-  // 读取响应体单独 try：连上后出图慢、读 body 时被同一个超时 signal abort，
+  // 读取响应体：连上后出图慢、读 body 时被同一个超时 signal abort，
   // 旧代码会把它当成「响应 JSON 解析失败」且不重试。这里按真实成因——超时——处理并重试一次。
-  let rawText: string;
-  try {
-    rawText = await response.text();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : '读取响应失败';
-    const isTimeout = /abort|timeout/i.test(msg);
-    logUpstreamError('gemini', err);
-    if (isTimeout && retryCount < MAX_RETRIES) {
-      console.log(`[gemini] 读取响应超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
-      return generateWithGemini(input, retryCount + 1);
+  const read = await readJsonBody(response);
+  if (!read.ok) {
+    logUpstreamError('gemini', read.err);
+    if (read.kind === 'parse') {
+      return badResponse('gemini', '出图服务返回了无法解析的响应，请稍后重试', read.err instanceof Error ? read.err.message : '');
     }
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${GEMINI_TIMEOUT_SEC}s）` : ''}: ${sanitizeError(msg)}`, backend: 'gemini' };
+    const msg = read.err instanceof Error ? read.err.message : '读取响应失败';
+    if (/abort|timeout/i.test(msg) && retryCount < MAX_RETRIES) {
+      console.log(`[gemini] 读取响应超时重试 ${retryCount + 1}/${MAX_RETRIES}`);
+      return callGemini(model, url, body, retryCount + 1);
+    }
+    return networkFailure('gemini', read.err, GEMINI_TIMEOUT_SEC);
   }
-
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(rawText);
-  } catch (err) {
-    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'gemini' };
-  }
+  const data = read.data;
 
   const candidates = data?.candidates as Array<Record<string, unknown>> | undefined;
   if (!candidates?.length) {
-    return { success: false, error: 'Gemini 未返回结果（candidates 为空）', backend: 'gemini' };
+    return badResponse('gemini', 'Gemini 未返回结果（candidates 为空）');
   }
-  const finishReason = (candidates[0]?.finishReason as string) || '';
+  const rawFinishReason = (candidates[0]?.finishReason as string) || '';
+  // finishReason 是上游给的字符串：只接受枚举形态，避免把任意上游文本带进用户文案
+  const finishReason = /^[A-Z_]{1,40}$/.test(rawFinishReason) ? rawFinishReason : (rawFinishReason ? 'UNKNOWN' : '');
   console.log(`[gemini] finishReason=${finishReason}`);
 
   if (finishReason === 'IMAGE_RECITATION') {
-    return { success: false, error: '图片生成被拒绝（IMAGE_RECITATION）— 请更换参考图', backend: 'gemini' };
+    return { success: false, error: '图片生成被拒绝（IMAGE_RECITATION）— 请更换参考图', errorKind: 'moderation', backend: 'gemini' };
   }
   if (finishReason === 'SAFETY') {
-    return { success: false, error: '图片被安全策略过滤', backend: 'gemini' };
+    return { success: false, error: '图片被安全策略过滤', errorKind: 'moderation', backend: 'gemini' };
   }
 
   const content = candidates[0]?.content as Record<string, unknown> | undefined;
@@ -268,7 +392,7 @@ async function generateWithGemini(input: BackendInput, retryCount = 0): Promise<
     }
   }
 
-  return { success: false, error: `生成结果中未找到图片数据（finishReason: ${finishReason}）`, backend: 'gemini' };
+  return badResponse('gemini', `生成结果中未找到图片数据（finishReason: ${finishReason}）`);
 }
 
 export function buildGeminiParts(input: BackendInput): Array<Record<string, unknown>> {
@@ -377,7 +501,7 @@ async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Prom
       return generateWithOpenAIText(input, retryCount + 1);
     }
     const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    return networkFailure('openai', err, timeoutSec);
   }
 
   if (!response.ok) {
@@ -387,15 +511,19 @@ async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Prom
       await new Promise(r => setTimeout(r, 3000));
       return generateWithOpenAIText(input, retryCount + 1);
     }
-    return { success: false, error: `OpenAI API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'openai' };
+    return httpFailure('openai', response.status, errorText);
   }
 
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(await response.text());
-  } catch (err) {
-    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
+  const read = await readJsonBody(response);
+  if (!read.ok) {
+    logUpstreamError('openai', read.err);
+    if (read.kind === 'parse') {
+      return badResponse('openai', '出图服务返回了无法解析的响应，请稍后重试', read.err instanceof Error ? read.err.message : '');
+    }
+    const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
+    return networkFailure('openai', read.err, timeoutSec);
   }
+  const data = read.data;
 
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
   const b64 = items?.[0]?.b64_json;
@@ -407,20 +535,22 @@ async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Prom
     try {
       const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(60_000) });
       if (!imgRes.ok) {
-        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, backend: 'openai' };
+        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, errorKind: 'download', httpStatus: imgRes.status, backend: 'openai' };
       }
       const contentType = imgRes.headers.get('content-type') || '';
       if (contentType && !contentType.startsWith('image/')) {
-        return { success: false, error: `图片 URL 返回了非图片内容 (${contentType.slice(0, 50)})`, backend: 'openai' };
+        console.log(`[upstream-error] backend=openai category=NON_IMAGE_URL content-type=${sanitizeError(contentType.slice(0, 50))}`);
+        return { success: false, error: '图片 URL 返回了非图片内容，请稍后重试', errorKind: 'download', backend: 'openai' };
       }
       const buf = Buffer.from(await imgRes.arrayBuffer());
       return { success: true, data: buf.toString('base64'), backend: 'openai', model: OPENAI_MODEL };
     } catch (err) {
-      return { success: false, error: `下载图片失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
+      logUpstreamError('openai', err);
+      return { success: false, error: '下载图片失败，请稍后重试', errorKind: 'download', detail: sanitizeError(err instanceof Error ? err.message : '').slice(0, 300), backend: 'openai' };
     }
   }
 
-  return { success: false, error: 'OpenAI 未返回图片数据', backend: 'openai' };
+  return badResponse('openai', 'OpenAI 未返回图片数据');
 }
 
 async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<BackendResult> {
@@ -480,25 +610,38 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
 Reference image roles (in order of upload):
 ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).join('\n')}`;
 
+  // 参考图 base64 → Blob 只做一次：重试（网络抖动 / 503 / 429）复用同一批 Blob，
+  // 不再为每次重试重新 Buffer.from + new Blob 拷贝几十 MB 的数据。
+  // FormData 本身很轻（只挂 Blob 引用），每次尝试重新装配，避免依赖 FormData 是否可被多次读取。
+  const imageParts = limited.map((r, i) => {
+    const buffer = Buffer.from(r.img.data, 'base64');
+    const ext = r.img.mimeType.split('/')[1] || 'png';
+    return { blob: new Blob([buffer], { type: r.img.mimeType }), filename: `${r.tag}-${i}.${ext}` };
+  });
+  const maskPart = input.maskImage
+    ? { blob: new Blob([Buffer.from(input.maskImage.data, 'base64')], { type: input.maskImage.mimeType || 'image/png' }), filename: 'face-mask.png' }
+    : undefined;
+
+  return postOpenAIEdits(input, taggedPrompt, imageParts, maskPart, retryCount);
+}
+
+interface OpenAIFilePart { blob: Blob; filename: string }
+
+async function postOpenAIEdits(
+  input: BackendInput,
+  taggedPrompt: string,
+  imageParts: OpenAIFilePart[],
+  maskPart: OpenAIFilePart | undefined,
+  retryCount: number,
+): Promise<BackendResult> {
   const formData = new FormData();
   formData.append('model', OPENAI_MODEL);
   formData.append('prompt', taggedPrompt);
   formData.append('size', mapAspectToOpenAISize(input.aspectRatio));
   formData.append('quality', normalizeGenerationQuality(input.quality));
   formData.append('n', '1');
-
-  limited.forEach((r, i) => {
-    const buffer = Buffer.from(r.img.data, 'base64');
-    const blob = new Blob([buffer], { type: r.img.mimeType });
-    const ext = r.img.mimeType.split('/')[1] || 'png';
-    formData.append('image[]', blob, `${r.tag}-${i}.${ext}`);
-  });
-
-  if (input.maskImage) {
-    const maskBuffer = Buffer.from(input.maskImage.data, 'base64');
-    const maskBlob = new Blob([maskBuffer], { type: input.maskImage.mimeType || 'image/png' });
-    formData.append('mask', maskBlob, 'face-mask.png');
-  }
+  imageParts.forEach(part => formData.append('image[]', part.blob, part.filename));
+  if (maskPart) formData.append('mask', maskPart.blob, maskPart.filename);
 
   let response: Response;
   try {
@@ -518,10 +661,10 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).j
     // 仅对非超时的网络错误（如连接重置/拒绝，通常是瞬时抖动）重试一次。
     if (!isTimeout && retryCount < MAX_RETRIES) {
       console.log(`[openai] 网络错误重试 ${retryCount + 1}/${MAX_RETRIES}`);
-      return generateWithOpenAI(input, retryCount + 1);
+      return postOpenAIEdits(input, taggedPrompt, imageParts, maskPart, retryCount + 1);
     }
     const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    return networkFailure('openai', err, timeoutSec);
   }
 
   if (!response.ok) {
@@ -531,30 +674,23 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).j
       && input.allowRetryOn5xx !== false
       && retryCount < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 3000));
-      return generateWithOpenAI(input, retryCount + 1);
+      return postOpenAIEdits(input, taggedPrompt, imageParts, maskPart, retryCount + 1);
     }
-    return { success: false, error: `OpenAI API 失败 (${response.status}): ${errorText.slice(0, 300)}`, backend: 'openai' };
+    return httpFailure('openai', response.status, errorText);
   }
 
-  // 读取响应体单独 try：读 body 时被超时 abort 不应误报成「JSON 解析失败」。
+  // 读取响应体：读 body 时被超时 abort 不应误报成「JSON 解析失败」。
   // GPT 通道超时不自动重试（理由同 fetch catch），如实报超时即可。
-  let rawText: string;
-  try {
-    rawText = await response.text();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : '读取响应失败';
-    const isTimeout = /abort|timeout/i.test(msg);
-    logUpstreamError('openai', err);
+  const read = await readJsonBody(response);
+  if (!read.ok) {
+    logUpstreamError('openai', read.err);
+    if (read.kind === 'parse') {
+      return badResponse('openai', '出图服务返回了无法解析的响应，请稍后重试', read.err instanceof Error ? read.err.message : '');
+    }
     const timeoutSec = Math.round((input.timeoutMs ?? OPENAI_TIMEOUT_MS) / 1000);
-    return { success: false, error: `网络连接失败${isTimeout ? `（超时 ${timeoutSec}s）` : ''}: ${sanitizeError(msg)}`, backend: 'openai' };
+    return networkFailure('openai', read.err, timeoutSec);
   }
-
-  let data: Record<string, unknown>;
-  try {
-    data = JSON.parse(rawText);
-  } catch (err) {
-    return { success: false, error: `响应 JSON 解析失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
-  }
+  const data = read.data;
 
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
   const b64 = items?.[0]?.b64_json;
@@ -569,22 +705,24 @@ ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).j
       // 临时 URL 过期/403 时返回的是 HTML 错误页，不校验会把坏数据
       // 当成功图片交付（已扣费、不退款、还可能污染 anchor 参考图）
       if (!imgRes.ok) {
-        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, backend: 'openai' };
+        return { success: false, error: `获取图片 URL 失败 (HTTP ${imgRes.status})`, errorKind: 'download', httpStatus: imgRes.status, backend: 'openai' };
       }
       const contentType = imgRes.headers.get('content-type') || '';
       if (contentType && !contentType.startsWith('image/')) {
-        return { success: false, error: `图片 URL 返回了非图片内容 (${contentType.slice(0, 50)})`, backend: 'openai' };
+        console.log(`[upstream-error] backend=openai category=NON_IMAGE_URL content-type=${sanitizeError(contentType.slice(0, 50))}`);
+        return { success: false, error: '图片 URL 返回了非图片内容，请稍后重试', errorKind: 'download', backend: 'openai' };
       }
       const buf = await imgRes.arrayBuffer();
       if (buf.byteLength === 0) {
-        return { success: false, error: '图片 URL 返回空内容', backend: 'openai' };
+        return { success: false, error: '图片 URL 返回空内容', errorKind: 'download', backend: 'openai' };
       }
       const b64Fallback = Buffer.from(buf).toString('base64');
       return { success: true, data: b64Fallback, backend: 'openai', model: OPENAI_MODEL };
     } catch (err) {
-      return { success: false, error: `获取图片 URL 失败: ${sanitizeError(err instanceof Error ? err.message : '')}`, backend: 'openai' };
+      logUpstreamError('openai', err);
+      return { success: false, error: '获取图片 URL 失败，请稍后重试', errorKind: 'download', detail: sanitizeError(err instanceof Error ? err.message : '').slice(0, 300), backend: 'openai' };
     }
   }
 
-  return { success: false, error: 'OpenAI 未返回 b64_json 或 url', backend: 'openai' };
+  return badResponse('openai', 'OpenAI 未返回 b64_json 或 url');
 }
