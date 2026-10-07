@@ -6,6 +6,18 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
+import { rateLimitByKey } from '@/lib/rate-limit';
+
+// 输入上限：正常使用（一句话 + 一行配置摘要）远低于这些值
+const MAX_MESSAGE_LENGTH = 2000;
+const MAX_CONTEXT_LENGTH = 20000;
+const CHAT_RATE_MAX = 20; // 每用户每分钟
+const CHAT_RATE_WINDOW_MS = 60_000;
+
+// 客户端 AIChatBox 读的是 data.reply，校验失败也带上 reply，避免界面显示成「收到！」
+function chatError(error: string, status: number, headers?: Record<string, string>) {
+  return NextResponse.json({ error, reply: error, actions: {} }, { status, headers });
+}
 
 // 主通道:DeepSeek(OpenAI 兼容协议)。配置 DEEPSEEK_API_KEY 即启用。
 const DEEPSEEK_CONFIG = {
@@ -65,9 +77,35 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: '未登录' }, { status: 401 });
   }
 
-  const { message, context } = await req.json();
-  if (!message) {
-    return NextResponse.json({ error: '请输入内容' }, { status: 400 });
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return chatError('请求体解析失败', 400);
+  }
+  const { message, context } = (body && typeof body === 'object' ? body : {}) as {
+    message?: unknown;
+    context?: unknown;
+  };
+  if (typeof message !== 'string' || !message.trim()) {
+    return chatError('请输入内容', 400);
+  }
+  if (message.length > MAX_MESSAGE_LENGTH) {
+    return chatError(`内容过长，请控制在 ${MAX_MESSAGE_LENGTH} 字以内`, 400);
+  }
+  if (context !== undefined && context !== null && typeof context !== 'string') {
+    return chatError('上下文格式非法', 400);
+  }
+  if (typeof context === 'string' && context.length > MAX_CONTEXT_LENGTH) {
+    return chatError('上下文过长', 400);
+  }
+
+  // 按用户限频（先于扣费，被拒的请求不产生任何费用）
+  const rate = rateLimitByKey('ai-chat', auth.userId, CHAT_RATE_MAX, CHAT_RATE_WINDOW_MS);
+  if (!rate.allowed) {
+    return chatError(`请求太频繁了，请 ${rate.retryAfterSec} 秒后再试`, 429, {
+      'Retry-After': String(rate.retryAfterSec),
+    });
   }
 
   // 扣费(按实际使用的模型归因)

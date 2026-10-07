@@ -5,9 +5,8 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword, signToken, setAuthCookie } from '@/lib/auth';
 import { rateLimit, getClientIp } from '@/lib/rate-limit';
+import { validateRegisterInput } from '@/lib/auth-shared';
 
-const USERNAME_RE = /^[a-zA-Z0-9_-]{2,32}$/;
-const PASSWORD_MIN = 8;
 
 export async function POST(req: Request) {
   try {
@@ -21,30 +20,17 @@ export async function POST(req: Request) {
       );
     }
 
-    const { username, password, name } = await req.json();
-
-    if (!username || !password) {
-      return NextResponse.json({ error: '用户名和密码为必填项' }, { status: 400 });
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: '请求体解析失败' }, { status: 400 });
     }
-
-    if (!USERNAME_RE.test(username)) {
-      return NextResponse.json(
-        { error: '用户名只能包含字母、数字、下划线和短横线，长度 2-32' },
-        { status: 400 }
-      );
+    const input = validateRegisterInput(body);
+    if (!input.ok) {
+      return NextResponse.json({ error: input.error }, { status: 400 });
     }
-
-    if (password.length < PASSWORD_MIN) {
-      return NextResponse.json({ error: `密码至少 ${PASSWORD_MIN} 位` }, { status: 400 });
-    }
-
-    // 起码包含一个字母 + 一个数字（弱强度门槛）
-    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
-      return NextResponse.json(
-        { error: '密码需要同时包含字母和数字' },
-        { status: 400 }
-      );
-    }
+    const { username, password, name } = input.value;
 
     const existing = await prisma.user.findUnique({ where: { username } });
     if (existing) {

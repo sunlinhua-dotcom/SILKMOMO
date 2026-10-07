@@ -8,10 +8,14 @@ import { getCurrentUser } from '@/lib/auth';
 import { analyzeProductImage, analyzeLookbookGroup, isAiAssistantConfigured } from '@/lib/ai-assistant';
 import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
+import { rateLimitByKey } from '@/lib/rate-limit';
 
 // 组图分析入参上限（前端可能上传很多张 lookbook，只需抽样若干张即可判品类；这里限体积/张数防滥用）
 const MAX_GROUP_IMAGES = 8;
 const MAX_IMAGE_BASE64_LENGTH = 11_000_000;
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ANALYZE_RATE_MAX = 10; // 每用户每分钟
+const ANALYZE_RATE_WINDOW_MS = 60_000;
 
 export async function POST(req: Request) {
   const auth = await getCurrentUser();
@@ -29,6 +33,29 @@ export async function POST(req: Request) {
   const isGroup = Array.isArray(images) && images.length > 0;
   if (!isGroup && !imageBase64) {
     return NextResponse.json({ error: '缺少图片数据' }, { status: 400 });
+  }
+
+  // ── 入参校验（先于限频与扣费）：类型 / 体积 / mimeType 白名单 ──
+  if (!isGroup) {
+    if (typeof imageBase64 !== 'string' || imageBase64.length > MAX_IMAGE_BASE64_LENGTH) {
+      return NextResponse.json({ error: '图片数据非法或过大' }, { status: 400 });
+    }
+    if (mimeType !== undefined && (typeof mimeType !== 'string' || !ALLOWED_MIME_TYPES.has(mimeType))) {
+      return NextResponse.json({ error: '仅支持 JPEG / PNG / WebP 图片' }, { status: 400 });
+    }
+  } else if (
+    images!.some(im => im && im.mimeType !== undefined && (typeof im.mimeType !== 'string' || !ALLOWED_MIME_TYPES.has(im.mimeType)))
+  ) {
+    return NextResponse.json({ error: '仅支持 JPEG / PNG / WebP 图片' }, { status: 400 });
+  }
+
+  // 按用户限频
+  const rate = rateLimitByKey('ai-analyze', auth.userId, ANALYZE_RATE_MAX, ANALYZE_RATE_WINDOW_MS);
+  if (!rate.allowed) {
+    return NextResponse.json(
+      { error: `请求太频繁了，请 ${rate.retryAfterSec} 秒后再试` },
+      { status: 429, headers: { 'Retry-After': String(rate.retryAfterSec) } }
+    );
   }
 
   // ── 组图（多图）分析：识别主品/附件品类 ──

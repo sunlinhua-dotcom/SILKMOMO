@@ -18,6 +18,74 @@ export interface BrandProfileData {
   defaultEngine?: string;
 }
 
+// ═══ 入参校验 ═══
+export const BRAND_LIMITS = {
+  name: 64,
+  idLike: 64, // defaultModelId / defaultBodyType / ... / lightingStyle / bgPreference
+  promptSuffix: 500,
+  paletteMaxItems: 12,
+  paletteItem: 32,
+} as const;
+
+const ID_LIKE_FIELDS = [
+  'defaultModelId', 'defaultBodyType', 'defaultSkinTone', 'lightingStyle',
+  'bgPreference', 'defaultModule', 'defaultAspectRatio', 'defaultEngine',
+] as const;
+
+export type BrandValidationResult =
+  | { ok: true; data: BrandProfileData }
+  | { ok: false; error: string };
+
+/**
+ * 校验并清洗 PUT /api/brand 的请求体：只保留已知字段，字符串字段做类型与长度上限校验。
+ * id 类字段（模型 id、体型、比例等）只允许字母数字及 _ - : . 且 ≤64 位，允许空串（表示未选）。
+ */
+export function validateBrandProfileInput(raw: unknown): BrandValidationResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: '请求体格式非法' };
+  }
+  const o = raw as Record<string, unknown>;
+  const data: BrandProfileData = {};
+
+  if (o.name !== undefined) {
+    if (typeof o.name !== 'string') return { ok: false, error: '品牌名称必须是字符串' };
+    const name = o.name.trim();
+    if (name.length > BRAND_LIMITS.name) return { ok: false, error: `品牌名称最多 ${BRAND_LIMITS.name} 个字符` };
+    if (name) data.name = name; // 空名称忽略，保留原值
+  }
+
+  for (const key of ID_LIKE_FIELDS) {
+    const v = o[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'string') return { ok: false, error: `${key} 必须是字符串` };
+    if (v.length > BRAND_LIMITS.idLike || !/^[\w:.\-]*$/.test(v)) {
+      return { ok: false, error: `${key} 取值非法` };
+    }
+    data[key] = v;
+  }
+
+  if (o.promptSuffix !== undefined) {
+    if (typeof o.promptSuffix !== 'string') return { ok: false, error: '提示词后缀必须是字符串' };
+    if (o.promptSuffix.length > BRAND_LIMITS.promptSuffix) {
+      return { ok: false, error: `提示词后缀最多 ${BRAND_LIMITS.promptSuffix} 个字符` };
+    }
+    data.promptSuffix = o.promptSuffix;
+  }
+
+  if (o.colorPalette !== undefined) {
+    const p = o.colorPalette;
+    if (
+      !Array.isArray(p) || p.length > BRAND_LIMITS.paletteMaxItems ||
+      p.some(c => typeof c !== 'string' || c.length > BRAND_LIMITS.paletteItem)
+    ) {
+      return { ok: false, error: '调色板格式非法' };
+    }
+    data.colorPalette = p as string[];
+  }
+
+  return { ok: true, data };
+}
+
 /**
  * 获取用户的默认品牌配置
  * 如果不存在，自动创建一个

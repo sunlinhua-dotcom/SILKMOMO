@@ -5,7 +5,7 @@
  */
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
-import { getDefaultBrandProfile, updateBrandProfile } from '@/lib/brand-memory';
+import { getDefaultBrandProfile, updateBrandProfile, validateBrandProfileInput } from '@/lib/brand-memory';
 
 export async function GET() {
   const auth = await getCurrentUser();
@@ -33,15 +33,20 @@ export async function PUT(req: Request) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return NextResponse.json({ error: '请求体格式非法' }, { status: 400 });
   }
-  // colorPalette 约定为 string[]；非数组值会污染存储（safeParseJSON 取回后类型不符），直接丢弃
-  if (body.colorPalette !== undefined && !Array.isArray(body.colorPalette)) {
-    delete body.colorPalette;
+  // 字段类型 / 长度校验（含 colorPalette 必须是 string[]），非法直接 400
+  const parsed = validateBrandProfileInput(body);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.error }, { status: 400 });
   }
 
-  const profile = await getDefaultBrandProfile(auth.userId);
-
-  await updateBrandProfile(auth.userId, profile.id, body);
-
-  const updated = await getDefaultBrandProfile(auth.userId);
-  return NextResponse.json({ success: true, profile: updated });
+  try {
+    const profile = await getDefaultBrandProfile(auth.userId);
+    await updateBrandProfile(auth.userId, profile.id, parsed.data);
+    const updated = await getDefaultBrandProfile(auth.userId);
+    return NextResponse.json({ success: true, profile: updated });
+  } catch (error) {
+    // 内部异常只进日志，不透传
+    console.error('保存品牌配置失败:', error);
+    return NextResponse.json({ error: '保存失败，请稍后重试' }, { status: 500 });
+  }
 }
