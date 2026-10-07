@@ -198,6 +198,86 @@ test('validateLoginInput：必须是字符串，超长拒绝', () => {
   assert.equal(v({ username: 'alice', password: 123 }).ok, false);
   assert.equal(v({ username: '', password: 'x' }).ok, false);
   assert.equal(v({ username: 'u'.repeat(65), password: 'x' }).ok, false);
-  assert.equal(v({ username: 'alice', password: 'p'.repeat(129) }).ok, false);
   assert.equal(v(null).ok, false);
+});
+
+test('validateLoginInput：登录密码上限只防滥用，超过注册上限的老密码仍能登录', () => {
+  const v = shared.validateLoginInput;
+  assert.ok(shared.LOGIN_PASSWORD_MAX > shared.PASSWORD_MAX);
+  assert.equal(v({ username: 'alice', password: 'p'.repeat(shared.PASSWORD_MAX + 1) }).ok, true);
+  assert.equal(v({ username: 'alice', password: 'p'.repeat(shared.LOGIN_PASSWORD_MAX) }).ok, true);
+  assert.equal(v({ username: 'alice', password: 'p'.repeat(shared.LOGIN_PASSWORD_MAX + 1) }).ok, false);
+  // 老账号可能是 6 位及更短的旧规则密码、或含不合规字符的用户名：登录不套注册规则
+  assert.equal(v({ username: 'old user.1', password: '123456' }).ok, true);
+  // 注册仍是 8–128
+  assert.equal(shared.validateRegisterInput({ username: 'alice', password: 'a1' + 'x'.repeat(127) }).ok, false);
+  assert.equal(shared.validateRegisterInput({ username: 'alice', password: 'a1' + 'x'.repeat(126) }).ok, true);
+});
+
+test('getUsernameIssue / getPasswordIssue 与服务端注册规则一致', () => {
+  const { getUsernameIssue: u, getPasswordIssue: p, validateRegisterInput: reg } = shared;
+  assert.equal(u(''), null);
+  for (const name of ['a', 'bad name', '中文名', 'x'.repeat(33)]) assert.ok(u(name), name);
+  for (const name of ['ab', 'alice_01', 'a-b', 'x'.repeat(32)]) assert.equal(u(name), null, name);
+  assert.equal(p(''), null);
+  for (const pw of ['abc12', 'abcdefgh', '12345678', 'a1' + 'x'.repeat(200)]) assert.ok(p(pw), pw.slice(0, 12));
+  assert.equal(p('abcd1234'), null);
+  // 前端判定与服务端判定逐项吻合，避免前端放行、后端又拒
+  for (const [user, pw] of [['alice', 'abcd1234'], ['a', 'abcd1234'], ['alice', 'abc123'], ['bad name', 'abcd1234'], ['alice', 'abcdefgh']]) {
+    assert.equal(!u(user) && !p(pw), reg({ username: user, password: pw }).ok, `${user}/${pw}`);
+  }
+});
+
+test('describeAuthFailure：区分 429 / 业务拒绝 / 服务端错误 / 非 JSON', () => {
+  const d = shared.describeAuthFailure;
+  // 429 后端文案已带秒数：原样
+  const a = d(429, { error: '请求过于频繁，请 12 秒后再试' }, '12');
+  assert.equal(a.kind, 'rate-limited');
+  assert.equal(a.message, '请求过于频繁，请 12 秒后再试');
+  assert.equal(a.retryAfterSec, 12);
+  // 文案没带秒数：用 Retry-After 补
+  assert.match(d(429, { error: '操作太快' }, '30').message, /请 30 秒后再试/);
+  // 429 非 JSON（网关限流页）
+  assert.match(d(429, null, '5').message, /请 5 秒后再试/);
+  assert.equal(d(429, null, null).kind, 'rate-limited');
+  // 400 / 401 显示后端 error
+  assert.deepEqual(d(401, { error: '用户名或密码错误' }, null), { kind: 'rejected', message: '用户名或密码错误' });
+  assert.equal(d(400, { error: '请求体解析失败' }, null).message, '请求体解析失败');
+  // 非 JSON 的 502 / 400 不能报成「网络错误」
+  const b = d(502, null, null);
+  assert.equal(b.kind, 'server');
+  assert.match(b.message, /502/);
+  assert.doesNotMatch(b.message, /网络/);
+  assert.equal(d(400, '<html>', null).kind, 'server');
+  assert.equal(d(500, { error: '登录失败，请稍后重试' }, null).message, '登录失败，请稍后重试');
+});
+
+test('postAuthJson：网络失败 / 非 JSON 响应 / 成功', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    const net = await shared.postAuthJson('/x', {});
+    assert.equal(net.ok, false);
+    assert.equal(net.failure.kind, 'network');
+
+    globalThis.fetch = async () => new Response('<html>Bad Gateway</html>', { status: 502 });
+    const bad = await shared.postAuthJson('/x', {});
+    assert.equal(bad.failure.kind, 'server');
+    assert.match(bad.failure.message, /502/);
+
+    globalThis.fetch = async () => new Response('not json', { status: 200 });
+    assert.equal((await shared.postAuthJson('/x', {})).failure.kind, 'server');
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: '稍后' }), { status: 429, headers: { 'Retry-After': '9' } });
+    const rl = await shared.postAuthJson('/x', {});
+    assert.equal(rl.failure.kind, 'rate-limited');
+    assert.equal(rl.failure.retryAfterSec, 9);
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: true, user: { username: 'a' } }), { status: 200 });
+    const ok = await shared.postAuthJson('/x', {});
+    assert.equal(ok.ok, true);
+    assert.equal(ok.data.user.username, 'a');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

@@ -1,38 +1,47 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import { Logo } from '@/components/Logo';
+import { Suspense, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { AuthAlert, AuthField, AuthShell, PasswordField } from '@/components/AuthShell';
 import { syncLocalWorkspaceForUser } from '@/lib/client-session';
+import { postAuthJson, safeNextPath } from '@/lib/auth-shared';
+import { refreshBalance } from '@/hooks/useBalance';
 
-export default function LoginPage() {
+const TAGLINE = 'AI 丝绸服装摄影平台';
+
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // proxy 重定向过来时带 ?next=<编码路径>；必须先过 safeNextPath，防开放重定向
+  const next = safeNextPath(searchParams.get('next'));
+  const registerHref = next === '/' ? '/register' : `/register?next=${encodeURIComponent(next)}`;
+
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const submitting = useRef(false);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting.current) return; // 防重复提交（按钮禁用之前的连点 / 回车连按）
+    submitting.current = true;
     setError('');
     setLoading(true);
 
+    let navigating = false;
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+      const result = await postAuthJson<{ user?: { username?: string } }>('/api/auth/login', {
+        username: username.trim(),
+        password,
       });
-
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || '登录失败');
+      if (!result.ok) {
+        setError(result.failure.message);
         return;
       }
 
       try {
-        await syncLocalWorkspaceForUser(data.user?.username || username);
+        await syncLocalWorkspaceForUser(result.data.user?.username || username.trim());
       } catch (workspaceError) {
         console.warn('登录后同步本地工作区失败:', workspaceError);
         await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
@@ -40,97 +49,80 @@ export default function LoginPage() {
         return;
       }
 
-      router.push('/');
+      // 登录成功后让全局余额 store 立即拿到新用户的数据（失败不影响跳转）
+      await refreshBalance().catch(() => {});
+      navigating = true;
+      router.replace(next);
       router.refresh();
-    } catch {
-      setError('网络错误，请稍后重试');
     } finally {
-      setLoading(false);
+      // 成功跳转期间保持禁用，避免页面还没切走时被再次提交
+      if (!navigating) {
+        submitting.current = false;
+        setLoading(false);
+      }
     }
   };
 
   return (
-    <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center px-4">
-      {/* 背景装饰 */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-[500px] h-[500px] rounded-full bg-gradient-to-br from-[var(--color-accent)]/5 to-transparent blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-[500px] h-[500px] rounded-full bg-gradient-to-tr from-[var(--color-accent)]/3 to-transparent blur-3xl" />
-      </div>
+    <AuthShell
+      tagline={TAGLINE}
+      title="登录账户"
+      switchPrompt="还没有账户？"
+      switchLabel="注册"
+      switchHref={registerHref}
+    >
+      <form onSubmit={handleLogin}>
+        <AuthAlert message={error} />
 
-      <div className="relative w-full max-w-md">
-        {/* Logo */}
-        <div className="text-center mb-8 animate-fade-in">
-          <div className="w-16 h-16 mx-auto mb-4 flex items-center justify-center">
-            <Logo width={64} height={64} />
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight">SILXINE</h1>
-          <p className="text-sm text-[var(--color-text-secondary)] mt-1">
-            AI 丝绸服装摄影平台
-          </p>
+        <div className="space-y-4">
+          <AuthField
+            label="用户名"
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            required
+            autoComplete="username"
+            inputMode="text"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="next"
+          />
+          {/* 登录页不设 minLength：老账号可能是 6 位或更短的旧规则密码 */}
+          <PasswordField
+            label="密码"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            autoComplete="current-password"
+            enterKeyHint="go"
+          />
         </div>
 
-        {/* 登录表单 */}
-        <form
-          onSubmit={handleLogin}
-          className="bg-[var(--color-surface)] rounded-2xl p-8 shadow-lg border border-[var(--color-border-light)] animate-fade-in-up"
+        <button
+          type="submit"
+          disabled={loading || !username.trim() || !password}
+          aria-busy={loading}
+          className="btn-primary w-full mt-6"
         >
-          <h2 className="text-lg font-semibold mb-6 text-center">登录账户</h2>
+          <span>{loading ? '登录中...' : '登录'}</span>
+        </button>
+      </form>
+    </AuthShell>
+  );
+}
 
-          {error && (
-            <div className="mb-4 p-3 rounded-xl bg-red-50 text-red-600 text-sm text-center">
-              {error}
-            </div>
-          )}
-
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
-                用户名
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="请输入用户名"
-                required
-                autoComplete="username"
-                className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20 outline-none transition-all text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1.5">
-                密码
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="请输入密码"
-                required
-                minLength={6}
-                autoComplete="current-password"
-                className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-accent)] focus:ring-2 focus:ring-[var(--color-accent)]/20 outline-none transition-all text-sm"
-              />
-            </div>
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading || !username || !password}
-            className="btn-primary w-full mt-6"
-          >
-            <span>{loading ? '登录中...' : '登录'}</span>
-          </button>
-
-          <p className="mt-4 text-center text-sm text-[var(--color-text-muted)]">
-            还没有账户？{' '}
-            <Link href="/register" className="text-[var(--color-accent)] hover:underline font-medium">
-              注册
-            </Link>
-          </p>
-        </form>
-      </div>
-    </div>
+export default function LoginPage() {
+  // useSearchParams 在 Next 16 的静态预渲染下必须包在 Suspense 里
+  return (
+    <Suspense
+      fallback={
+        <AuthShell tagline={TAGLINE} title="登录账户">
+          <div className="h-48" aria-busy="true" />
+        </AuthShell>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   );
 }

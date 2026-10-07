@@ -85,7 +85,13 @@ export function buildLoginRedirectPath(pathname: string, search: string = ''): s
 
 export const USERNAME_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 export const PASSWORD_MIN = 8;
+/** 注册 / 改密时的密码长度范围 */
 export const PASSWORD_MAX = 128;
+/**
+ * 登录时的密码长度上限：只防滥用（bcrypt 输入过长耗 CPU / 请求体膨胀），不套注册规则，
+ * 否则老账号若密码超过注册上限就再也登不上了。
+ */
+export const LOGIN_PASSWORD_MAX = 1024;
 export const NAME_MAX = 32;
 /** 登录时用户名长度上限（老账号可能不满足注册规则，所以登录只做宽松的长度限制） */
 export const LOGIN_USERNAME_MAX = 64;
@@ -104,7 +110,7 @@ export function validateLoginInput(body: unknown): ValidationResult<{ username: 
     return { ok: false, error: '用户名和密码格式不正确' };
   }
   if (!username || !password) return { ok: false, error: '请输入用户名和密码' };
-  if (username.length > LOGIN_USERNAME_MAX || password.length > PASSWORD_MAX) {
+  if (username.length > LOGIN_USERNAME_MAX || password.length > LOGIN_PASSWORD_MAX) {
     return { ok: false, error: '用户名或密码过长' };
   }
   return { ok: true, value: { username, password } };
@@ -137,4 +143,95 @@ export function validateRegisterInput(
     cleanName = trimmed || null;
   }
   return { ok: true, value: { username, password, name: cleanName } };
+}
+
+// ═══ 前端实时校验提示（与上面的服务端规则同源，不重复写正则） ═══
+
+/** 注册页用户名的即时提示；合法返回 null。空串不报错（由 required 负责） */
+export function getUsernameIssue(username: string): string | null {
+  if (!username) return null;
+  if (!/^[a-zA-Z0-9_-]*$/.test(username)) return '只能包含字母、数字、下划线和短横线';
+  if (username.length < 2) return '至少 2 个字符';
+  if (username.length > 32) return '最多 32 个字符';
+  return null;
+}
+
+/** 注册页密码的即时提示；合法返回 null。空串不报错 */
+export function getPasswordIssue(password: string): string | null {
+  if (!password) return null;
+  if (password.length < PASSWORD_MIN) return `至少 ${PASSWORD_MIN} 位，还差 ${PASSWORD_MIN - password.length} 位`;
+  if (password.length > PASSWORD_MAX) return `最多 ${PASSWORD_MAX} 位`;
+  if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) return '需要同时包含字母和数字';
+  return null;
+}
+
+// ═══ 前端请求结果解读 ═══
+
+export type AuthFailureKind = 'network' | 'server' | 'rejected' | 'rate-limited';
+export interface AuthFailure {
+  kind: AuthFailureKind;
+  message: string;
+  retryAfterSec?: number;
+}
+
+/**
+ * 把一次非 2xx 响应转成给用户看的文案。
+ * - 429：用后端 error，并读 Retry-After；后端文案里没带「秒」时补一句「请 N 秒后再试」
+ * - 4xx：后端 error 原样显示
+ * - 5xx 或响应体不是 JSON：「服务器暂时出错」（带状态码），不冒充成网络错误
+ */
+export function describeAuthFailure(
+  status: number,
+  body: unknown,
+  retryAfterHeader: string | null,
+): AuthFailure {
+  const o = body && typeof body === 'object' ? (body as Record<string, unknown>) : null;
+  const serverMsg = o && typeof o.error === 'string' && o.error.trim() ? o.error.trim() : null;
+  if (status === 429) {
+    const n = retryAfterHeader ? Math.ceil(Number(retryAfterHeader)) : NaN;
+    const retryAfterSec = Number.isFinite(n) && n > 0 ? n : undefined;
+    let message = serverMsg ?? '请求过于频繁';
+    if (retryAfterSec && !/秒|分钟/.test(message)) message = `${message}，请 ${retryAfterSec} 秒后再试`;
+    return { kind: 'rate-limited', message, retryAfterSec };
+  }
+  if (status >= 500) {
+    return { kind: 'server', message: serverMsg ?? `服务器暂时出错（${status}），请稍后重试` };
+  }
+  // 4xx 但响应体不是约定的 { error }：多半是网关 / 代理层返回的 HTML，别冒充网络错误
+  if (!serverMsg) return { kind: 'server', message: `请求未能完成（${status}），请稍后重试` };
+  return { kind: 'rejected', message: serverMsg };
+}
+
+export type AuthPostResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; failure: AuthFailure };
+
+/** POST JSON 到鉴权接口：区分网络失败 / 服务端错误 / 业务拒绝；响应体不是 JSON 也不抛 */
+export async function postAuthJson<T = Record<string, unknown>>(
+  url: string,
+  payload: unknown,
+): Promise<AuthPostResult<T>> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    return { ok: false, failure: { kind: 'network', message: '网络连接失败，请检查网络后重试' } };
+  }
+  let body: unknown = null;
+  try {
+    body = JSON.parse(await res.text());
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    return { ok: false, failure: describeAuthFailure(res.status, body, res.headers.get('Retry-After')) };
+  }
+  if (!body || typeof body !== 'object') {
+    return { ok: false, failure: { kind: 'server', message: `服务器响应异常（${res.status}），请稍后重试` } };
+  }
+  return { ok: true, data: body as T };
 }
