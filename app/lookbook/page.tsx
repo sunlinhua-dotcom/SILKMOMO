@@ -8,16 +8,27 @@ import { Logo } from '@/components/Logo';
 import { UserNav } from '@/components/UserNav';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { ImageUploader } from '@/components/ImageUploader';
+import { ContactAdmin } from '@/components/ContactAdmin';
+import { useToast } from '@/components/ui/Toast';
+import { useConfirm } from '@/components/ui/ConfirmDialog';
+import { refreshBalance, useBalance } from '@/hooks/useBalance';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
 import { GPTQualitySelector } from '@/components/GPTQualitySelector';
 import { MAX_TOTAL_GARMENTS } from '@/components/LookbookGarmentSlots';
 import { DEFAULT_BODY_TYPE, DEFAULT_SKIN_TONE, SCENE_OUTPUT_SIZES } from '@/lib/models';
 import { getGenerationCostFen, type GenerationQuality } from '@/lib/billing-constants';
 import type { CompressedImage } from '@/lib/image-compressor';
-import { db, migrateLegacyStylePackImages, prepareProjectImageSlot } from '@/lib/db';
+import {
+  db,
+  isStorageQuotaError,
+  migrateLegacyStylePackImages,
+  prepareProjectImageSlot,
+  STORAGE_FULL_MESSAGE,
+} from '@/lib/db';
 import {
   ModelFaceLibraryPanel,
   MODEL_FACE_BATCH_SIZE,
+  MODEL_FACE_PRICE_FEN,
   type ModelFaceJob,
   type ModelFacePagination,
   type ModelFaceRecord,
@@ -29,7 +40,19 @@ const PRODUCT_GROUP_MAX = 8;
 const PRODUCT_GROUP_IMAGE_MAX = 4;
 const MODEL_FACE_JOB_STORAGE_KEY = 'silkmomo:model-face-job:v1';
 const MODEL_FACE_POLL_INITIAL_MS = 2_000;
+const FACE_READ_FAILED = '选中的模特脸读取失败';
 const MODEL_FACE_POLL_MAX_MS = 12_000;
+// 自定义输出尺寸（单边 px）。后端 stream/route.ts 对 custom 只要求 >0 并换算成最接近的
+// 宽高比（gpt-image 只收固定尺寸、gemini 只收比例），所以上限不是服务端硬限；
+// 取预设里最大边 2400 之上的 4096（4K 档）作为合理上界，下限取 64 避免 0/个位数的无意义输入。
+const CUSTOM_SIZE_MIN = 64;
+const CUSTOM_SIZE_MAX = 4096;
+
+function validateCustomSize(w: number, h: number): string | null {
+  const bad = (v: number) => !Number.isInteger(v) || v < CUSTOM_SIZE_MIN || v > CUSTOM_SIZE_MAX;
+  if (bad(w) || bad(h)) return `自定义宽高需为 ${CUSTOM_SIZE_MIN}–${CUSTOM_SIZE_MAX} 之间的整数（px）`;
+  return null;
+}
 
 type LookbookMode = 'swap' | 'products';
 type ModelIdentityMode = 'fresh' | 'follow_scene';
@@ -71,6 +94,7 @@ function OutputSizeSelector({
   customWidth,
   customHeight,
   onCustomSizeChange,
+  customError,
   radioName,
 }: {
   value: string;
@@ -78,16 +102,17 @@ function OutputSizeSelector({
   customWidth: number;
   customHeight: number;
   onCustomSizeChange: (w: number, h: number) => void;
+  customError: string | null;
   radioName: string;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" role="radiogroup" aria-label="输出尺寸">
       {SCENE_OUTPUT_SIZES.map((size) => (
         <label
           key={size.id}
-          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all duration-200 ${
+          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all duration-200 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-strong ${
             value === size.id
-              ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.05)]'
+              ? 'border-brand bg-brand-soft'
               : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
           }`}
         >
@@ -100,37 +125,56 @@ function OutputSizeSelector({
             className="sr-only"
           />
           <div className={`flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
-            value === size.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
+            value === size.id ? 'border-brand-strong' : 'border-[var(--color-border)]'
           }`}>
-            {value === size.id && <div className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />}
+            {value === size.id && <div className="w-2 h-2 rounded-full bg-brand-strong" />}
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <span className="text-sm font-medium text-[var(--color-text)]">{size.label}</span>
             {size.sublabel && <span className="text-xs text-[var(--color-text-muted)] ml-2">{size.sublabel}</span>}
           </div>
           {size.id !== 'custom' && (
-            <span className="text-xs text-[var(--color-text-muted)] font-mono">{size.width}×{size.height}</span>
+            <span className="num text-xs text-[var(--color-text-muted)] font-mono">{size.width}×{size.height}</span>
           )}
         </label>
       ))}
       {value === 'custom' && (
-        <div className="mt-3 flex items-center gap-3 p-3 bg-[var(--color-background)] rounded-xl">
-          <input
-            type="number"
-            value={customWidth}
-            onChange={(e) => onCustomSizeChange(parseInt(e.target.value) || 0, customHeight)}
-            placeholder="宽"
-            className="w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
-          />
-          <span className="text-[var(--color-text-muted)] text-sm font-medium">×</span>
-          <input
-            type="number"
-            value={customHeight}
-            onChange={(e) => onCustomSizeChange(customWidth, parseInt(e.target.value) || 0)}
-            placeholder="高"
-            className="w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
-          />
-          <span className="text-xs text-[var(--color-text-muted)]">px</span>
+        <div className="mt-3 p-3 bg-[var(--color-background)] rounded-xl">
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              inputMode="numeric"
+              min={CUSTOM_SIZE_MIN}
+              max={CUSTOM_SIZE_MAX}
+              step={1}
+              value={customWidth || ''}
+              onChange={(e) => onCustomSizeChange(parseInt(e.target.value) || 0, customHeight)}
+              placeholder="宽"
+              aria-label="自定义宽度（px）"
+              aria-invalid={customError !== null}
+              aria-describedby={customError ? 'custom-size-error' : undefined}
+              className="min-w-0 w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2.5 bg-[var(--color-surface)] focus:outline-none focus:border-brand-strong aria-[invalid=true]:border-danger"
+            />
+            <span className="text-[var(--color-text-muted)] text-sm font-medium" aria-hidden="true">×</span>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={CUSTOM_SIZE_MIN}
+              max={CUSTOM_SIZE_MAX}
+              step={1}
+              value={customHeight || ''}
+              onChange={(e) => onCustomSizeChange(customWidth, parseInt(e.target.value) || 0)}
+              placeholder="高"
+              aria-label="自定义高度（px）"
+              aria-invalid={customError !== null}
+              aria-describedby={customError ? 'custom-size-error' : undefined}
+              className="min-w-0 w-full text-sm text-center border border-[var(--color-border-light)] rounded-lg px-3 py-2.5 bg-[var(--color-surface)] focus:outline-none focus:border-brand-strong aria-[invalid=true]:border-danger"
+            />
+            <span className="text-xs text-[var(--color-text-muted)]">px</span>
+          </div>
+          {customError && (
+            <p id="custom-size-error" role="alert" className="mt-2 text-xs text-danger">{customError}</p>
+          )}
         </div>
       )}
     </div>
@@ -150,17 +194,17 @@ function ModelIdentitySelector({
   freshContent?: ReactNode;
 }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="模特身份">
       {MODEL_IDENTITY_OPTIONS.map((option) => (
         <div
           key={option.id}
           className={`h-full rounded-xl border transition-all duration-200 ${
             value === option.id
-              ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.05)]'
+              ? 'border-brand bg-brand-soft'
               : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
           }`}
         >
-          <label className="flex cursor-pointer flex-col gap-2 p-4">
+          <label className="flex cursor-pointer flex-col gap-2 rounded-xl p-4 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-strong">
             <input
               type="radio"
               name={radioName}
@@ -171,9 +215,9 @@ function ModelIdentitySelector({
             />
             <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
               <span className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 ${
-                value === option.id ? 'border-[var(--color-accent)]' : 'border-[var(--color-border)]'
+                value === option.id ? 'border-brand-strong' : 'border-[var(--color-border)]'
               }`}>
-                {value === option.id && <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />}
+                {value === option.id && <span className="h-2 w-2 rounded-full bg-brand-strong" />}
               </span>
               {option.label}
             </span>
@@ -194,18 +238,11 @@ function ModelIdentitySelector({
 // ===== [D] 脸库面板（ModelFaceLibraryPanel）已搬到 components/ModelFaceLibraryPanel.tsx =====
 
 export default function LookbookStudio() {
-  // ── 登录 / 余额 ──
-  const [currentUser, setCurrentUser] = useState<{ balanceFen: number } | null>(null);
-  const [authChecked, setAuthChecked] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    fetch('/api/auth/me')
-      .then(r => r.json())
-      .then(d => { if (alive) { if (d.user) setCurrentUser(d.user); setAuthChecked(true); } })
-      .catch(() => { if (alive) setAuthChecked(true); });
-    return () => { alive = false; };
-  }, []);
+  // ── 登录 / 余额（useBalance 模块级共享 store，扣费后用 refreshBalance 刷新） ──
+  const toast = useToast();
+  const confirm = useConfirm();
+  const { balanceFen, status: balanceStatus } = useBalance();
+  const loggedIn = balanceFen !== null;
 
   // ── 输入 state（与首页产品图工作台完全隔离：独立路由=独立组件树） ──
   const [mode, setMode] = useState<LookbookMode>('swap');
@@ -218,6 +255,9 @@ export default function LookbookStudio() {
   const [faceJob, setFaceJob] = useState<ModelFaceJob | null>(null);
   const [faceError, setFaceError] = useState<string | null>(null);
   const lastSyncedCompletedCount = useRef(0);
+  const facePageRef = useRef(1); // 脸库当前页：改名 / 星标 / 删除后留在原页
+  const faceSubmitLockRef = useRef(false); // 同步锁：确认框期间与请求期间都不许再触发扣费提交
+  const navigatingRef = useRef(false); // 已成功建好任务、正在跳转：不触发离开提醒
   const [lookbookImages, setLookbookImages] = useState<CompressedImage[]>([]); // → scene_ref
   const [groupGarments, setGroupGarments] = useState<Record<string, CompressedImage[]>>({}); // 品类→图 → product
   const [accessoryImages, setAccessoryImages] = useState<CompressedImage[]>([]);
@@ -231,6 +271,7 @@ export default function LookbookStudio() {
   const [sceneCustomH, setSceneCustomH] = useState(1350);
   const [projectName, setProjectName] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [prepareError, setPrepareError] = useState<string | null>(null);
 
   const groupGarmentImages = Object.values(groupGarments).flat();
   const productReferenceImages = groupGarments.other || [];
@@ -259,21 +300,56 @@ export default function LookbookStudio() {
     validProductGroups.every(group => group.images.length >= 1 && group.images.length <= PRODUCT_GROUP_IMAGE_MAX);
   const targetCount = mode === 'products' ? validProductGroups.length : lookbookImages.length;
   const pricePerImageFen = getGenerationCostFen(selectedEngine, selectedQuality);
-  const canGenerate = mode === 'products'
+  const customSizeError = sceneOutputSize === 'custom' ? validateCustomSize(sceneCustomW, sceneCustomH) : null;
+  const canGenerate = (mode === 'products'
     ? singleSceneOk && productGroupsOk
-    : lookbookOk && garmentsOk;
+    : lookbookOk && garmentsOk) && customSizeError === null;
   const totalCostFen = Math.max(1, targetCount) * pricePerImageFen;
-  const isBalanceSufficient = currentUser ? currentUser.balanceFen >= totalCostFen : false;
-  const diffYuan = currentUser ? ((totalCostFen - currentUser.balanceFen) / 100).toFixed(2) : '0.00';
+  const isBalanceSufficient = balanceFen !== null ? balanceFen >= totalCostFen : false;
+  const diffYuan = balanceFen !== null ? ((totalCostFen - balanceFen) / 100).toFixed(2) : '0.00';
+
+  // ── 离开页面提醒：已上传图片或正在提交时，关标签页 / 刷新 / 地址栏跳转前让浏览器确认 ──
+  // （站内 <Link> 的客户端路由不触发 beforeunload，这里管不到。）
+  const hasUnsavedWork =
+    isGenerating ||
+    lookbookImages.length > 0 ||
+    groupGarmentImages.length > 0 ||
+    accessoryImages.length > 0 ||
+    singleSceneImages.length > 0 ||
+    productGroups.some(group => group.images.length > 0);
+  useEffect(() => {
+    if (!hasUnsavedWork) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (navigatingRef.current) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [hasUnsavedWork]);
 
   const refreshModelFaces = useCallback(async (page = 1) => {
-    const res = await fetch(`/api/model-faces?page=${page}`);
-    if (!res.ok) throw new Error('脸库读取失败');
-    const data = await res.json();
-    const faces = Array.isArray(data.faces) ? data.faces as ModelFaceRecord[] : [];
-    setFaceCandidates(faces);
-    if (data.pagination) setFacePagination(data.pagination as ModelFacePagination);
+    let target = page;
+    for (;;) {
+      const res = await fetch(`/api/model-faces?page=${target}`);
+      if (!res.ok) throw new Error('脸库读取失败');
+      const data = await res.json();
+      const faces = Array.isArray(data.faces) ? data.faces as ModelFaceRecord[] : [];
+      const pagination = data.pagination as ModelFacePagination | undefined;
+      // 当前页被删空（或总页数缩小）：退一页再取，别停在空白页
+      if (faces.length === 0 && target > 1) {
+        target = pagination && pagination.totalPages >= 1
+          ? Math.min(target - 1, pagination.totalPages)
+          : target - 1;
+        continue;
+      }
+      facePageRef.current = pagination?.page ?? target;
+      setFaceCandidates(faces);
+      if (pagination) setFacePagination(pagination);
+      return;
+    }
   }, []);
+  const refreshCurrentFacePage = () => refreshModelFaces(facePageRef.current);
 
   const pollModelFaceJob = useCallback(async (jobId: string) => {
     const res = await fetch(`/api/model-face/jobs/${jobId}`);
@@ -282,15 +358,14 @@ export default function LookbookStudio() {
     const job = data.job as ModelFaceJob;
     setFaceJob(job);
     setFaceError(job.error || null);
-    if (typeof data.balanceFen === 'number') {
-      setCurrentUser(current => current ? { ...current, balanceFen: data.balanceFen } : current);
-    }
     if (job.completedCount > lastSyncedCompletedCount.current) {
       await refreshModelFaces(1);
       lastSyncedCompletedCount.current = job.completedCount;
+      void refreshBalance();
     }
     if (job.status === 'completed' || job.status === 'failed') {
       try { localStorage.removeItem(MODEL_FACE_JOB_STORAGE_KEY); } catch { /* storage may be disabled */ }
+      void refreshBalance();
     }
     return job;
   }, [refreshModelFaces]);
@@ -369,26 +444,62 @@ export default function LookbookStudio() {
     };
   }, [modelIdentityMode, faceJobId, facesLoading, pollModelFaceJob]);
 
+  const handleFacePageChange = (page: number) => {
+    refreshModelFaces(page).catch(() => reportFaceError('脸库翻页失败，请稍后重试'));
+  };
+
+  const reportFaceError = (message: string) => {
+    setFaceError(message);
+    toast.error(message);
+  };
+
   const submitFaceJob = async (body: { count: number } | { resumeJobId: string }) => {
-    if (facesLoading) return;
-    setFaceError(null);
-    if ('count' in body) lastSyncedCompletedCount.current = 0;
-    const res = await fetch('/api/model-face', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (data.jobId) {
-        try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
-        await pollModelFaceJob(data.jobId).catch(() => undefined);
+    if (facesLoading || faceSubmitLockRef.current) return;
+    // 锁从确认框弹出开始就占着，连点不会弹出多个确认、更不会重复扣费
+    faceSubmitLockRef.current = true;
+    try {
+      if ('count' in body) {
+        const unitFen = MODEL_FACE_PRICE_FEN;
+        const ok = await confirm({
+          title: `再出 ${body.count} 张模特脸？`,
+          message: `将生成 ${body.count} 张虚构模特脸，每张 ¥${(unitFen / 100).toFixed(2)}，共 ¥${((unitFen * body.count) / 100).toFixed(2)}，从账户余额扣除。`,
+          confirmText: '确认生成',
+        });
+        if (!ok) return;
+        lastSyncedCompletedCount.current = 0;
       }
-      setFaceError(data.error || '模特脸任务创建失败');
-      return;
+      setFaceError(null);
+      let res: Response;
+      try {
+        res = await fetch('/api/model-face', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch {
+        reportFaceError('网络异常，模特脸任务没有创建成功，请检查网络后重试');
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data.jobId) {
+          try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
+          await pollModelFaceJob(data.jobId).catch(() => undefined);
+        }
+        reportFaceError(data.error || '模特脸任务创建失败');
+        return;
+      }
+      try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
+      void refreshBalance();
+      try {
+        await pollModelFaceJob(data.jobId);
+      } catch {
+        // 任务已在服务端创建（jobId 已落本地），只是状态暂时读不到：刷新页面会自动接上
+        reportFaceError('任务已创建，但状态暂时读取失败；刷新页面后会自动接上进度');
+      }
+    } finally {
+      faceSubmitLockRef.current = false;
     }
-    try { localStorage.setItem(MODEL_FACE_JOB_STORAGE_KEY, data.jobId); } catch { /* storage may be disabled */ }
-    await pollModelFaceJob(data.jobId);
   };
 
   const handleGenerateFaces = () => submitFaceJob({ count: MODEL_FACE_BATCH_SIZE });
@@ -402,39 +513,42 @@ export default function LookbookStudio() {
         body: JSON.stringify(patch),
       });
       if (!res.ok) throw new Error('模特脸更新失败');
-      await refreshModelFaces();
+      await refreshCurrentFacePage();
     } catch {
-      setFaceError('模特脸更新失败，请稍后重试');
+      reportFaceError('模特脸更新失败，请稍后重试');
     }
   };
 
+  // 删除前的确认由 ModelFaceLibraryPanel 里的 useConfirm 负责
   const deleteModelFace = async (id: string) => {
-    if (!window.confirm('确定从御用脸库删除这张脸吗？')) return;
     try {
       const res = await fetch(`/api/model-faces/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('模特脸删除失败');
       if (chosenFaceId === id) setChosenFaceId(null);
-      await refreshModelFaces();
+      await refreshCurrentFacePage();
+      toast.success('已从脸库删除');
     } catch {
-      setFaceError('模特脸删除失败，请稍后重试');
+      reportFaceError('模特脸删除失败，请稍后重试');
     }
   };
 
   // ── 生成：写同一 SilkMomoDB 再跳 /task/[id]（复用已建好的组图 SSE 内核） ──
   const handleGenerate = async () => {
-    if (!canGenerate || isGenerating || !currentUser) return;
+    if (!canGenerate || isGenerating || !loggedIn) return;
     if (!isBalanceSufficient) return;
     setIsGenerating(true);
+    setPrepareError(null);
+    let rollbackProjectId: number | null = null;
     try {
       await migrateLegacyStylePackImages();
       let original: { image: string; mimeType: string } | null = null;
       if (modelIdentityMode === 'fresh' && chosenFaceId) {
         const faceRes = await fetch(`/api/model-faces/${chosenFaceId}`);
-        if (!faceRes.ok) throw new Error('选中的模特脸读取失败');
+        if (!faceRes.ok) throw new Error(FACE_READ_FAILED);
         original = await faceRes.json() as { image: string; mimeType: string };
       }
       const productModeLabels = validProductGroups.map((group, index) => group.label.trim() || `产品 ${index + 1}`);
-      const projectId = await db.projects.add({
+      const projectId = (await db.projects.add({
         createdAt: new Date(),
         updatedAt: new Date(),
         status: 'pending',
@@ -460,7 +574,8 @@ export default function LookbookStudio() {
             ),
         customWidth: sceneOutputSize === 'custom' ? sceneCustomW : undefined,
         customHeight: sceneOutputSize === 'custom' ? sceneCustomH : undefined,
-      });
+      })) as number;
+      rollbackProjectId = projectId;
 
       await prepareProjectImageSlot(projectId as number);
 
@@ -500,21 +615,46 @@ export default function LookbookStudio() {
         }
       }
 
+      navigatingRef.current = true; // 跳转是预期行为，别弹离开提醒
       window.location.href = `/task/${projectId}`;
     } catch (e) {
       console.error('组图生成准备失败:', e);
+      // 回滚已写入的 pending 项目及其图片，免得任务列表里留下写了一半的空任务
+      if (rollbackProjectId !== null) {
+        const orphanId = rollbackProjectId;
+        try {
+          await db.images.where('projectId').equals(orphanId).delete();
+          await db.projects.delete(orphanId);
+        } catch (cleanupError) {
+          console.error('回滚未完成的组图项目失败:', cleanupError);
+        }
+      }
+      const message = isStorageQuotaError(e)
+        ? STORAGE_FULL_MESSAGE
+        : e instanceof Error && e.message === FACE_READ_FAILED
+          ? '选中的模特脸读取失败，请检查网络后重试，或重新选择模特脸'
+          : '生成准备失败：图片没能写入浏览器存储，或网络异常。你的图片还在页面上，请重试一次';
+      setPrepareError(message);
+      toast.error(message);
       setIsGenerating(false);
     }
   };
 
-  // ── 未登录兜底 ──
-  if (authChecked && !currentUser) {
+  // ── 未登录 / 余额读取失败兜底 ──
+  if (balanceStatus === 'unauthenticated' || balanceStatus === 'error') {
+    const failed = balanceStatus === 'error';
     return (
       <div className="min-h-screen bg-[var(--color-background)] flex items-center justify-center p-6">
         <div className="text-center space-y-4">
-          <Sparkles className="w-8 h-8 text-[var(--color-accent)] mx-auto" aria-hidden="true" />
-          <p className="text-sm text-[var(--color-text-secondary)]">请先登录后使用「组图·换装」</p>
-          <Link href="/login" className="inline-block btn-primary px-6 py-2.5 text-sm">去登录</Link>
+          <Sparkles className="w-8 h-8 text-brand mx-auto" aria-hidden="true" />
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            {failed ? '账户信息读取失败，请检查网络后重试' : '请先登录后使用「组图·换装」'}
+          </p>
+          {failed ? (
+            <button type="button" onClick={() => { void refreshBalance(); }} className="inline-block btn-primary px-6 py-2.5 text-sm">重新加载</button>
+          ) : (
+            <Link href="/login" className="inline-block btn-primary px-6 py-2.5 text-sm">去登录</Link>
+          )}
         </div>
       </div>
     );
@@ -569,7 +709,7 @@ export default function LookbookStudio() {
               onClick={() => setMode(item.id)}
               className={`rounded-xl px-3 py-3 text-xs sm:text-sm font-medium transition-colors ${
                 mode === item.id
-                  ? 'bg-[var(--color-accent)] text-white shadow-sm'
+                  ? 'bg-brand-strong text-white shadow-sm'
                   : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-background)]'
               }`}
             >
@@ -581,7 +721,7 @@ export default function LookbookStudio() {
         {mode === 'swap' ? (
           <>
             {/* ① 产品参考图 */}
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-brand/25">
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div>
                   <h3 className="text-sm font-semibold text-[var(--color-text)]">① 上传产品参考图</h3>
@@ -590,7 +730,7 @@ export default function LookbookStudio() {
                   </p>
                 </div>
                 {productReferenceImages.length > 0 && (
-                  <span className="shrink-0 text-xs text-[var(--color-accent)] font-medium tabular-nums">
+                  <span className="shrink-0 text-xs text-brand-strong font-medium tabular-nums">
                     {productReferenceImages.length}/{MAX_TOTAL_GARMENTS} 张
                   </span>
                 )}
@@ -605,10 +745,10 @@ export default function LookbookStudio() {
                 variant="gold"
               />
               {groupGarmentImages.length === 0 && (
-                <p className="mt-2 text-xs text-amber-600">请至少上传一张产品参考图。</p>
+                <p className="mt-2 text-xs text-warning">请至少上传一张产品参考图。</p>
               )}
               {groupGarmentImages.length > MAX_TOTAL_GARMENTS && (
-                <p className="mt-2 text-xs text-amber-600">产品参考图最多 {MAX_TOTAL_GARMENTS} 张，请减少后再生成。</p>
+                <p className="mt-2 text-xs text-warning">产品参考图最多 {MAX_TOTAL_GARMENTS} 张，请减少后再生成。</p>
               )}
             </div>
 
@@ -616,7 +756,7 @@ export default function LookbookStudio() {
             <div
               className={`bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border transition-opacity ${
                 sceneUploadEnabled
-                  ? 'border-[rgba(201,168,108,0.2)]'
+                  ? 'border-brand/25'
                   : 'border-[var(--color-border-light)] opacity-60'
               }`}
               aria-disabled={!sceneUploadEnabled}
@@ -629,7 +769,7 @@ export default function LookbookStudio() {
                   </p>
                 </div>
                 {lookbookImages.length > 0 && (
-                  <span className="shrink-0 text-xs text-[var(--color-accent)] font-medium tabular-nums">
+                  <span className="shrink-0 text-xs text-brand-strong font-medium tabular-nums">
                     已传 {lookbookImages.length} 张
                   </span>
                 )}
@@ -646,12 +786,12 @@ export default function LookbookStudio() {
                     variant="gold"
                   />
                   {lookbookImages.length > 0 && (
-                    <p className="mt-3 text-xs font-medium text-[var(--color-accent)]">
+                    <p className="mt-3 text-xs font-medium text-brand-strong">
                       共将生成 {lookbookImages.length} 张（= 场景主图数量）
                     </p>
                   )}
                   {lookbookImages.length > LOOKBOOK_MAX && (
-                    <p className="mt-2 text-xs text-amber-600">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
+                    <p className="mt-2 text-xs text-warning">最多 {LOOKBOOK_MAX} 张，请减少后再生成。</p>
                   )}
                 </>
               ) : (
@@ -674,14 +814,14 @@ export default function LookbookStudio() {
                     job={faceJob}
                     loading={facesLoading}
                     error={faceError}
-                    balanceFen={currentUser?.balanceFen ?? null}
+                    balanceFen={balanceFen}
                     onChoose={setChosenFaceId}
                     onGenerate={handleGenerateFaces}
                     onResume={handleResumeFaceJob}
                     onUpdate={updateModelFace}
                     onDelete={deleteModelFace}
                     pagination={facePagination}
-                    onPageChange={(page) => { void refreshModelFaces(page); }}
+                    onPageChange={handleFacePageChange}
                   />
                 )}
               />
@@ -710,17 +850,18 @@ export default function LookbookStudio() {
                 customWidth={sceneCustomW}
                 customHeight={sceneCustomH}
                 onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
+                customError={customSizeError}
                 radioName="swapOutputSize"
               />
             </div>
           </>
         ) : (
           <>
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)]">
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-brand/25">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-[var(--color-text)]">① 场景参考图</h3>
                 {singleSceneImages.length === 1 && (
-                  <span className="text-xs text-[var(--color-accent)] font-medium">同一场景将复用到每个产品组</span>
+                  <span className="text-xs text-brand-strong font-medium">同一场景将复用到每个产品组</span>
                 )}
               </div>
               <ImageUploader
@@ -734,7 +875,7 @@ export default function LookbookStudio() {
               />
             </div>
 
-            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-[rgba(201,168,108,0.2)] space-y-4">
+            <div className="bg-[var(--color-surface)] rounded-2xl p-5 sm:p-6 border border-brand/25 space-y-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-semibold text-[var(--color-text)]">② 产品组</h3>
@@ -754,13 +895,13 @@ export default function LookbookStudio() {
                       onChange={(e) => updateProductGroup(group.id, { label: e.target.value })}
                       placeholder={`产品 ${index + 1} 组名（选填）`}
                       aria-label={`产品 ${index + 1} 组名`}
-                      className="flex-1 text-sm border border-[var(--color-border-light)] rounded-xl px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+                      className="flex-1 text-sm border border-[var(--color-border-light)] rounded-xl px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-brand-strong"
                     />
                     <button
                       type="button"
                       onClick={() => removeProductGroup(group.id)}
                       disabled={productGroups.length <= 1}
-                      className="w-10 h-10 inline-flex items-center justify-center rounded-xl border border-[var(--color-border-light)] text-[var(--color-text-muted)] hover:text-red-500 hover:border-red-200 disabled:opacity-40 disabled:hover:text-[var(--color-text-muted)] disabled:hover:border-[var(--color-border-light)]"
+                      className="w-10 h-10 inline-flex items-center justify-center rounded-xl border border-[var(--color-border-light)] text-[var(--color-text-muted)] hover:text-danger hover:border-danger disabled:opacity-40 disabled:hover:text-[var(--color-text-muted)] disabled:hover:border-[var(--color-border-light)]"
                       aria-label={`删除产品 ${index + 1}`}
                     >
                       <Trash2 className="w-4 h-4" aria-hidden="true" />
@@ -776,7 +917,7 @@ export default function LookbookStudio() {
                     variant="gold"
                   />
                   {group.images.length > PRODUCT_GROUP_IMAGE_MAX && (
-                    <p className="text-xs text-amber-600">每组最多 {PRODUCT_GROUP_IMAGE_MAX} 张，请减少后再生成。</p>
+                    <p className="text-xs text-warning">每组最多 {PRODUCT_GROUP_IMAGE_MAX} 张，请减少后再生成。</p>
                   )}
                 </div>
               ))}
@@ -785,14 +926,14 @@ export default function LookbookStudio() {
                 type="button"
                 onClick={addProductGroup}
                 disabled={productGroups.length >= PRODUCT_GROUP_MAX}
-                className="w-full flex items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:text-[var(--color-text-secondary)]"
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-dashed border-[var(--color-border)] px-4 py-3 text-sm text-[var(--color-text-secondary)] hover:border-brand-strong hover:text-brand-strong transition-colors disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:text-[var(--color-text-secondary)]"
               >
                 <Plus className="w-4 h-4" aria-hidden="true" />
                 添加产品组
               </button>
 
               {!productGroupsOk && (
-                <p className="text-xs text-amber-600">请至少保留 1 个产品组；每组上传 1-4 张，最多 {PRODUCT_GROUP_MAX} 组。</p>
+                <p className="text-xs text-warning">请至少保留 1 个产品组；每组上传 1-4 张，最多 {PRODUCT_GROUP_MAX} 组。</p>
               )}
             </div>
 
@@ -809,14 +950,14 @@ export default function LookbookStudio() {
                     job={faceJob}
                     loading={facesLoading}
                     error={faceError}
-                    balanceFen={currentUser?.balanceFen ?? null}
+                    balanceFen={balanceFen}
                     onChoose={setChosenFaceId}
                     onGenerate={handleGenerateFaces}
                     onResume={handleResumeFaceJob}
                     onUpdate={updateModelFace}
                     onDelete={deleteModelFace}
                     pagination={facePagination}
-                    onPageChange={(page) => { void refreshModelFaces(page); }}
+                    onPageChange={handleFacePageChange}
                   />
                 )}
               />
@@ -830,6 +971,7 @@ export default function LookbookStudio() {
                 customWidth={sceneCustomW}
                 customHeight={sceneCustomH}
                 onCustomSizeChange={(w, h) => { setSceneCustomW(w); setSceneCustomH(h); }}
+                customError={customSizeError}
                 radioName="productsOutputSize"
               />
             </div>
@@ -855,7 +997,7 @@ export default function LookbookStudio() {
           onChange={(e) => setProjectName(e.target.value)}
           placeholder="项目名称（选填）…"
           aria-label="项目名称"
-          className="w-full text-sm border-0 border-b border-[var(--color-border-light)] focus:border-[var(--color-accent)] focus:ring-0 px-2 py-3 bg-transparent transition-colors"
+          className="w-full text-sm border-0 border-b border-[var(--color-border-light)] focus:border-brand-strong focus:ring-0 px-2 py-3 bg-transparent transition-colors"
         />
 
         {/* ⑦ 摘要 + 生成 CTA */}
@@ -872,53 +1014,67 @@ export default function LookbookStudio() {
               <>已上传 {validProductGroups.length} 个产品组 · 将生成 {validProductGroups.length} 张</>
             )}
           </p>
-          <button
-            onClick={isBalanceSufficient ? handleGenerate : undefined}
-            disabled={isGenerating || !currentUser || (isBalanceSufficient && !canGenerate)}
-            className={`w-full flex items-center justify-center gap-2 rounded-xl py-4 text-sm font-medium transition-all duration-300 ${
-              !isBalanceSufficient && currentUser
-                ? 'bg-gradient-to-r from-gray-400 to-[var(--color-accent)]/80 text-white'
-                : 'btn-primary'
-            } ${(isGenerating || (isBalanceSufficient && !canGenerate)) ? 'opacity-60 cursor-not-allowed' : ''}`}
-          >
-            {isGenerating ? (
-              <>
-                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                <span>准备中…</span>
-              </>
-            ) : !currentUser ? (
-              <span>加载中…</span>
-            ) : !isBalanceSufficient ? (
-              <Link href="/billing" className="flex items-center gap-2">
-                <span>余额不足（差 ¥{diffYuan}）· 去充值</span>
+          {loggedIn && !isBalanceSufficient ? (
+            <>
+              <Link
+                href="/billing"
+                className="flex w-full min-h-12 items-center justify-center gap-2 rounded-xl bg-brand-strong px-4 py-4 text-sm font-medium text-white transition-opacity hover:opacity-90"
+              >
+                <span className="num">余额不足（差 ¥{diffYuan}）· 去充值</span>
               </Link>
-            ) : (
-              <>
-                <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
-                <span>
-                  {mode === 'products'
-                    ? `生成 ${validProductGroups.length} 张同景换品图`
-                    : `生成 ${lookbookImages.length} 张换装图`}
-                  （¥{(totalCostFen / 100).toFixed(2)}）
-                </span>
-              </>
-            )}
-          </button>
-          {!canGenerate && currentUser && isBalanceSufficient && (
+              <div className="mt-1 text-center">
+                <ContactAdmin variant="inline" note="或联系管理员充值：" />
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={isGenerating || !loggedIn || !canGenerate}
+              className={`w-full flex items-center justify-center gap-2 rounded-xl py-4 text-sm font-medium transition-all duration-300 btn-primary ${
+                (isGenerating || !canGenerate) ? 'opacity-60 cursor-not-allowed' : ''
+              }`}
+            >
+              {isGenerating ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>准备中…</span>
+                </>
+              ) : !loggedIn ? (
+                <span>加载中…</span>
+              ) : (
+                <>
+                  <Wand2 className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
+                  <span>
+                    {mode === 'products'
+                      ? `生成 ${validProductGroups.length} 张同景换品图`
+                      : `生成 ${lookbookImages.length} 张换装图`}
+                    <span className="num">（¥{(totalCostFen / 100).toFixed(2)}）</span>
+                  </span>
+                </>
+              )}
+            </button>
+          )}
+          {prepareError && (
+            <p role="alert" className="mt-2 text-center text-xs text-danger">{prepareError}</p>
+          )}
+          {!canGenerate && loggedIn && isBalanceSufficient && (
             <p className="text-[11px] text-[var(--color-text-muted)] text-center mt-2">
-              {mode === 'products'
-                ? singleSceneImages.length === 0
-                  ? '先上传 1 张场景参考图'
-                  : validProductGroups.length === 0
-                    ? '至少添加 1 个产品组'
-                    : '每个产品组需上传 1-4 张产品图'
-                : groupGarmentImages.length === 0
-                  ? '先上传产品参考图'
-                  : lookbookImages.length === 0
-                    ? '再上传场景主图'
-                    : lookbookImages.length > LOOKBOOK_MAX
-                      ? `lookbook 最多 ${LOOKBOOK_MAX} 张`
-                      : `主品图合计最多 ${MAX_TOTAL_GARMENTS} 张`}
+              {customSizeError
+                ? customSizeError
+                : mode === 'products'
+                  ? singleSceneImages.length === 0
+                    ? '先上传 1 张场景参考图'
+                    : validProductGroups.length === 0
+                      ? '至少添加 1 个产品组'
+                      : '每个产品组需上传 1-4 张产品图'
+                  : groupGarmentImages.length === 0
+                    ? '先上传产品参考图'
+                    : lookbookImages.length === 0
+                      ? '再上传场景主图'
+                      : lookbookImages.length > LOOKBOOK_MAX
+                        ? `lookbook 最多 ${LOOKBOOK_MAX} 张`
+                        : `主品图合计最多 ${MAX_TOTAL_GARMENTS} 张`}
             </p>
           )}
         </div>
