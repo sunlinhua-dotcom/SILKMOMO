@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { MODELS, BODY_TYPES, SKIN_TONES, PRODUCT_OUTPUT_SIZES, SCENE_OUTPUT_SIZES } from '@/lib/models';
 import { Grid3X3, Plus, Trash2, Play, Info } from 'lucide-react';
 
@@ -48,6 +48,7 @@ function getOptionsForType(type: string, moduleType: string) {
 export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchOutputMatrixProps) {
   const [variables, setVariables] = useState<BatchVariable[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const panelId = useId();
 
   // 添加变量维度
   const addVariable = (type: BatchVariable['type']) => {
@@ -88,25 +89,29 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
   };
 
   return (
-    <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border-light)] overflow-hidden">
+    <div className="bg-surface rounded-2xl border border-border-light overflow-hidden">
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-5 py-4 hover:bg-[var(--color-background)] transition-colors"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        className="w-full flex items-center justify-between gap-2 px-5 py-4 min-h-12 hover:bg-background transition-colors"
       >
-        <div className="flex items-center gap-3">
-          <Grid3X3 className="w-4 h-4 text-[var(--color-accent)]" />
-          <span className="text-sm font-medium text-[var(--color-text-secondary)]">批量输出矩阵</span>
-          <span className="text-xs text-[var(--color-text-muted)] bg-[var(--color-background)] px-2 py-0.5 rounded">
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-left">
+          <Grid3X3 className="w-4 h-4 text-brand-strong" aria-hidden="true" />
+          <span className="text-sm font-medium text-text-secondary">批量输出矩阵</span>
+          <span className="text-xs text-muted bg-background px-2 py-0.5 rounded">
             高级
           </span>
           {totalCombinations > 0 && (
-            <span className="text-xs font-semibold text-[var(--color-accent)]">
+            <span className="text-xs font-semibold text-brand-strong">
               {totalCombinations} 种组合
             </span>
           )}
         </div>
         <svg
-          className={`w-4 h-4 text-[var(--color-text-muted)] transition-transform ${expanded ? 'rotate-180' : ''}`}
+          aria-hidden="true"
+          className={`w-4 h-4 flex-shrink-0 text-muted transition-transform ${expanded ? 'rotate-180' : ''}`}
           fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
         >
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -114,11 +119,11 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
       </button>
 
       {expanded && (
-        <div className="px-5 pb-5 pt-2 border-t border-[var(--color-border-light)]">
+        <div id={panelId} className="px-5 pb-5 pt-2 border-t border-border-light">
           {/* 说明 */}
-          <div className="flex items-start gap-2 p-3 bg-[var(--color-background)] rounded-xl mb-4">
-            <Info className="w-4 h-4 text-[var(--color-text-muted)] flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-[var(--color-text-muted)] leading-relaxed">
+          <div className="flex items-start gap-2 p-3 bg-background rounded-xl mb-4">
+            <Info className="w-4 h-4 text-muted flex-shrink-0 mt-0.5" aria-hidden="true" />
+            <p className="text-xs text-text-secondary leading-relaxed">
               定义多个变量维度，系统自动组合生成。例如选择 2 个模特 × 3 种肤色 = 6 种组合，每种组合生成一套图。
             </p>
           </div>
@@ -130,35 +135,39 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
               const options = getOptionsForType(variable.type, moduleType);
 
               return (
-                <div key={variable.id} className="border border-[var(--color-border-light)] rounded-xl p-3">
+                <div key={variable.id} role="group" aria-labelledby={`${panelId}-${variable.id}`} className="border border-border-light rounded-xl p-3">
                   <div className="flex items-center justify-between mb-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-base">{typeInfo?.icon}</span>
-                      <span className="text-sm font-medium text-[var(--color-text)]">{typeInfo?.label}</span>
-                      <span className="text-xs text-[var(--color-text-muted)]">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-base" aria-hidden="true">{typeInfo?.icon}</span>
+                      <span id={`${panelId}-${variable.id}`} className="text-sm font-medium text-ink">{typeInfo?.label}</span>
+                      <span className="text-xs text-muted">
                         已选 {variable.values.length} 个
                       </span>
                     </div>
                     <button
+                      type="button"
                       onClick={() => removeVariable(variable.id)}
-                      className="w-6 h-6 flex items-center justify-center rounded hover:bg-red-50 text-[var(--color-text-muted)] hover:text-red-500 transition-colors"
+                      aria-label={`移除${typeInfo?.label}维度`}
+                      className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-danger-soft text-muted hover:text-danger transition-colors"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-4 h-4" aria-hidden="true" />
                     </button>
                   </div>
 
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex flex-wrap gap-2">
                     {options.map((opt) => {
                       const isSelected = variable.values.includes(opt.value);
                       return (
                         <button
                           key={opt.value}
+                          type="button"
+                          aria-pressed={isSelected}
                           onClick={() => toggleValue(variable.id, opt.value)}
                           className={`
-                            text-xs px-2.5 py-1.5 rounded-lg border transition-all
+                            text-xs px-3 py-2 min-h-10 rounded-lg border transition-all
                             ${isSelected
-                              ? 'border-[var(--color-accent)] bg-[var(--color-accent)] text-white'
-                              : 'border-[var(--color-border-light)] text-[var(--color-text-secondary)] hover:border-[var(--color-border)]'
+                              ? 'border-brand-strong bg-brand-strong text-white'
+                              : 'border-border text-text-secondary hover:border-brand-strong/60'
                             }
                           `}
                         >
@@ -178,11 +187,12 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
               {availableTypes.map((type) => (
                 <button
                   key={type.type}
+                  type="button"
                   onClick={() => addVariable(type.type)}
-                  className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-dashed border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-[var(--color-text-muted)] transition-all"
+                  className="flex items-center gap-1.5 text-xs px-3 py-2 min-h-10 rounded-lg border border-dashed border-border hover:border-brand-strong hover:text-brand-strong text-text-secondary transition-all"
                 >
-                  <Plus className="w-3 h-3" />
-                  {type.icon} {type.label}
+                  <Plus className="w-3 h-3" aria-hidden="true" />
+                  <span aria-hidden="true">{type.icon}</span> {type.label}
                 </button>
               ))}
             </div>
@@ -190,12 +200,12 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
 
           {/* 组合预览 + 开始按钮 */}
           {variables.length > 0 && (
-            <div className="flex items-center justify-between p-3 bg-[var(--color-background)] rounded-xl">
+            <div className="flex items-center justify-between gap-3 flex-wrap p-3 bg-background rounded-xl">
               <div>
-                <div className="text-sm font-medium text-[var(--color-text)]">
+                <div className="text-sm font-medium text-ink">
                   总计 {totalCombinations} 种组合
                 </div>
-                <div className="text-xs text-[var(--color-text-muted)]">
+                <div className="text-xs text-muted">
                   {variables.map(v => {
                     const typeInfo = VARIABLE_TYPES.find(t => t.type === v.type);
                     return `${v.values.length} ${typeInfo?.label}`;
@@ -203,17 +213,18 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
                 </div>
               </div>
               <button
+                type="button"
                 onClick={handleStartBatch}
                 disabled={totalCombinations === 0 || disabled}
                 className={`
-                  flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-xl transition-colors
+                  flex items-center gap-2 text-sm font-medium px-4 py-2 min-h-10 rounded-xl transition-colors
                   ${totalCombinations > 0 && !disabled
-                    ? 'bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-dark)]'
-                    : 'bg-[var(--color-border-light)] text-[var(--color-text-muted)] cursor-not-allowed'
+                    ? 'bg-brand-strong text-white hover:bg-ink'
+                    : 'bg-border-light text-muted cursor-not-allowed'
                   }
                 `}
               >
-                <Play className="w-4 h-4" />
+                <Play className="w-4 h-4" aria-hidden="true" />
                 开始批量生成
               </button>
             </div>
@@ -221,7 +232,7 @@ export function BatchOutputMatrix({ moduleType, onStartBatch, disabled }: BatchO
 
           {/* 空状态 */}
           {variables.length === 0 && (
-            <div className="text-center py-4 text-xs text-[var(--color-text-muted)]">
+            <div className="text-center py-4 text-xs text-muted">
               点击上方按钮添加变量维度，开始批量组合生成
             </div>
           )}

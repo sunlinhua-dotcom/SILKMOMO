@@ -6,7 +6,7 @@ interface IconProps {
 
 // 1. Elena (White Female) - Soft wavy hair, gentle features
 export const IconElena = ({ className }: IconProps) => (
-    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
         {/* Outline */}
         <path d="M32 12C38 12 44 18 44 26C44 34 38 42 32 42C26 42 20 34 20 26C20 18 26 12 32 12Z" strokeLinecap="round" strokeLinejoin="round" />
         {/* Hair - Wavy */}
@@ -20,7 +20,7 @@ export const IconElena = ({ className }: IconProps) => (
 
 // 2. Naomi (Black Female) - Sleek bun, sharp features, long neck
 export const IconNaomi = ({ className }: IconProps) => (
-    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
         {/* Face - Sharp chin */}
         <path d="M22 28C22 28 24 40 32 42C40 40 42 28 42 28" strokeLinecap="round" strokeLinejoin="round" />
         {/* Hair - Sleek bun */}
@@ -36,7 +36,7 @@ export const IconNaomi = ({ className }: IconProps) => (
 
 // 3. Julian (White Male) - Short hair, minimal, relaxed
 export const IconJulian = ({ className }: IconProps) => (
-    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
         {/* Face */}
         <path d="M22 24V32C22 38 26 42 32 42C38 42 42 38 42 32V24" strokeLinecap="round" strokeLinejoin="round" />
         {/* Hair - Classic side part */}
@@ -49,7 +49,7 @@ export const IconJulian = ({ className }: IconProps) => (
 
 // 4. Marcus (Black Male) - Beard, flat top/short fade, strong jaw
 export const IconMarcus = ({ className }: IconProps) => (
-    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 64 64" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
         {/* Face & Jaw */}
         <path d="M22 26V34C22 34 24 44 32 44C40 44 42 34 42 34V26" strokeLinecap="round" strokeLinejoin="round" />
         {/* Beard indication */}

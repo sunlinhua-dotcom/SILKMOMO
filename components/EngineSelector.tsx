@@ -1,6 +1,8 @@
 'use client';
 
+import { useId } from 'react';
 import { Check, Sparkles, Zap } from 'lucide-react';
+import { useRadioGroup } from './useRadioGroup';
 
 export type ImageEngine = 'gemini' | 'openai';
 
@@ -37,32 +39,37 @@ interface EngineSelectorProps {
 }
 
 export function EngineSelector({ selected, onSelect, variant = 'full' }: EngineSelectorProps) {
+    const labelId = useId();
+    const { groupProps, itemProps } = useRadioGroup(ENGINES.map((e) => e.id), selected, onSelect);
+
     if (variant === 'compact') {
         return (
             <div className="space-y-2.5">
                 <div className="flex items-center gap-2 px-1">
-                    <Sparkles className="w-3.5 h-3.5 text-[var(--color-text-muted)]" />
-                    <span className="text-xs font-medium tracking-widest uppercase text-[var(--color-text-secondary)]">生图引擎</span>
+                    <Sparkles className="w-3.5 h-3.5 text-muted" aria-hidden="true" />
+                    <span id={labelId} className="text-xs font-medium tracking-widest uppercase text-text-secondary">生图引擎</span>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div {...groupProps} aria-labelledby={labelId} className="flex flex-wrap gap-2">
                     {ENGINES.map((e) => {
                         const isSelected = e.id === selected;
                         const Icon = e.icon;
                         return (
                             <button
                                 key={e.id}
+                                type="button"
+                                {...itemProps(e.id)}
                                 onClick={() => onSelect(e.id)}
                                 className={`
-                                    cursor-pointer flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-200
+                                    cursor-pointer flex items-center gap-2 px-3 py-2 min-h-10 rounded-xl border transition-all duration-200
                                     ${isSelected
-                                        ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.06)] text-[var(--color-accent)] ring-1 ring-[var(--color-accent)]'
-                                        : 'border-[var(--color-border-light)] bg-white hover:border-[var(--color-border)] hover:shadow-sm text-[var(--color-text-secondary)]'
+                                        ? 'border-brand-strong bg-brand-soft text-ink ring-1 ring-brand-strong'
+                                        : 'border-border bg-surface hover:border-brand-strong/60 hover:shadow-sm text-text-secondary'
                                     }
                                 `}
                             >
-                                <Icon className="w-4 h-4" strokeWidth={1.5} />
+                                <Icon className={`w-4 h-4 ${isSelected ? 'text-brand-strong' : ''}`} strokeWidth={1.5} aria-hidden="true" />
                                 <span className="text-xs font-medium whitespace-nowrap">{e.name}</span>
-                                <span className={`text-[10px] whitespace-nowrap ${isSelected ? 'text-[var(--color-accent)]/80' : 'text-[var(--color-text-muted)]'}`}>
+                                <span className={`text-xs whitespace-nowrap ${isSelected ? 'text-text-secondary' : 'text-muted'}`}>
                                     {e.speed}
                                 </span>
                             </button>
@@ -76,41 +83,45 @@ export function EngineSelector({ selected, onSelect, variant = 'full' }: EngineS
     return (
         <div className="space-y-3">
             <div className="flex items-center gap-2 px-1">
-                <Sparkles className="w-4 h-4 text-neutral-400" />
-                <span className="text-sm font-medium text-neutral-600">选择生图引擎 (Engine)</span>
+                <Sparkles className="w-4 h-4 text-muted" aria-hidden="true" />
+                <span id={labelId} className="text-sm font-medium text-text-secondary">选择生图引擎 (Engine)</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div {...groupProps} aria-labelledby={labelId} className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {ENGINES.map((e) => {
                     const isSelected = e.id === selected;
                     const Icon = e.icon;
                     return (
                         <button
                             key={e.id}
+                            type="button"
+                            {...itemProps(e.id)}
                             onClick={() => onSelect(e.id)}
                             className={`
-                                relative text-left p-4 rounded-xl border transition-all duration-200
+                                relative text-left p-4 min-h-10 rounded-xl border transition-all duration-200
                                 ${isSelected
-                                    ? 'border-[#C9A86C] bg-[#C9A86C]/5 ring-1 ring-[#C9A86C]'
-                                    : 'border-neutral-200 bg-white hover:border-neutral-300 hover:shadow-sm'
+                                    ? 'border-brand-strong bg-brand-soft ring-1 ring-brand-strong'
+                                    : 'border-border bg-surface hover:border-brand-strong/60 hover:shadow-sm'
                                 }
                             `}
                         >
                             {isSelected && (
-                                <div className="absolute top-3 right-3 w-5 h-5 rounded-full bg-[#C9A86C] flex items-center justify-center">
-                                    <Check className="w-3 h-3 text-white" />
+                                <div className="absolute top-3 right-3 w-5 h-5 rounded-full bg-brand-strong flex items-center justify-center">
+                                    <Check className="w-3 h-3 text-white" aria-hidden="true" />
                                 </div>
                             )}
                             <div className={`w-10 h-10 rounded-xl mb-3 flex items-center justify-center
-                                ${isSelected ? 'bg-[#C9A86C]/10 text-[#C9A86C]' : 'bg-neutral-50 text-neutral-400'}
+                                ${isSelected ? 'bg-surface text-brand-strong' : 'bg-background text-muted'}
                             `}>
-                                <Icon className="w-5 h-5" strokeWidth={1.5} />
+                                <Icon className="w-5 h-5" strokeWidth={1.5} aria-hidden="true" />
                             </div>
-                            <h3 className={`font-medium text-sm mb-0.5 ${isSelected ? 'text-[#C9A86C]' : 'text-neutral-900'}`}>
+                            <h3 className="font-medium text-sm mb-0.5 text-ink">
                                 {e.name}
                             </h3>
-                            <p className="text-[10px] tracking-wider text-neutral-400 mb-1.5 font-mono">{e.sub}</p>
-                            <p className="text-xs text-neutral-500 leading-relaxed">{e.desc}</p>
-                            <p className={`text-[11px] mt-1.5 font-medium whitespace-nowrap ${isSelected ? 'text-[#C9A86C]' : 'text-neutral-400'}`}>
+                            <p className="text-xs tracking-wider text-muted mb-1.5 font-mono">
+                                <span className={isSelected ? 'text-text-secondary' : ''}>{e.sub}</span>
+                            </p>
+                            <p className="text-xs text-text-secondary leading-relaxed">{e.desc}</p>
+                            <p className={`text-xs mt-1.5 font-medium whitespace-nowrap ${isSelected ? 'text-ink' : 'text-muted'}`}>
                                 ⏱ {e.speed}
                             </p>
                         </button>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import {
   db,
   deleteStylePackImages,
@@ -10,6 +10,9 @@ import {
 } from '@/lib/db';
 import { ImageUploader } from './ImageUploader';
 import type { CompressedImage } from '@/lib/image-compressor';
+import { Modal } from './ui/Modal';
+import { useToast } from './ui/Toast';
+import { useConfirm } from './ui/ConfirmDialog';
 import { Plus, Package, Trash2, Check, X, ChevronDown, Eye, ImageOff } from 'lucide-react';
 
 // 一张图片是否可用：base64 数据非空且看起来像合法 base64（不是 HTML 404 页之类）
@@ -46,6 +49,9 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
   const [newPackImages, setNewPackImages] = useState<CompressedImage[]>([]);
   const [selectedPackId, setSelectedPackId] = useState<number | undefined>(activePackId);
   const [expanded, setExpanded] = useState(false);
+  const toast = useToast();
+  const confirm = useConfirm();
+  const panelId = useId();
 
   const loadPacks = useCallback(async () => {
     const allPacks = await db.stylePacks.orderBy('createdAt').reverse().toArray();
@@ -154,13 +160,13 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
       await loadPacks();
     } catch (error) {
       console.error('创建风格包失败:', error);
-      alert('创建失败，请重试');
+      toast.error('创建失败，请重试');
     }
   };
 
   // 删除风格包
   const handleDelete = async (packId: number) => {
-    if (!confirm('确定删除此风格包？')) return;
+    if (!(await confirm({ title: '删除这个风格包？', message: '删除后无法恢复', danger: true, confirmText: '删除' }))) return;
 
     try {
       await db.stylePacks.delete(packId);
@@ -171,6 +177,7 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
       await loadPacks();
     } catch (error) {
       console.error('删除风格包失败:', error);
+      toast.error('删除失败，请重试');
     }
   };
 
@@ -185,7 +192,7 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
 
     const imgs = (packImages[packId] || []).filter(isValidImageData);
     if (imgs.length === 0) {
-      alert('该风格包没有可用的参考图，请重新创建或上传图片');
+      toast.error('该风格包没有可用的参考图，请重新创建或上传图片');
       return;
     }
 
@@ -204,28 +211,31 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
 
   if (variant === 'compact') {
     return (
-      <div className="bg-[var(--color-surface)] rounded-2xl border border-[var(--color-border-light)] overflow-hidden">
+      <div className="bg-surface rounded-2xl border border-border-light overflow-hidden">
         <button
+          type="button"
           onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center justify-between px-5 py-4 hover:bg-[var(--color-background)] transition-colors"
+          aria-expanded={expanded}
+          aria-controls={panelId}
+          className="w-full flex items-center justify-between gap-2 px-5 py-4 min-h-12 hover:bg-background transition-colors"
         >
-          <div className="flex items-center gap-3">
-            <Package className="w-4 h-4 text-[var(--color-accent)]" />
-            <span className="text-sm font-medium text-[var(--color-text-secondary)]">品牌风格包</span>
-            <span className="text-xs text-[var(--color-text-muted)] bg-[var(--color-background)] px-2 py-0.5 rounded">
+          <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-left min-w-0">
+            <Package className="w-4 h-4 text-brand-strong" aria-hidden="true" />
+            <span className="text-sm font-medium text-text-secondary">品牌风格包</span>
+            <span className="text-xs text-muted bg-background px-2 py-0.5 rounded">
               {packs.length} 个
             </span>
             {selectedPackId && (
-              <span className="text-xs font-semibold text-[var(--color-accent)]">
+              <span className="text-xs font-semibold text-brand-strong break-all">
                 已选: {packs.find(p => p.id === selectedPackId)?.name}
               </span>
             )}
           </div>
-          <ChevronDown className={`w-4 h-4 text-[var(--color-text-muted)] transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          <ChevronDown className={`w-4 h-4 flex-shrink-0 text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
 
         {expanded && (
-          <div className="px-5 pb-5 pt-2 border-t border-[var(--color-border-light)]">
+          <div id={panelId} className="px-5 pb-5 pt-2 border-t border-border-light">
             <StylePackContent
               packs={packs}
               packImages={packImages}
@@ -254,9 +264,9 @@ export function StylePackManager({ onApply, activePackId, variant = 'inline' }: 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Package className="w-4 h-4 text-[var(--color-accent)]" />
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">品牌风格包</h3>
-          <span className="text-xs text-[var(--color-text-muted)]">
+          <Package className="w-4 h-4 text-brand-strong" aria-hidden="true" />
+          <h3 className="text-sm font-semibold text-ink">品牌风格包</h3>
+          <span className="text-xs text-muted">
             保存 3-5 张参考图为可复用的风格模板
           </span>
         </div>
@@ -312,9 +322,9 @@ function StylePackContent({
   const [previewPackId, setPreviewPackId] = useState<number | null>(null);
   return (
     <div className="space-y-3">
-      {/* 已有风格包列表 */}
+      {/* 已有风格包列表（可再点一次取消选择，所以用 aria-pressed，不是 radio） */}
       {packs.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div role="group" aria-label="品牌风格包列表" className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {packs.map((pack) => {
             const imgs = packImages[pack.id!] || [];
             const isSelected = selectedPackId === pack.id;
@@ -324,81 +334,94 @@ function StylePackContent({
               <div
                 key={pack.id}
                 className={`
-                  relative flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition-all duration-200
+                  relative flex items-stretch gap-1 rounded-xl border transition-all duration-200
                   ${isSelected
-                    ? 'border-[var(--color-accent)] bg-[rgba(201,168,108,0.06)] shadow-sm'
-                    : 'border-[var(--color-border-light)] hover:border-[var(--color-border)] hover:bg-[var(--color-background)]'
+                    ? 'border-brand-strong bg-brand-soft ring-1 ring-brand-strong shadow-sm'
+                    : 'border-border hover:border-brand-strong/60 hover:bg-background'
                   }
                 `}
-                onClick={() => onSelectPack(pack.id!)}
               >
-                {/* 缩略图 */}
-                <div className="flex -space-x-2 flex-shrink-0">
-                  {hasUsableImages ? (
-                    imgs.slice(0, 3).map((img, i) => (
-                      <div
-                        key={img.id}
-                        className="w-10 h-10 rounded-lg overflow-hidden border-2 border-[var(--color-surface)] bg-[var(--color-background)]"
-                        style={{ zIndex: 3 - i }}
-                      >
-                        <img
-                          src={`data:${img.mimeType};base64,${img.data}`}
-                          alt=""
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            // 图片加载失败：用图标占位，避免破图标
-                            const el = e.currentTarget;
-                            el.style.display = 'none';
-                            const parent = el.parentElement;
-                            if (parent && !parent.querySelector('.thumb-fallback')) {
-                              const span = document.createElement('span');
-                              span.className = 'thumb-fallback w-full h-full flex items-center justify-center text-[var(--color-text-muted)]';
-                              span.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="4" y1="4" x2="20" y2="20"/></svg>';
-                              parent.appendChild(span);
-                            }
-                          }}
-                        />
-                      </div>
-                    ))
-                  ) : (
-                    <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-amber-50 border-2 border-[var(--color-surface)] text-amber-500" title="风格包缺少参考图">
-                      <ImageOff className="w-4 h-4" />
-                    </div>
-                  )}
-                </div>
+                {/* 主区域：整块可点选，是真正的 button */}
+                <button
+                  type="button"
+                  aria-pressed={isSelected}
+                  onClick={() => onSelectPack(pack.id!)}
+                  className="flex flex-1 min-w-0 items-start gap-3 p-3.5 min-h-12 text-left rounded-xl"
+                >
+                  {/* 缩略图 */}
+                  <span className="flex -space-x-2 flex-shrink-0">
+                    {hasUsableImages ? (
+                      imgs.slice(0, 3).map((img, i) => (
+                        <span
+                          key={img.id}
+                          className="block w-10 h-10 rounded-lg overflow-hidden border-2 border-surface bg-background"
+                          style={{ zIndex: 3 - i }}
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element -- base64 data URL，next/image 无法优化 */}
+                          <img
+                            src={`data:${img.mimeType};base64,${img.data}`}
+                            alt=""
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              // 图片加载失败：用图标占位，避免破图标
+                              const el = e.currentTarget;
+                              el.style.display = 'none';
+                              const parent = el.parentElement;
+                              if (parent && !parent.querySelector('.thumb-fallback')) {
+                                const span = document.createElement('span');
+                                span.className = 'thumb-fallback w-full h-full flex items-center justify-center text-muted';
+                                span.innerHTML = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="4" y1="4" x2="20" y2="20"/></svg>';
+                                parent.appendChild(span);
+                              }
+                            }}
+                          />
+                        </span>
+                      ))
+                    ) : (
+                      <span className="w-10 h-10 rounded-lg flex items-center justify-center bg-warning-soft border-2 border-surface text-warning">
+                        <ImageOff className="w-4 h-4" aria-hidden="true" />
+                      </span>
+                    )}
+                  </span>
 
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium text-[var(--color-text)] truncate">
-                    {pack.name}
-                  </div>
-                  <div className="text-xs text-[var(--color-text-muted)]">
-                    {hasUsableImages ? `${imgs.length} 张参考图` : <span className="text-amber-600">⚠ 无可用图，请重建</span>}
-                    {pack.description && hasUsableImages && ` · ${pack.description}`}
-                  </div>
-                </div>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-sm font-medium text-ink truncate">
+                      {pack.name}
+                    </span>
+                    <span className="block text-xs text-text-secondary">
+                      {hasUsableImages ? `${imgs.length} 张参考图` : <span className="text-warning font-medium">⚠ 无可用图，请重建</span>}
+                      {pack.description && hasUsableImages && ` · ${pack.description}`}
+                    </span>
+                  </span>
 
-                {/* 操作 */}
-                <div className="flex items-center gap-1 flex-shrink-0">
                   {isSelected && (
-                    <div className="w-5 h-5 rounded-full bg-[var(--color-accent)] flex items-center justify-center">
+                    <span className="w-5 h-5 flex-shrink-0 rounded-full bg-brand-strong flex items-center justify-center" aria-hidden="true">
                       <Check className="w-3 h-3 text-white" strokeWidth={3} />
-                    </div>
+                    </span>
                   )}
+                </button>
+
+                {/* 操作：独立按钮，触屏 40px，不再嵌在可点击卡片里 */}
+                <div className="flex items-center gap-0.5 pr-2 flex-shrink-0">
                   {hasUsableImages && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); setPreviewPackId(pack.id!); }}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-[var(--color-background)] text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-colors"
+                      type="button"
+                      onClick={() => setPreviewPackId(pack.id!)}
+                      className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-background text-muted hover:text-brand-strong transition-colors"
+                      aria-label={`预览「${pack.name}」的所有参考图`}
                       title="预览所有参考图"
                     >
-                      <Eye className="w-3.5 h-3.5" />
+                      <Eye className="w-4 h-4" aria-hidden="true" />
                     </button>
                   )}
                   <button
-                    onClick={(e) => { e.stopPropagation(); onDelete(pack.id!); }}
-                    className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-[var(--color-text-muted)] hover:text-red-500 transition-colors"
+                    type="button"
+                    onClick={() => onDelete(pack.id!)}
+                    className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-danger-soft text-muted hover:text-danger transition-colors"
+                    aria-label={`删除「${pack.name}」`}
                     title="删除"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -407,65 +430,52 @@ function StylePackContent({
         </div>
       )}
 
-      {/* 风格包预览 Modal */}
-      {previewPackId !== null && (() => {
-        const pack = packs.find(p => p.id === previewPackId);
-        const imgs = packImages[previewPackId] || [];
-        if (!pack) return null;
+      {/* 风格包预览 */}
+      {(() => {
+        const pack = previewPackId !== null ? packs.find(p => p.id === previewPackId) : undefined;
+        const imgs = previewPackId !== null ? (packImages[previewPackId] || []) : [];
         return (
-          <div
-            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-            onClick={() => setPreviewPackId(null)}
+          <Modal
+            open={!!pack}
+            onClose={() => setPreviewPackId(null)}
+            title={pack ? <>{pack.name}<span className="ml-2 text-xs font-normal text-muted">{imgs.length} 张参考图</span></> : undefined}
+            size="lg"
           >
-            <div
-              className="bg-[var(--color-surface)] rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto shadow-2xl border border-[var(--color-border-light)]"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between p-5 border-b border-[var(--color-border-light)]">
-                <div>
-                  <h3 className="text-base font-semibold text-[var(--color-text)]">{pack.name}</h3>
-                  <p className="text-xs text-[var(--color-text-muted)] mt-0.5">{imgs.length} 张参考图</p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {imgs.map(img => (
+                <div key={img.id} className="aspect-square rounded-xl overflow-hidden bg-background">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- base64 data URL，next/image 无法优化 */}
+                  <img
+                    src={`data:${img.mimeType};base64,${img.data}`}
+                    alt=""
+                    className="w-full h-full object-cover"
+                  />
                 </div>
-                <button
-                  onClick={() => setPreviewPackId(null)}
-                  className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-[var(--color-background)] transition-colors"
-                >
-                  <X className="w-5 h-5 text-[var(--color-text-muted)]" />
-                </button>
-              </div>
-              <div className="p-5 grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {imgs.map(img => (
-                  <div key={img.id} className="aspect-square rounded-xl overflow-hidden bg-[var(--color-background)]">
-                    <img
-                      src={`data:${img.mimeType};base64,${img.data}`}
-                      alt=""
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                ))}
-              </div>
+              ))}
             </div>
-          </div>
+          </Modal>
         );
       })()}
 
       {/* 无内容提示 */}
       {packs.length === 0 && !isCreating && (
-        <div className="text-center py-6 text-sm text-[var(--color-text-muted)]">
+        <div className="text-center py-6 text-sm text-muted">
           尚未创建风格包。保存 3-5 张参考图为品牌风格模板，后续可一键复用。
         </div>
       )}
 
       {/* 创建表单 */}
       {isCreating && (
-        <div className="bg-[var(--color-background)] rounded-xl p-4 space-y-3 border border-[var(--color-border-light)]">
+        <div className="bg-background rounded-xl p-4 space-y-3 border border-border-light">
           <div className="flex items-center justify-between">
-            <h4 className="text-sm font-medium text-[var(--color-text)]">创建新风格包</h4>
+            <h4 className="text-sm font-medium text-ink">创建新风格包</h4>
             <button
+              type="button"
               onClick={onCancelCreate}
-              className="w-6 h-6 flex items-center justify-center rounded hover:bg-[var(--color-surface)] transition-colors"
+              aria-label="取消创建"
+              className="w-10 h-10 -mr-2 flex items-center justify-center rounded-lg hover:bg-surface transition-colors"
             >
-              <X className="w-4 h-4 text-[var(--color-text-muted)]" />
+              <X className="w-4 h-4 text-muted" aria-hidden="true" />
             </button>
           </div>
 
@@ -474,7 +484,8 @@ function StylePackContent({
             value={newPackName}
             onChange={(e) => onNameChange(e.target.value)}
             placeholder="风格包名称（如：春季清新系列）"
-            className="w-full text-sm border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+            aria-label="风格包名称"
+            className="w-full text-sm border border-border rounded-lg px-3 py-2 min-h-10 bg-surface focus:outline-none focus:border-brand-strong"
           />
 
           <input
@@ -482,7 +493,8 @@ function StylePackContent({
             value={newPackDesc}
             onChange={(e) => onDescChange(e.target.value)}
             placeholder="描述（可选）"
-            className="w-full text-sm border border-[var(--color-border-light)] rounded-lg px-3 py-2 bg-[var(--color-surface)] focus:outline-none focus:border-[var(--color-accent)]"
+            aria-label="风格包描述（可选）"
+            className="w-full text-sm border border-border rounded-lg px-3 py-2 min-h-10 bg-surface focus:outline-none focus:border-brand-strong"
           />
 
           <ImageUploader
@@ -495,20 +507,21 @@ function StylePackContent({
           />
 
           <div className="flex items-center justify-between pt-1">
-            <span className="text-xs text-[var(--color-text-muted)]">
+            <span className="text-xs text-text-secondary" aria-live="polite">
               {newPackImages.length < 3
                 ? `还需上传 ${3 - newPackImages.length} 张图片`
                 : `✓ ${newPackImages.length} 张参考图`
               }
             </span>
             <button
+              type="button"
               onClick={onCreate}
               disabled={!newPackName.trim() || newPackImages.length < 3}
               className={`
-                text-sm font-medium px-4 py-1.5 rounded-lg transition-colors
+                text-sm font-medium px-4 py-2 min-h-10 rounded-lg transition-colors
                 ${newPackName.trim() && newPackImages.length >= 3
-                  ? 'bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-dark)]'
-                  : 'bg-[var(--color-border-light)] text-[var(--color-text-muted)] cursor-not-allowed'
+                  ? 'bg-brand-strong text-white hover:bg-ink'
+                  : 'bg-border-light text-muted cursor-not-allowed'
                 }
               `}
             >
@@ -521,10 +534,11 @@ function StylePackContent({
       {/* 创建按钮 */}
       {!isCreating && (
         <button
+          type="button"
           onClick={onStartCreate}
-          className="w-full flex items-center justify-center gap-2 p-3 rounded-xl border border-dashed border-[var(--color-border)] hover:border-[var(--color-accent)] hover:bg-[rgba(201,168,108,0.03)] text-sm text-[var(--color-text-muted)] hover:text-[var(--color-accent)] transition-all"
+          className="w-full flex items-center justify-center gap-2 p-3 min-h-12 rounded-xl border border-dashed border-border hover:border-brand-strong hover:bg-brand-soft text-sm text-text-secondary hover:text-brand-strong transition-all"
         >
-          <Plus className="w-4 h-4" />
+          <Plus className="w-4 h-4" aria-hidden="true" />
           创建新风格包
         </button>
       )}
