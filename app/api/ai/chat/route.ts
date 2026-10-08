@@ -27,8 +27,9 @@ const DEEPSEEK_CONFIG = {
 };
 
 // 回退通道:未配置 DeepSeek 时沿用 Gemini Lite(保证零中断切换)
+// 地址优先级:AI_ASSISTANT_BASE_URL(与 lib/ai-assistant.ts 共用,须带 /v1beta)> GEMINI_BASE_URL(沿用旧行为)> 默认。
 const API_CONFIG = {
-  baseUrl: process.env.GEMINI_BASE_URL || 'https://api.apiyi.com/v1beta',
+  baseUrl: (process.env.AI_ASSISTANT_BASE_URL || process.env.GEMINI_BASE_URL || 'https://api.apiyi.com/v1beta').replace(/\/+$/, ''),
   model: 'gemini-3.1-flash-lite-preview',
   apiKey: process.env.GEMINI_API_KEY || '',
 };
@@ -164,10 +165,11 @@ export async function POST(req: Request) {
       rawText = data?.choices?.[0]?.message?.content || '';
     } else {
       const res = await fetch(
-        `${API_CONFIG.baseUrl}/models/${API_CONFIG.model}:generateContent?key=${API_CONFIG.apiKey}`,
+        `${API_CONFIG.baseUrl}/models/${API_CONFIG.model}:generateContent`,
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          // 密钥走请求头,不拼进 URL
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': API_CONFIG.apiKey },
           signal: AbortSignal.timeout(30_000),
           body: JSON.stringify({
             system_instruction: {

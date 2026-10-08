@@ -31,6 +31,8 @@ paths:
 - **参考图超时有三层防御**（尺寸诚实化 + `sharp` 原生依赖 + 超时兜底），改上传体积 / 压缩逻辑前先把这一层看完，否则会把防御拆掉。
 - **每人在途生成上限 `GENERATION_MAX_CONCURRENT_PER_USER`（默认 3）与请求体上限 `GENERATION_MAX_BODY_BYTES`（默认 64MiB）**：3 = 客户端最大并发 2 + 看门狗 abort 后服务端残留的 1 条；64MiB 是按 lookbook 组图 swap 模式最大合法负载（约 57MiB）留余量算的。名额在流开始时占、stream 的 `finally` 里必须释放，新增提前 return 的分支要确认没漏释放；进程内计数，多实例是「每实例每人」。
 - **上游错误原文只进 `detail` / 服务端日志，不下发给用户**（见 `lib/image-backends.ts` 的脱敏）；前端展示的是分类后的中文提示。新增通道或错误分支别把 `response.text()` 直接塞进 SSE error。
+- **Gemini 原生协议的密钥一律走请求头 `x-goog-api-key`，不许再拼 `?key=`**（URL 会随 fetch 异常、中转站日志外泄）；OpenAI 兼容协议走 `Authorization: Bearer`。1008 已用 apiyi 零成本探针实测：生图模型与 Lite 模型「正确密钥放请求头 + 非法请求体」得 400（鉴权通过），「错误密钥放请求头」得 401，说明中转站认请求头。`__tests__/upstream-auth.test.mjs` 守着这条（含源码扫描）。
+- **上游地址环境变量**：`GEMINI_BASE_URL`（Gemini 生图，不带 `/v1beta`，默认 `https://api.apiyi.com`）、`OPENAI_IMAGE_BASE_URL`（GPT 生图，默认随令牌：独立令牌 `https://api.302.ai`，否则同 Gemini）、`AI_ASSISTANT_BASE_URL`（分析/对话回退，**带 `/v1beta`**，默认 `https://api.apiyi.com/v1beta`）。都不设就与线上现状完全一致。
 - 已删除 `app/actions/generate.ts`（死代码），不要恢复。
 - 生产主图通道是 302.ai 的 `gpt-image-2`，换通道要连着 D 板块的锚图通道一起评估。
 

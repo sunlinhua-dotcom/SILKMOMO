@@ -5,11 +5,23 @@
  */
 
 // Flash Lite — 用于分析、评分等非生图任务（极便宜）
+// 上游地址可用 AI_ASSISTANT_BASE_URL 覆盖（须带 /v1beta，例如本地 mock 或换中转站）；
+// 不设则与此前线上行为完全一致。
 const LITE_CONFIG = {
-  baseUrl: 'https://api.apiyi.com/v1beta',
+  baseUrl: (process.env.AI_ASSISTANT_BASE_URL || 'https://api.apiyi.com/v1beta').replace(/\/+$/, ''),
   model: 'gemini-3.1-flash-lite-preview',
   apiKey: process.env.GEMINI_API_KEY || '',
 };
+
+// 密钥走请求头 x-goog-api-key，不再拼进 URL：URL 会随 fetch 的 TypeError、
+// 中转站访问日志、APM 采样一起外泄，请求头不会。
+function liteEndpoint(): string {
+  return `${LITE_CONFIG.baseUrl}/models/${LITE_CONFIG.model}:generateContent`;
+}
+
+function liteHeaders(): Record<string, string> {
+  return { 'Content-Type': 'application/json', 'x-goog-api-key': LITE_CONFIG.apiKey };
+}
 
 // 上游单次调用超时：没有超时的话 undici 默认要挂 ~300s，
 // 扣费后挂死期间用户干等、资金被悬置
@@ -64,11 +76,11 @@ export async function analyzeProductImage(
   }
 
   try {
-    const url = `${LITE_CONFIG.baseUrl}/models/${LITE_CONFIG.model}:generateContent?key=${LITE_CONFIG.apiKey}`;
+    const url = liteEndpoint();
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: liteHeaders(),
       signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{
@@ -177,7 +189,7 @@ export async function analyzeLookbookGroup(
   const sampled = images.slice(0, 4);
 
   try {
-    const url = `${LITE_CONFIG.baseUrl}/models/${LITE_CONFIG.model}:generateContent?key=${LITE_CONFIG.apiKey}`;
+    const url = liteEndpoint();
 
     const parts: Array<Record<string, unknown>> = [
       {
@@ -204,7 +216,7 @@ JSON only, no explanation.`,
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: liteHeaders(),
       signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{ parts }],
@@ -346,11 +358,11 @@ export async function analyzeFaceRegionAndSkin(
   if (!LITE_CONFIG.apiKey || !imageBase64) return null;
 
   try {
-    const url = `${LITE_CONFIG.baseUrl}/models/${LITE_CONFIG.model}:generateContent?key=${LITE_CONFIG.apiKey}`;
+    const url = liteEndpoint();
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: liteHeaders(),
       signal: AbortSignal.timeout(LITE_TIMEOUT_MS),
       body: JSON.stringify({
         contents: [{
