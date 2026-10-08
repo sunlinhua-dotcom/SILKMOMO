@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { readTaskPageSource } from './_task-source.mjs';
 import test from 'node:test';
 
