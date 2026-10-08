@@ -1028,6 +1028,18 @@ export async function POST(req: NextRequest) {
               return;
             }
 
+            // 整次都是同 runId 重放（所有目标镜次的幂等键都已有 consume）：每一镜都只会走 handleIdempotentHit
+            // （补发 / 提示，永不出图），服装分析、肤色分析、身份锚生成的结果一概用不上，全部跳过，重放不再有任何上游调用。
+            // 身份锚尤其不能重做：客户端收到 anchor 事件会覆盖本地已存的锚（useTaskGeneration 的 db.images.update），
+            // 重放时换一张新脸等于把首次生成的身份悄悄换掉；首次的锚若没送达，仍在 pending 里由补拉取回。
+            // 部分重试（任一目标镜次还没扣过费）groupFullReplay 为 false，行为与以前完全一致。
+            const groupFullReplay = runId
+              ? await isFullGenerationReplay(
+                  auth.userId,
+                  targetIndexes.map(idx => generationIdempotencyKey(auth.userId, taskId, idx, runId)),
+                )
+              : false;
+
             const hasReplacementAccessory = !!(accessoryImages && accessoryImages.length > 0);
             // 一次成型：衣服参考 + 锚脸参考 + 场景底图一次出图。
             // 旧的 Pass2（face-swap-v2 + 本地椭圆合成 / GPT 小蒙版重画）已整体下线：
@@ -1048,7 +1060,7 @@ export async function POST(req: NextRequest) {
 
             // fresh 新任务未显式选脸时，优先复用账号的御用脸。只在 fresh 分支读取脸库，
             // follow_scene 仍严格走场景派生锚，不会消费用户收藏的完整身份。
-            if (modelIdentityMode === 'fresh' && !anchorImage && !clientClosed) {
+            if (modelIdentityMode === 'fresh' && !anchorImage && !clientClosed && !groupFullReplay) {
               const favorite = await getRandomFavoriteModelFace(auth.userId);
               if (favorite) {
                 anchorImage = { data: favorite.image, mimeType: favorite.mimeType };
@@ -1063,7 +1075,7 @@ export async function POST(req: NextRequest) {
               // 客户端带回了首块的分析结果，直接复用，省掉一次上游视觉调用
               sharedGarmentDescription = reusableGarmentDescription;
               console.log('[sceneGroup] 复用客户端回传的服装分析，跳过本块分析');
-            } else if (sceneGroupMode === 'swap') {
+            } else if (sceneGroupMode === 'swap' && !groupFullReplay) {
               push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
               try {
                 const { analyzeProductImage } = await import('@/lib/ai-assistant');
@@ -1119,7 +1131,7 @@ export async function POST(req: NextRequest) {
 
             // ===== [D] 派生身份锚分支 · 开始 =====
             let derivedAnchorSkinTone: string | undefined;
-            if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && !anchorImage) {
+            if (modelIdentityMode === 'follow_scene' && sceneRefImages[0] && !clientClosed && !anchorImage && !groupFullReplay) {
               push('status', { phase: 'analyzing', message: '正在分析场景模特肤色...' });
               derivedAnchorSkinTone = await withPhaseBeat(
                 push,
@@ -1129,7 +1141,7 @@ export async function POST(req: NextRequest) {
               );
             }
 
-            if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed) {
+            if (shouldUseSceneGroupAnchor && !anchorImage && !clientClosed && !groupFullReplay) {
               push('status', { phase: 'analyzing', message: '正在创建新模特身份锚...' });
               try {
                 // 肖像卡是组图身份稳定性的基础设施调用，不向用户扣费；放在逐张扣费循环之前。
@@ -1188,7 +1200,7 @@ export async function POST(req: NextRequest) {
               const baseRef = sceneGroupMode === 'products' ? sceneRefImages[0] : sceneRefImages[refSeq - 1];
 
               let garmentDescription = sharedGarmentDescription;
-              if (sceneGroupMode === 'products') {
+              if (sceneGroupMode === 'products' && !groupFullReplay) {
                 push('status', {
                   phase: 'analyzing',
                   current: i + 1,

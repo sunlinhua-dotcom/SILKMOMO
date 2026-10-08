@@ -34,6 +34,7 @@ paths:
 - **失败必须退款**：任何出图失败路径都要走到退款，新增失败分支时先确认退款也覆盖到了。
 - **幂等键不能动**：改了会让重试变成重复扣费。
 - **`Transaction.fulfilledAt` 是履约标记**：出图类 consume 在「结果已写入 pending / 已推给客户端」时写入；幂等命中（同键重放）看到已履约，永不再生成（堵住了「同 runId 重放免费出图」）。
+- **整次重放不调任何上游**：`route.ts` 的 `isFullGenerationReplay`（所有目标镜次的幂等键都已有 consume）在产品图、单张场景图、组图三个分支共用，命中就跳过生图前置的全部上游调用（服装分析 / 肤色分析 / 身份锚），只走各镜次的幂等命中补发。只要有一镜还没扣过费（部分重试）就照常分析。新增生图前置的上游调用时，要么挂在这个判据下，要么说明为什么重放时也必须调。
 - **新增 consume 路径若是出图类，必须写 `fulfilledAt`**，否则 20 分钟后清扫会把它当孤儿误退款，用户白拿一次图。脸库计费（`<id>:charge` 键）与 AI 助手（无键）不走这个语义，别照抄。
 - **孤儿清扫退款前必须查 pending 与成功的 `GenerationRecord`**：只看 `fulfilledAt` 为空会误退「已交付但标记没写上」的单子；改清扫判据时这两个查询不能省。退款本身走现有幂等路径（先认领流水再入账），多实例同时清扫不会重复退。
 - **管理员充值服务端幂等**：请求带 `requestId`（UUID）时 `Transaction.idempotencyKey = admin-recharge:<requestId>`，加余额 + 写流水在同一事务里，命中唯一约束（P2002）不再加钱，回第一次的结果并带 `duplicate: true`（HTTP 200）；同 requestId 换用户/金额回 409；非法格式 400；不带 requestId 的老请求保持旧行为但打告警。前端每次「用户 + 金额」意图生成一个 requestId，重试复用。改动后跑 `node --test __tests__/admin-recharge.test.mjs`。
