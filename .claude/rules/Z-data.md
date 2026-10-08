@@ -37,6 +37,8 @@ paths:
 - **生产 CSP 不含 `'unsafe-eval'`**（`next.config.ts`，dev 才放，React 调试/HMR 需要）。引入依赖 `eval`/`new Function` 的库会在线上直接白屏，先在 `npm run build && npm start` 下验过。
 - **迁移 `20261008100000_auth_revocation_rate_limit` 只新建 `RevokedToken`、`RateLimitCounter` 两张空表 + 索引**，对已有数据零影响；回滚 SQL `docs/handoff/rollback-1008b.sql`（先回滚代码再 DROP）。两张表上线前代码读写它们会报错：吊销检查 fail-open、限流退回内存，但登出写吊销表会失败（响应带 `revokeFailed`），所以**必须先 `migrate deploy` 再上新代码**。
 - **保留清理会删数据，改它之前先读 `docs/handoff/retention-1008.md`**：`GenerationRecord` 超 365 天且未评分/无反馈的删；`ModelFaceGenerationJob` 已结束超 30 天且所有 item 计费终态（uncharged/refunded/kept，`charged`、`refund_pending` 不是）的删；`Transaction`、`ModelFace` 永不删。新增 `ModelFaceBillingStatus` 枚举值必须先在 `lib/retention.ts` 里归类（有 schema 守卫测试）。环境变量：`RETENTION_DISABLED=1` 关闭、`RETENTION_DRY_RUN=1` 只统计、`GENERATION_RECORD_RETENTION_DAYS`、`MODEL_FACE_JOB_RETENTION_DAYS`。
+- **迁移 `20261008200000_model_face_object_storage` 给 `ModelFace` 加 `imageKey`、`thumbnailKey` 两列并放开 `image` 的 NOT NULL**：只有 ADD COLUMN 与 DROP NOT NULL，对已有行零影响（本地临时库已验证快照 md5 前后一致）。业务说明见 D 板块「脸图存储」。回滚 SQL `docs/handoff/rollback-1008c.sql`，**顺序**：① 若有行的图只在 R2（`image` 为 NULL）先 `model-face-storage-migrate.mjs --to-db --apply` 回迁 → ② 回滚代码（旧代码读 `image`，遇 NULL 会报错）→ ③ 执行 SQL（里面的守卫块在仍有 `image` 为空的行时会报错中止，不会丢数据）→ ④ 删 `_prisma_migrations` 里的记录。**先 `migrate deploy` 再上新代码**（新代码写 `imageKey` 列，列不存在会报错）。
+- **对象存储变量**（四必填：`OBJECT_STORAGE_ENDPOINT` / `_BUCKET` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`，可选 `_REGION`）属于运行时配置，写在 Zeabur 服务环境变量里；生产桶 `silkmomo-faces`（私有，R2 令牌限定到该桶、Object Read & Write）。一键配置命令 `scripts/setup-r2-storage.sh`（装成 `silkmomo-r2`）。`aws4fetch`（精确版本锁定）是唯一新增依赖，被 Next 打进服务端 chunk，runner 不需要它出现在 `node_modules`。
 - `prisma/dev.db` 是本地库，不要提交、不要当成线上数据。
 
 ## 测试与验收
