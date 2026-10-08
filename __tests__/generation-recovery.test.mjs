@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import { readTaskPageSource } from './_task-source.mjs';
 import test from 'node:test';
 
 const recovery = await import('../lib/generation-recovery.ts').catch(() => ({}));
-const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+const taskSource = readTaskPageSource();
 
 function sourceBetween(start, end) {
   const startIndex = taskSource.indexOf(start);
@@ -85,7 +85,9 @@ test('all four paid retry entry points recover pending images before mutating or
 });
 
 test('the whole-task retry button routes through remaining-work recovery', () => {
-  assert.match(taskSource, /onClick=\{\(\) => void handleGenerateRemaining\(\)\}[\s\S]*?>\s*\u91cd\u8bd5\s*</);
+  // 失败卡（components/task/FailedPanel）的「重试」按钮调 onRetry；页面把 onRetry 接到 handleGenerateRemaining
+  assert.match(taskSource, /onClick=\{\(\) => void onRetry\(\)\}[\s\S]*?>\s*\u91cd\u8bd5\s*</);
+  assert.match(taskSource, /onRetry=\{\(\) => handleGenerateRemaining\(\)\}/);
 });
 
 test('one run id is forwarded from paid retry entry points into the generation request', () => {
