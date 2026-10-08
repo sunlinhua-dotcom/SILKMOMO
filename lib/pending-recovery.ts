@@ -1,7 +1,7 @@
 import { db, type ImageItem } from '@/lib/db';
 import { compressImage } from '@/lib/image-compressor';
-import { fetchPendingImageOutcome, fetchPendingImageWithRetry } from '@/lib/pending-fetch';
-import { recoverPending, type PendingMeta, type PendingRecoveryResult } from '@/lib/pending-recovery-core';
+import { fetchPendingImageOutcome, fetchPendingImageWithRetry, type PendingFetchOutcome } from '@/lib/pending-fetch';
+import { recoverPending, resolveSseGone, type PendingMeta, type PendingRecoveryResult } from '@/lib/pending-recovery-core';
 
 // ===== [E] 看门狗与补拉 · 开始 =====
 // ═══ SSE 停滞看门狗 ═══
@@ -84,6 +84,40 @@ export async function fetchPendingImage(
       console.error(`[交接缓冲] 取图失败(${attempt}/${total}):`, err);
     },
   });
+}
+
+/**
+ * SSE 正常交付路径用的取图：同 `fetchPendingImage`，但保留三态结果。
+ * `gone`（404）= 已被另一条路径取走，不重试、不打 error，由调用方走 `resolveSseGone` 收口；
+ * 只有真失败（网络 / 5xx / 残缺）才在每次重试时 console.error。
+ */
+export function fetchPendingImageForSse(pendingId: string, attempts = 3): Promise<PendingFetchOutcome> {
+  return fetchPendingImageOutcome(pendingId, {
+    attempts,
+    handshakeTimeoutMs: PENDING_FETCH_TIMEOUT_MS,
+    onAttemptError: (err, attempt, total) => {
+      console.error(`[交接缓冲] 取图失败(${attempt}/${total}):`, err);
+    },
+  });
+}
+
+/** SSE 路径取图 404 后的收口：核对本地是否已有该镜，没有再按 taskId 补拉兜底（详见 resolveSseGone）。 */
+export function resolveSseGoneForTask(taskId: number, shotIndex: number) {
+  return resolveSseGone(
+    {
+      hasLocalResult: async shot => {
+        const persisted = shot > 0 ? shot : undefined;
+        const found = await db.images
+          .where('projectId').equals(taskId)
+          .filter(i => i.type === 'result' && i.shotIndex === persisted)
+          .first();
+        return found !== undefined;
+      },
+      recover: shot => recoverPendingImages(taskId, [shot]),
+      log: console,
+    },
+    shotIndex,
+  );
 }
 
 /** 客户端已落 IndexedDB，通知服务端删掉缓冲行。删不掉也无妨，服务端有 TTL 兜底。 */

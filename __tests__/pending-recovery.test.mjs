@@ -223,3 +223,65 @@ test('anchors: gone is skipped quietly; failed is logged and skipped; existing a
   assert.deepEqual(haveCase.calls.release, ['anchor-dup']);
   assert.deepEqual(haveCase.calls.fetch, []);
 });
+
+// ── SSE 正常交付路径取图 404（gone）收口 ──
+
+function makeGoneDeps({ localShots = [], recoverResult = { ok: true, recoveredShotIndexes: [] }, recoverThrows = false } = {}) {
+  const calls = { recover: 0, logs: [], errors: [] };
+  const have = new Set(localShots);
+  return {
+    calls,
+    have,
+    deps: {
+      hasLocalResult: async shot => have.has(shot),
+      recover: async () => {
+        calls.recover++;
+        if (recoverThrows) throw new Error('boom');
+        for (const s of recoverResult.recoveredShotIndexes) have.add(s);
+        return recoverResult;
+      },
+      log: {
+        log: (...args) => calls.logs.push(args.join(' ')),
+        error: (...args) => calls.errors.push(args.join(' ')),
+      },
+    },
+  };
+}
+
+test('resolveSseGone: 本地已有该镜 = 另一路径已入库，只记 info，不补拉、不报 error', async () => {
+  const { deps, calls } = makeGoneDeps({ localShots: [3] });
+  assert.equal(await core.resolveSseGone(deps, 3), 'local');
+  assert.equal(calls.recover, 0);
+  assert.equal(calls.errors.length, 0);
+  assert.match(calls.logs.join('\n'), /#3 已被另一条路径取走并入库/);
+});
+
+test('resolveSseGone: 本地没有则按 taskId 补拉兜底，捡回即 recovered', async () => {
+  const { deps, calls } = makeGoneDeps({ recoverResult: { ok: true, recoveredShotIndexes: [5] } });
+  assert.equal(await core.resolveSseGone(deps, 5), 'recovered');
+  assert.equal(calls.recover, 1);
+  assert.equal(calls.errors.length, 0);
+});
+
+test('resolveSseGone: 补拉也没有才是 missing 并 error 上报；补拉抛错同样 missing 不向外抛', async () => {
+  const none = makeGoneDeps();
+  assert.equal(await core.resolveSseGone(none.deps, 2), 'missing');
+  assert.equal(none.calls.recover, 1);
+  assert.equal(none.calls.errors.length, 1);
+
+  const boom = makeGoneDeps({ recoverThrows: true });
+  assert.equal(await core.resolveSseGone(boom.deps, 2), 'missing');
+  assert.equal(boom.calls.errors.length, 1);
+});
+
+test('SSE 取图路径源码：404 走 gone 分支（info 级、不 console.error、不删本地图）', async () => {
+  const fs = await import('node:fs');
+  const hook = fs.readFileSync(new URL('../hooks/useTaskGeneration.ts', import.meta.url), 'utf8');
+  assert.match(hook, /fetchPendingImageForSse\(pendingId\)/);
+  assert.match(hook, /outcome\.status === 'gone'/);
+  assert.match(hook, /resolveSseGoneForTask\(taskId, shotIndex\)/);
+  // 旧的「取不到就 error」只允许出现在 failed 分支后面
+  assert.doesNotMatch(hook, /await fetchPendingImage\(pendingId\)/);
+  const goneBlock = hook.slice(hook.indexOf("outcome.status === 'gone'"), hook.indexOf("outcome.status === 'failed'"));
+  assert.doesNotMatch(goneBlock, /console\.error|db\.images\.(delete|update)|setGenerationErrors/);
+});

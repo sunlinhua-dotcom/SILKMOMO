@@ -212,3 +212,45 @@ async function recoverPendingOnce(
   }
   return { ok: true, recoveredShotIndexes };
 }
+
+// ===== [E] SSE 正常交付路径取图 404（gone）兜底 =====
+export interface SseGoneDeps {
+  /** 本地 IndexedDB 里该镜次是否已有 result 图 */
+  hasLocalResult(shotIndex: number): Promise<boolean>;
+  /** 按 taskId 补拉一次（走 recoverPending，同任务串行） */
+  recover(shotIndex: number): Promise<PendingRecoveryResult>;
+  log: { log: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
+}
+
+/**
+ * SSE 正常交付路径上，`GET /api/generation/pending/:id` 返回 404（`gone`）时的收口。
+ *
+ * 404 说明这条 pending 已被另一条路径取走并 DELETE：补拉（先落 IndexedDB 再 release）、另一轮补拉，
+ * 或 TTL 清理。前两种都「先入库再删」，所以本地应该已经有这一镜；这不是失败，只记 info。
+ * 为防 TTL 清理这种「删了但没入库」的极端情况，先核对本地，没有再按 taskId 补拉兜底一次。
+ * 全程不动本地任何数据，也不把这一镜标为失败（收尾的 mergeRunLocalResults 会再核一遍本地结果）。
+ *
+ * 返回：'local' 本地已有；'recovered' 兜底补拉捡回；'missing' 仍没有（才值得 error 级上报）。
+ */
+export async function resolveSseGone(
+  deps: SseGoneDeps,
+  shotIndex: number,
+): Promise<'local' | 'recovered' | 'missing'> {
+  const { log } = deps;
+  if (await deps.hasLocalResult(shotIndex)) {
+    log.log(`[交接缓冲] #${shotIndex} 已被另一条路径取走并入库，跳过`);
+    return 'local';
+  }
+  try {
+    const result = await deps.recover(shotIndex);
+    if (result.recoveredShotIndexes.includes(shotIndex) || await deps.hasLocalResult(shotIndex)) {
+      log.log(`[交接缓冲] #${shotIndex} 取图 404，已由兜底补拉取回`);
+      return 'recovered';
+    }
+  } catch (error) {
+    log.error(`[交接缓冲] #${shotIndex} 取图 404 后兜底补拉失败:`, error);
+    return 'missing';
+  }
+  log.error(`[交接缓冲] #${shotIndex} 取图 404 且本地与补拉都没有这一镜，留待收尾核对`);
+  return 'missing';
+}

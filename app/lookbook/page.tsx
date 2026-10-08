@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import Link from 'next/link';
 import { Camera, History, Plus, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
@@ -10,6 +11,7 @@ import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { ImageUploader } from '@/components/ImageUploader';
 import { ContactAdmin } from '@/components/ContactAdmin';
 import { useToast } from '@/components/ui/Toast';
+import { useLeaveGuard } from '@/hooks/useLeaveGuard';
 import { useConfirm } from '@/components/ui/ConfirmDialog';
 import { refreshBalance, useBalance } from '@/hooks/useBalance';
 import { EngineSelector, type ImageEngine } from '@/components/EngineSelector';
@@ -41,6 +43,9 @@ const PRODUCT_GROUP_IMAGE_MAX = 4;
 const MODEL_FACE_JOB_STORAGE_KEY = 'silkmomo:model-face-job:v1';
 const MODEL_FACE_POLL_INITIAL_MS = 2_000;
 const FACE_READ_FAILED = '选中的模特脸读取失败';
+/** 提交中离开的确认文案：本页只负责建任务（写浏览器存储），尚未向服务器发出任何生成请求，所以不扣费 */
+const LEAVE_SUBMITTING_MESSAGE =
+  '正在把素材保存到浏览器并创建任务，通常几秒就好。现在离开会中断创建：还没有开始出图，不会扣费，但浏览器里可能留下一条没存完整的任务记录，需要回到组图页重新提交。';
 const MODEL_FACE_POLL_MAX_MS = 12_000;
 // 自定义输出尺寸（单边 px）。后端 stream/route.ts 对 custom 只要求 >0 并换算成最接近的
 // 宽高比（gpt-image 只收固定尺寸、gemini 只收比例），所以上限不是服务端硬限；
@@ -271,6 +276,7 @@ export default function LookbookStudio() {
   const [sceneCustomH, setSceneCustomH] = useState(1350);
   const [projectName, setProjectName] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [navigating, setNavigating] = useState(false); // 任务已建好、正要整页跳转：撤掉离开拦截
   const [prepareError, setPrepareError] = useState<string | null>(null);
 
   const groupGarmentImages = Object.values(groupGarments).flat();
@@ -321,6 +327,15 @@ export default function LookbookStudio() {
     accessoryImages.length > 0 ||
     singleSceneImages.length > 0 ||
     productGroups.some(group => group.images.length > 0);
+  // 提交中（把素材写进浏览器、建任务）离开：本页自己不发起任何出图请求，真正的出图在跳转后的任务页，
+  // 所以这里没有「服务器继续跑 / 回来补拉 / 已扣费」的说法——此时服务端还没收到任何生成请求，不扣费；
+  // 离开只会让本次创建半途而止，浏览器里可能留下一条没存完整的任务记录，回到本页重新提交即可。
+  // 出图开始后的离开拦截在任务页（app/task/[id]/page.tsx），文案对照服务端行为另写。
+  useLeaveGuard(isGenerating && !navigating, LEAVE_SUBMITTING_MESSAGE, {
+    title: '任务还在创建中，确定离开？',
+    confirmText: '离开此页',
+    cancelText: '留在此页',
+  });
   useEffect(() => {
     if (!hasUnsavedWork) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -619,7 +634,14 @@ export default function LookbookStudio() {
         }
       }
 
-      navigatingRef.current = true; // 跳转是预期行为，别弹离开提醒
+      // 跳转是预期行为：先同步撤掉离开拦截（它会把多 push 的哨兵历史记录退回去），等退完再整页跳转，
+      // 否则 beforeunload 会对这次正常跳转弹浏览器原生确认。
+      flushSync(() => setNavigating(true));
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, 600);
+        window.addEventListener('popstate', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+      navigatingRef.current = true;
       window.location.href = `/task/${projectId}`;
     } catch (e) {
       console.error('组图生成准备失败:', e);

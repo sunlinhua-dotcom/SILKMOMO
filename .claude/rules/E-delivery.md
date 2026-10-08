@@ -28,7 +28,7 @@ paths:
 - `lib/generation-idempotency.ts` — 重试幂等键。
 - `app/task/[id]/page.tsx` — 任务页壳（约 580 行）：只留页面状态、`loadTaskData`、费用/余额口径、autostart 与各组件的拼装，**不再有大段业务**。
 - `hooks/useTaskGeneration.ts` — 生成控制器（从页面原样搬出，约 1300 行）：SSE 流式生成 `handleStartGeneration`（全量/试生成/剩余/单图重做统一入口）、取消、调整参数重做、单张重做、保留/还原新旧版本、AI 触发整任务重做、断线自动补齐。**按路标取段**：`grep -n "===== \[" hooks/useTaskGeneration.ts`（`[E] SSE 流式生成` 段内再按「分块生成 / 读取 SSE 流 / 统一定稿」注释定位）。各类同步锁 ref（`startLockRef` 等）都在这里。
-- `lib/pending-recovery-core.ts` — 补拉核心（依赖全注入，可单测）：同任务补拉串行；取图 404（`gone`）= 已被别的路径取走，跳过，不重试、不计失败。
+- `lib/pending-recovery-core.ts` — 补拉核心（依赖全注入，可单测）：同任务补拉串行；取图 404（`gone`）= 已被别的路径取走，跳过，不重试、不计失败。另有 `resolveSseGone`：SSE 正常交付路径取图 404 的收口（本地已有=info 跳过；没有再按 taskId 补拉兜底），hook 里用 `fetchPendingImageForSse` 拿三态结果，404 不打 error、不标失败、不动本地图。
 - `lib/pending-recovery.ts` — 装配真实 fetch/Dexie；看门狗常量（`STALL_BYTES_MS` / `STALL_EVENT_MS`）与补拉 `recoverPendingImages`（带 `[E] 看门狗与补拉` 路标）、锚图压缩 `toCompressedAnchor`、`fetchPendingImage` / `releasePendingImage`。
 - `lib/task-page-helpers.ts` — 任务页纯函数/类型：错误文案、`backupMatchesImage`、`buildProductGroupsFromImages`、`parseSelectedShots`、`formatYuan` 等。
 - `hooks/useLeaveGuard.ts` + `lib/leave-guard.ts` — 生成中离开拦截（归 U，任务页接入）。

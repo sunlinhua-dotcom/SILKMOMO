@@ -25,7 +25,8 @@ import {
 import {
   STALL_BYTES_MS,
   STALL_EVENT_MS,
-  fetchPendingImage,
+  fetchPendingImageForSse,
+  resolveSseGoneForTask,
   recoverPendingImages,
   releasePendingImage,
   toCompressedAnchor,
@@ -607,11 +608,17 @@ export function useTaskGeneration(args: UseTaskGenerationArgs) {
                 ? payload.mimeType
                 : 'image/png';
               if (!imageData && pendingId) {
-                const fetched = await fetchPendingImage(pendingId);
-                if (!fetched) {
+                const outcome = await fetchPendingImageForSse(pendingId);
+                if (outcome.status === 'gone') {
+                  // 404：身份锚已被另一条路径（补拉）取走并入库；后续用本地锚，不是失败
+                  console.info('[交接缓冲] 身份锚已被另一条路径取走，跳过');
+                  continue;
+                }
+                if (outcome.status === 'failed') {
                   console.error('[anchor 取回] 失败，继续生成并回退首张成功图');
                   continue;
                 }
+                const fetched = outcome.image;
                 imageData = fetched.data;
                 anchorMime = fetched.mimeType || anchorMime;
               }
@@ -656,14 +663,24 @@ export function useTaskGeneration(args: UseTaskGenerationArgs) {
               // 新链路：SSE 只推 id，图走普通 HTTP 取；服务端交接缓冲不可用时才回退直推。
               let imageData = payload.imageData as string;
               if (!imageData && pendingId) {
-                const fetched = await fetchPendingImage(pendingId);
-                if (!fetched) {
+                const outcome = await fetchPendingImageForSse(pendingId);
+                if (outcome.status === 'gone') {
+                  // 404 = 已被另一条路径（补拉）先取走并入库，是正常竞态：info 级，不标失败、不动本地图。
+                  // 本地没有时按 taskId 补拉兜底；收尾的 mergeRunLocalResults 还会再核对一遍本地结果。
+                  const resolved = await resolveSseGoneForTask(taskId, shotIndex);
+                  if (resolved !== 'missing') {
+                    successfulShotIndexes.add(shotIndex);
+                    successCount = successfulShotIndexes.size;
+                  }
+                  continue;
+                }
+                if (outcome.status === 'failed') {
                   // 图仍在服务端等着，重进任务页时的补拉会捡回来；这里不计成功，
                   // 免得 UI 显示已出图而本地其实没有。
                   console.error(`[交接缓冲] #${shotIndex} 取图未成功，留待补拉`);
                   continue;
                 }
-                imageData = fetched.data;
+                imageData = outcome.image.data;
               }
               console.log(`[SSE] 图片 #${shotIndex} 大小: ${imageData?.length ?? 0} chars`);
               // 跨块累计进度(用 grandTotal 作分母,doneSoFar 作偏移)

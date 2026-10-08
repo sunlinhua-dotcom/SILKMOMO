@@ -47,7 +47,7 @@ paths:
 - `components/useRadioGroup.ts` + 各 `*Selector.tsx` — 单选组 `radiogroup` 方向键、多选 `aria-pressed`、40px 点击区。
 - `components/ResultGallery.tsx`、`ImageLightbox.tsx`、`TimeMachine.tsx`、`UserNav.tsx`、`WorkspaceSwitcher.tsx`、`ContactAdmin.tsx`、`Logo.tsx`、`ModelQuickPicker.tsx`、`ProductShotModule.tsx`、`SceneShotModule.tsx`、`ModelIcons.tsx`、`StyleIcons.tsx`。
 - `hooks/useBalance.ts` — 余额共享 store（模块级单例，状态 loading / ready / error / unauthenticated，聚焦刷新节流 30s），导航与各页共用；`hooks/useBrandMemory.ts`、`useProductAnalysis.ts`。
-- `hooks/useLeaveGuard.ts` + `lib/leave-guard.ts` — 「进行中离开拦截」：`useLeaveGuard(active, message)` 在 active 时拦刷新/关闭（beforeunload）、同源站内链接（document 捕获阶段 + `ConfirmDialog`，确认后 `router.push`）、浏览器后退（pushState 哨兵 + popstate）；active 结束/卸载时清监听并 `history.back()` 掉哨兵，不留多余历史记录。链接过滤规则是纯函数 `decideLeaveGuardLink`（有单测）。目前接入：任务页；组图页待接。
+- `hooks/useLeaveGuard.ts` + `lib/leave-guard.ts` — 「进行中离开拦截」：`useLeaveGuard(active, message)` 在 active 时拦刷新/关闭（beforeunload）、同源站内链接（document 捕获阶段 + `ConfirmDialog`，确认后 `router.push`）、浏览器后退（pushState 哨兵 + popstate）；active 结束/卸载时清监听并 `history.back()` 掉哨兵，不留多余历史记录。链接过滤规则是纯函数 `decideLeaveGuardLink`（有单测）。目前接入：任务页（出图中，文案见任务页 `LEAVE_GENERATING_MESSAGE`）、组图页（仅「提交中」：写浏览器存储 + 建任务，期间服务端尚无生成请求、不扣费；成功后先 `flushSync` 撤拦截再整页跳转，避免对预期跳转弹原生确认）。
 - `lib/contact.ts` — 管理员联系方式常量 `ADMIN_WECHAT`（原先硬编码在首页充值弹窗）；`lib/format-time.ts` — 相对时间文案 `formatRelativeTime`（任务列表/流水等共用，原先各处重复）。
 - `lib/models.ts` — 预设模特与体型/肤色参数配置（前后端共用）。
 

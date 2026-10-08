@@ -165,3 +165,17 @@ test('a user-chosen face is not mistaken for a redo anchor', () => {
   assert.match(routeSource, /isRegeneration: requestHasSceneGroupAnchor && anchorIsUserChosen !== true/);
   assert.match(taskSource, /anchorIsUserChosen: freshProject\.modelFaceChosen === true/);
 });
+
+test('组图页提交中接入 useLeaveGuard：文案不谎称服务器继续出图，预期跳转前先撤拦截', () => {
+  const source = fs.readFileSync('app/lookbook/page.tsx', 'utf8');
+  assert.match(source, /import \{ useLeaveGuard \} from '@\/hooks\/useLeaveGuard'/);
+  assert.match(source, /useLeaveGuard\(isGenerating && !navigating, LEAVE_SUBMITTING_MESSAGE/);
+  const message = source.match(/const LEAVE_SUBMITTING_MESSAGE =\s*'([^']+)'/)?.[1] ?? '';
+  // 本页只建任务：未向服务器发出生成请求 → 不扣费；不能出现「继续生成 / 补回」之类任务页才成立的说法
+  assert.match(message, /还没有开始出图，不会扣费/);
+  assert.doesNotMatch(message, /继续完成|补回|已扣费/);
+  // 成功后同步撤掉拦截再整页跳转，否则 beforeunload 会对正常跳转弹原生确认
+  const flushIdx = source.indexOf('flushSync(() => setNavigating(true))');
+  const hrefIdx = source.indexOf('window.location.href = `/task/${projectId}`');
+  assert.ok(flushIdx > 0 && hrefIdx > flushIdx);
+});

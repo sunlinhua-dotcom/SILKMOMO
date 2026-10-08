@@ -43,7 +43,7 @@
 ## 工作协议（省 token）
 
 1. **先定板块**：照上表找到板块，只读它规则文件里的「文件清单」，不要顺着 import 一路读下去。
-2. **巨文件按路标取段**：`app/api/generate/stream/route.ts`、`app/task/[id]/page.tsx`、`app/lookbook/page.tsx`、`app/page.tsx` 都加了 `// ===== [板块] 名称 · 开始/结束 =====` 路标。先 `grep -n "===== \[" <文件>` 拿到行号，再 `sed -n 'a,bp'` 只取需要的段，不要整读。
+2. **巨文件按路标取段**：`app/api/generate/stream/route.ts`、`hooks/useTaskGeneration.ts`（任务页生成逻辑，约 1300 行）、`app/lookbook/page.tsx`、`app/page.tsx` 都加了 `// ===== [板块] 名称 · 开始/结束 =====` 路标。任务页壳 `app/task/[id]/page.tsx` 已瘦到约 580 行，界面路标分散在 `components/task/*`（生成中 / 结果展示 / 失败状态各一段），不再是巨文件。先 `grep -n "===== \[" <文件>` 拿到行号，再 `sed -n 'a,bp'` 只取需要的段，不要整读。
 3. **测试按板块跑**：默认只跑该板块的 `npm run test:<板块>`；只有改动跨板块或动了共享依赖才跑 `npm test`。
 4. **主线程不 Read 图片**；所有验证素材、实验产物一律放 `verify/`（已 gitignore），不要落在仓库根。
 5. **交接、报告、复盘类文档放 `docs/handoff/`**，根目录只留项目本体。
