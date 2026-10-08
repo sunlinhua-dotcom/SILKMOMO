@@ -51,6 +51,17 @@ function parseRechargeFen(input: string): number | null {
   return fen;
 }
 
+/** 充值幂等用的 requestId：优先 crypto.randomUUID()，非安全上下文（http 内网访问）下回退到 getRandomValues 拼 v4 UUID。 */
+function newRequestId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export default function AdminPage() {
   const toast = useToast();
   const [stats, setStats] = useState<AdminStats | null>(null);
@@ -68,6 +79,9 @@ export default function AdminPage() {
   const [recharging, setRecharging] = useState(false);
   const [rechargeError, setRechargeError] = useState('');
   const rechargingRef = useRef(false);
+  // 一次充值意图的幂等 requestId：同一用户 + 同一金额的重试（超时/网络错误后再点确认）复用同一个，
+  // 服务端据此不重复入账；金额或用户变了就是新意图，换新的；成功或关闭弹窗后清掉。
+  const rechargeRequestRef = useRef<{ userId: string; amountFen: number; requestId: string } | null>(null);
   const listAbortRef = useRef<AbortController | null>(null);
   const amountRef = useRef<HTMLInputElement>(null);
 
@@ -131,6 +145,7 @@ export default function AdminPage() {
 
   const closeRecharge = () => {
     if (rechargingRef.current) return;
+    rechargeRequestRef.current = null;
     setRechargeModal(null);
     setRechargeAmount('');
     setRechargeNote('');
@@ -149,6 +164,14 @@ export default function AdminPage() {
     setRecharging(true);
     setRechargeError('');
     const target = rechargeModal;
+    if (
+      !rechargeRequestRef.current
+      || rechargeRequestRef.current.userId !== target.userId
+      || rechargeRequestRef.current.amountFen !== amountFen
+    ) {
+      rechargeRequestRef.current = { userId: target.userId, amountFen, requestId: newRequestId() };
+    }
+    const requestId = rechargeRequestRef.current.requestId;
 
     try {
       const res = await fetch('/api/admin/users', {
@@ -158,16 +181,24 @@ export default function AdminPage() {
           userId: target.userId,
           amountFen,
           description: rechargeNote.trim() || `管理员充值 ¥${amountFen / 100}`,
+          requestId,
         }),
       });
       const data = await res.json().catch(() => ({}));
 
       if (data.success) {
-        toast.success(`已为 ${target.name || target.username} 充值 ${formatFen(amountFen)}，新余额 ${formatFen(data.balanceAfter)}`);
-        // 就地更新该用户行，再刷新统计
-        setUsers(prev => prev.map(u => (u.id === target.userId
-          ? { ...u, balanceFen: data.balanceAfter, _count: { transactions: u._count.transactions + 1 } }
-          : u)));
+        rechargeRequestRef.current = null; // 这笔已入账，下一次充值是新意图
+        if (data.duplicate) {
+          // 服务端识别为重复提交，没有再加钱；balanceAfter 是第一次入账后的余额快照，不一定是当前余额，故重新拉列表
+          toast.success(`这笔 ${formatFen(amountFen)} 充值已入账过，本次重复提交没有再加钱`);
+          void loadUsers(1, query);
+        } else {
+          toast.success(`已为 ${target.name || target.username} 充值 ${formatFen(amountFen)}，新余额 ${formatFen(data.balanceAfter)}`);
+          // 就地更新该用户行，再刷新统计
+          setUsers(prev => prev.map(u => (u.id === target.userId
+            ? { ...u, balanceFen: data.balanceAfter, _count: { transactions: u._count.transactions + 1 } }
+            : u)));
+        }
         rechargingRef.current = false;
         setRecharging(false);
         setRechargeModal(null);
@@ -176,6 +207,7 @@ export default function AdminPage() {
         void loadStats();
         return;
       }
+      if (data.conflict) rechargeRequestRef.current = null; // requestId 与已有流水冲突：下次确认换新的
       setRechargeError(data.error || '充值失败');
     } catch {
       setRechargeError('充值失败，请检查网络后重试');
@@ -327,7 +359,7 @@ export default function AdminPage() {
                     <p className="text-xs text-muted">余额</p>
                   </div>
                   <button
-                    onClick={() => { setRechargeError(''); setRechargeModal({ userId: u.id, username: u.username, name: u.name }); }}
+                    onClick={() => { setRechargeError(''); rechargeRequestRef.current = null; setRechargeModal({ userId: u.id, username: u.username, name: u.name }); }}
                     className="flex items-center gap-1.5 min-h-9 px-3 py-1.5 text-xs font-medium bg-brand-strong text-white rounded-lg hover:opacity-90 transition-opacity"
                   >
                     <Plus className="w-3.5 h-3.5" aria-hidden="true" />

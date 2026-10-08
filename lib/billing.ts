@@ -9,6 +9,11 @@ import {
   retryWithBackoff,
   toSafeBillingError,
 } from './generation-billing-core';
+import {
+  rechargeWithIdempotency,
+  type AdminRechargePrisma,
+  type AdminRechargeResult,
+} from './admin-recharge-core';
 export { PRICING, RECHARGE_PACKAGES } from './billing-constants'
 
 function assertValidCostFen(costFen: number): number {
@@ -227,36 +232,20 @@ export async function refundBalance(
 }
 
 // ═══ 充值（管理员操作）═══
+// 带 requestId 时走服务端幂等（Transaction.idempotencyKey = admin-recharge:<requestId>），
+// 同一 requestId 重放不再加钱，返回第一次的结果并带 duplicate: true；不带则保持旧行为（不幂等）。
 export async function rechargeBalance(
   userId: string,
   amountFen: number,
-  description: string = '管理员充值'
-): Promise<{ success: boolean; balanceAfter: number; error?: string }> {
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      const updated = await tx.user.update({
-        where: { id: userId },
-        data: { balanceFen: { increment: amountFen } },
-      });
-
-      await tx.transaction.create({
-        data: {
-          userId,
-          type: 'recharge',
-          amountFen: amountFen,
-          balanceAfter: updated.balanceFen,
-          description,
-        },
-      });
-
-      return { balanceAfter: updated.balanceFen };
-    });
-
-    return { success: true, balanceAfter: result.balanceAfter };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : '充值失败';
-    return { success: false, balanceAfter: 0, error: msg };
-  }
+  description: string = '管理员充值',
+  requestId?: string,
+): Promise<AdminRechargeResult> {
+  return rechargeWithIdempotency(prisma as unknown as AdminRechargePrisma, {
+    userId,
+    amountFen,
+    description,
+    requestId,
+  });
 }
 
 // ═══ 查询消费记录 ═══
