@@ -29,6 +29,7 @@ paths:
 - **`gemini-3-pro-image` 当锚会把成图带偏白**。默认锚模型是 `gemini-3.1-flash-image-preview`（环境变量 `DERIVED_ANCHOR_MODEL`），不要"升级"到 pro。
 - **肤色指令看起来重复，但不能删**。删过，成图立刻偏色。
 - 脸图属于用户隐私素材，调试时不要把图落到仓库里，放 `verify/`。
+- **派生身份锚走 Gemini 协议**（`lib/image-backends.ts` 的 `DERIVED_ANCHOR_MODEL`），密钥在请求头 `x-goog-api-key`；脸库候选脸走 OpenAI 兼容的 `/v1/images/generations`（Bearer）。上游地址变量见 B 板块（`GEMINI_BASE_URL` / `OPENAI_IMAGE_BASE_URL`）。
 
 ## 测试与验收
 - `npm run test:face`

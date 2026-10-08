@@ -311,7 +311,8 @@ async function normalizeBackendReferenceImages(input: BackendInput): Promise<Bac
 
 async function generateWithGemini(input: BackendInput): Promise<BackendResult> {
   const model = input.promptPurpose === 'derived-anchor' ? DERIVED_ANCHOR_MODEL : GEMINI_MODEL;
-  const url = `${APIYI_BASE}/v1beta/models/${model}:generateContent?key=${API_KEY}`;
+  // 密钥走请求头 x-goog-api-key，不拼进 URL（URL 会随 fetch 异常、中转站日志外泄）。
+  const url = `${APIYI_BASE}/v1beta/models/${model}:generateContent`;
   // 请求体（含全部参考图 base64）只序列化一次，重试直接复用同一个字符串
   const body = JSON.stringify({
     contents: [{ parts: buildGeminiParts(input) }],
@@ -328,7 +329,7 @@ async function callGemini(model: string, url: string, body: string, retryCount: 
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': API_KEY },
       signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
       cache: 'no-store',
       body,
