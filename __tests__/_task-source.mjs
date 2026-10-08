@@ -8,6 +8,7 @@ export const TASK_PAGE_SOURCE_FILES = [
   'app/task/[id]/page.tsx',
   'hooks/useTaskGeneration.ts',
   'lib/pending-recovery.ts',
+  'lib/pending-recovery-core.ts',
   'lib/task-page-helpers.ts',
   ...fs.readdirSync('components/task')
     .filter((name) => /\.(tsx|ts)$/.test(name))

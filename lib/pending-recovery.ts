@@ -1,6 +1,7 @@
-import { db } from '@/lib/db';
+import { db, type ImageItem } from '@/lib/db';
 import { compressImage } from '@/lib/image-compressor';
-import { fetchPendingImageWithRetry } from '@/lib/pending-fetch';
+import { fetchPendingImageOutcome, fetchPendingImageWithRetry } from '@/lib/pending-fetch';
+import { recoverPending, type PendingMeta, type PendingRecoveryResult } from '@/lib/pending-recovery-core';
 
 // ===== [E] 看门狗与补拉 · 开始 =====
 // ═══ SSE 停滞看门狗 ═══
@@ -99,134 +100,43 @@ export async function releasePendingImage(pendingId: string): Promise<void> {
  * 一次钱），现在服务端会把图留在交接缓冲里，进任务页就能补回来。
  * 幂等：同一 shotIndex 本地已有 result 且内容一致才视为重复；内容不同＝新付费的图，旧图降级为备份。
  */
-export interface PendingRecoveryResult {
-  ok: boolean;
-  recoveredShotIndexes: number[];
-}
-
-export async function recoverPendingImages(
+export function recoverPendingImages(
   taskId: number,
   expectedShotIndexes: readonly number[] = [],
 ): Promise<PendingRecoveryResult> {
-  const recoveredShotIndexes: number[] = [];
-  for (let attempt = 0; attempt < PENDING_RECOVERY_ATTEMPTS; attempt++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PENDING_FETCH_TIMEOUT_MS);
-    try {
-      const res = await fetch(`/api/generation/pending?taskId=${taskId}&includeAnchor=1`, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { images } = await res.json() as {
-        images: Array<{ id: string; kind: string; shotIndex: number; width: number; height: number }>;
-      };
-      if (!Array.isArray(images)) throw new Error('响应缺少待取图片列表');
-
-      const local = await db.images.where('projectId').equals(taskId).toArray();
-      for (const meta of images) {
-        if (meta.kind === 'anchor') {
-          const existingAnchor = local.find(i => i.type === 'anchor');
-          if (existingAnchor) {
-            void releasePendingImage(meta.id);
-            continue;
-          }
-          const fetchedAnchor = await fetchPendingImage(meta.id);
-          if (!fetchedAnchor) {
-            console.error(`[交接缓冲] 身份锚 ${meta.id} 未能取回，继续并回退首张成功图`);
-            continue;
-          }
-          try {
-            await db.images.add({
-              projectId: taskId,
-              type: 'anchor',
-              data: fetchedAnchor.data,
-              mimeType: fetchedAnchor.mimeType || 'image/png',
-            });
-            local.push({
-              projectId: taskId,
-              type: 'anchor',
-              data: fetchedAnchor.data,
-              mimeType: fetchedAnchor.mimeType || 'image/png',
-            });
-            void releasePendingImage(meta.id);
-          } catch (error) {
-            console.error('[交接缓冲] 身份锚落库失败，继续并回退首张成功图:', error);
-          }
-          continue;
-        }
-        const persistedShotIndex = meta.shotIndex > 0 ? meta.shotIndex : undefined;
-        const existingResult = local.find(i => i.type === 'result' && i.shotIndex === persistedShotIndex);
-        // 本地同镜次已有 result，不等于这张 pending 是它的重复：
-        // 用户重做某镜次并付费后，若这一轮没送达，生成收尾会先把旧图（result_backup）还原成 result，
-        // 随后补拉发现「同 shotIndex 已有 result」——旧逻辑直接 DELETE，等于把刚付费的新图丢了。
-        // 所以先把 pending 取回来比对内容：一模一样才是重复（释放即可）；不一样就是新付费的图，
-        // 旧图降级为 result_backup（保留可还原），新图作为 result 入库。
-        const fetched = await fetchPendingImage(meta.id);
-        if (!fetched) throw new Error(`待取图片 ${meta.id} 未能取回`);
-        if (existingResult) {
-          if (existingResult.data === fetched.data) {
-            void releasePendingImage(meta.id);
-            continue;
-          }
-          const staleBackups = await db.images
-            .where('projectId').equals(taskId)
-            .filter(i => i.type === 'result_backup' && i.shotIndex === persistedShotIndex)
-            .toArray();
-          for (const backup of staleBackups) {
-            if (backup.id !== undefined) await db.images.delete(backup.id);
-          }
-          if (existingResult.id !== undefined) {
-            await db.images.update(existingResult.id, { type: 'result_backup' });
-          }
-          existingResult.type = 'result_backup';
-        }
-        await db.images.add({
-          projectId: taskId,
-          type: 'result',
-          data: fetched.data,
-          mimeType: fetched.mimeType || 'image/png',
-          shotIndex: persistedShotIndex,
-          imageType: 'hero',
-          index: meta.shotIndex,
+  return recoverPending(
+    {
+      async listPending(id, signal) {
+        const res = await fetch(`/api/generation/pending?taskId=${id}&includeAnchor=1`, {
+          cache: 'no-store',
+          signal,
         });
-        local.push({
-          projectId: taskId,
-          type: 'result',
-          data: fetched.data,
-          mimeType: fetched.mimeType || 'image/png',
-          shotIndex: persistedShotIndex,
-        });
-        recoveredShotIndexes.push(meta.shotIndex);
-        void releasePendingImage(meta.id);
-      }
-
-      if (expectedShotIndexes.length > 0) {
-        // 仅诊断：缺口的补齐交给生成路径（recoveryGate / finalizeGeneration），这里不据此改库
-        const haveShots = new Set(local.filter(i => i.type === 'result').map(i => i.shotIndex ?? 0));
-        const stillMissing = expectedShotIndexes.filter(shot => !haveShots.has(shot));
-        if (stillMissing.length > 0) {
-          console.log(`[交接缓冲] 补拉后本地仍缺镜次 ${stillMissing.join(',')}，交给生成路径处理`);
-        }
-      }
-      if (recoveredShotIndexes.length > 0) {
-        console.log(`[交接缓冲] 补回 ${recoveredShotIndexes.length} 张此前未送达的图`);
-      }
-      // 列表成功且其中的结果都已处理，说明当前没有更多可补；缺口应交给生成路径，
-      // 不能为了等一个尚不存在的 pending 固定空转三轮。
-      return { ok: true, recoveredShotIndexes };
-    } catch (err) {
-      console.error(`[交接缓冲] 补拉失败(${attempt + 1}/${PENDING_RECOVERY_ATTEMPTS}):`, err);
-      if (attempt === PENDING_RECOVERY_ATTEMPTS - 1) {
-        return { ok: false, recoveredShotIndexes };
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
-    if (attempt < PENDING_RECOVERY_ATTEMPTS - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-    }
-  }
-  return { ok: true, recoveredShotIndexes };
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { images } = await res.json() as { images: PendingMeta[] };
+        return images;
+      },
+      fetchImage: pendingId =>
+        fetchPendingImageOutcome(pendingId, {
+          attempts: 3,
+          handshakeTimeoutMs: PENDING_FETCH_TIMEOUT_MS,
+          onAttemptError: (err, attempt, total) => {
+            console.error(`[交接缓冲] 取图失败(${attempt}/${total}):`, err);
+          },
+        }),
+      release: pendingId => { void releasePendingImage(pendingId); },
+      store: {
+        list: id => db.images.where('projectId').equals(id).toArray(),
+        add: image => db.images.add(image as ImageItem),
+        setType: (id, type) => db.images.update(id, { type: type as ImageItem['type'] }),
+        remove: id => db.images.delete(id),
+      },
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      attempts: PENDING_RECOVERY_ATTEMPTS,
+      listTimeoutMs: PENDING_FETCH_TIMEOUT_MS,
+      log: console,
+    },
+    taskId,
+    expectedShotIndexes,
+  );
 }
 // ===== [E] 看门狗与补拉 · 结束 =====
