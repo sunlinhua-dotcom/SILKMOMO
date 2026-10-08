@@ -4,7 +4,12 @@ import { checkBalance } from '@/lib/billing';
 import { getGenerationCostFen } from '@/lib/billing-constants';
 import { MODEL_FACE_SPECS, buildModelFacePortraitPrompt } from '@/lib/api';
 import { generateImage, resolveApiModel } from '@/lib/image-backends';
-import { prepareModelFaceImage, storePreparedModelFace } from '@/lib/model-face-library';
+import {
+  discardUnstoredModelFaceImages,
+  persistPreparedModelFaceImages,
+  prepareModelFaceImage,
+  storePreparedModelFace,
+} from '@/lib/model-face-library';
 import { chargeModelFaceItem, refundModelFaceItem } from '@/lib/model-face-billing';
 import {
   isPrismaUniqueConstraintError,
@@ -398,26 +403,33 @@ async function runModelFaceJob(jobId: string): Promise<void> {
         },
         store: async input => {
           const normalized = await prepareModelFaceImage(input.data);
-          return prisma.$transaction(async tx => {
-            const owned = await tx.modelFaceGenerationJob.updateMany({
-              where: { id: jobId, status: 'running', runnerId: PROCESS_RUNNER_ID },
-              data: { leaseUntil: leaseDeadline() },
+          // 对象存储上传要走网络，放在事务之外；启用但失败会回退存库，不会抛
+          const persisted = await persistPreparedModelFaceImages(input.userId, normalized);
+          try {
+            return await prisma.$transaction(async tx => {
+              const owned = await tx.modelFaceGenerationJob.updateMany({
+                where: { id: jobId, status: 'running', runnerId: PROCESS_RUNNER_ID },
+                data: { leaseUntil: leaseDeadline() },
+              });
+              if (owned.count === 0) throw new ModelFaceLeaseLostError();
+              const face = await storePreparedModelFace({
+                userId: input.userId,
+                image: input.data,
+                mimeType: input.mimeType,
+                specIndex: input.specIndex,
+                recipeLabel: RECIPE_LABELS[input.specIndex],
+              }, persisted, tx);
+              const stored = await tx.modelFaceGenerationItem.updateMany({
+                where: { id: item.id, status: 'running', billingStatus: 'charged' },
+                data: { status: 'succeeded', billingStatus: 'kept', faceId: face.id, error: null },
+              });
+              if (stored.count === 0) throw new ModelFaceLeaseLostError();
+              return face;
             });
-            if (owned.count === 0) throw new ModelFaceLeaseLostError();
-            const face = await storePreparedModelFace({
-              userId: input.userId,
-              image: input.data,
-              mimeType: input.mimeType,
-              specIndex: input.specIndex,
-              recipeLabel: RECIPE_LABELS[input.specIndex],
-            }, normalized, tx);
-            const stored = await tx.modelFaceGenerationItem.updateMany({
-              where: { id: item.id, status: 'running', billingStatus: 'charged' },
-              data: { status: 'succeeded', billingStatus: 'kept', faceId: face.id, error: null },
-            });
-            if (stored.count === 0) throw new ModelFaceLeaseLostError();
-            return face;
-          });
+          } catch (error) {
+            await discardUnstoredModelFaceImages(persisted);
+            throw error;
+          }
         },
         refund: input => refundModelFaceItem(
           item.id,

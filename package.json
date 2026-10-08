@@ -19,6 +19,7 @@
     "@prisma/adapter-pg": "7.6.0",
     "@prisma/client": "7.6.0",
     "@types/file-saver": "^2.0.7",
+    "aws4fetch": "1.0.20",
     "bcryptjs": "^3.0.3",
     "dexie": "^4.3.0",
     "dotenv": "^17.4.0",
