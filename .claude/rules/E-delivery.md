@@ -8,6 +8,8 @@ paths:
   - "app/tasks/**"
   - "components/task/**"
   - "components/TaskList.tsx"
+  - "hooks/useTaskGeneration.ts"
+  - "lib/task-page-helpers.ts"
   - "app/api/generation/pending/**"
   - "app/api/generation/by-task/**"
   - "app/api/generation/feedback/**"
@@ -24,8 +26,11 @@ paths:
 - `lib/generation-recovery.ts` — 断线恢复。
 - `lib/sse-backpressure.ts` — SSE 背压。
 - `lib/generation-idempotency.ts` — 重试幂等键。
-- `app/task/[id]/page.tsx` — 任务页（2400+ 行）。**按路标取段**：看门狗与补拉段在文件前部（约 110–160 行），三块结果 UI 各自成段。
-- `components/task/` — 任务页拆出的小组件：`GenerationProgress`（计时器独立，避免整页每秒重渲染）、`InputThumb`、`RotatingTips`、`ShotNotices`。
+- `app/task/[id]/page.tsx` — 任务页壳（约 580 行）：只留页面状态、`loadTaskData`、费用/余额口径、autostart 与各组件的拼装，**不再有大段业务**。
+- `hooks/useTaskGeneration.ts` — 生成控制器（从页面原样搬出，约 1300 行）：SSE 流式生成 `handleStartGeneration`（全量/试生成/剩余/单图重做统一入口）、取消、调整参数重做、单张重做、保留/还原新旧版本、AI 触发整任务重做、断线自动补齐。**按路标取段**：`grep -n "===== \[" hooks/useTaskGeneration.ts`（`[E] SSE 流式生成` 段内再按「分块生成 / 读取 SSE 流 / 统一定稿」注释定位）。各类同步锁 ref（`startLockRef` 等）都在这里。
+- `lib/pending-recovery.ts` — 看门狗常量（`STALL_BYTES_MS` / `STALL_EVENT_MS`）与补拉 `recoverPendingImages`（带 `[E] 看门狗与补拉` 路标）、锚图压缩 `toCompressedAnchor`、`fetchPendingImage` / `releasePendingImage`。
+- `lib/task-page-helpers.ts` — 任务页纯函数/类型：错误文案、`backupMatchesImage`、`buildProductGroupsFromImages`、`parseSelectedShots`、`formatYuan` 等。
+- `hooks/useLeaveGuard.ts` + `lib/leave-guard.ts` — 生成中离开拦截（归 U，任务页接入）。
 - `app/tasks/page.tsx` + `components/TaskList.tsx` — 任务列表（数据来自 I 板块的 `lib/recent-tasks.ts`）。
 - `lib/billing-reconcile.ts` — 孤儿扣费清扫（归 F，交叉提及：它与 pending 交付共用「是否已交付」的判据，同时顺带清理过期 pending 交接图）。
 - `app/api/generation/by-task/[taskId]/route.ts`、`app/api/generation/feedback/route.ts`

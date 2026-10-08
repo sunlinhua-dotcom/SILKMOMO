@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { readTaskPageSource } from './_task-source.mjs';
 import test from 'node:test';
 
 const delivery = await import('../lib/pending-delivery-core.ts').catch(() => ({}));
@@ -82,7 +83,7 @@ test('pending store failure keeps the existing fail-open inline delivery', async
 });
 
 test('page recovery distinguishes pending anchors from paid results and persists both', () => {
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
   const pendingSource = fs.readFileSync('lib/pending-image.ts', 'utf8');
   assert.match(pendingSource, /select: \{ id: true, kind: true, shotIndex: true/);
   assert.match(taskSource, /if \(meta\.kind === 'anchor'\)/);

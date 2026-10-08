@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { readTaskPageSource } from './_task-source.mjs';
 import test from 'node:test';
 
 // 0906 板块拆分：脸库面板已搬到 components/ModelFaceLibraryPanel.tsx。
@@ -35,7 +36,7 @@ test('lookbook swap tab places model before optional accessories with contiguous
 });
 
 test('pending task parameter panel hides model selectors for follow_scene group tasks', () => {
-  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const source = readTaskPageSource();
   const pendingStart = source.indexOf("{project.status === 'pending' && !generating && (");
   const buttonStart = source.indexOf("{moduleType === 'product' && getShotCount() > 1 ?", pendingStart);
   const pendingPanel = source.slice(pendingStart, buttonStart);
@@ -51,7 +52,7 @@ test('pending task parameter panel hides model selectors for follow_scene group 
 });
 
 test('task generation watchdog isolates stalls to one chunk and consumes phase heartbeats', () => {
-  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const source = readTaskPageSource();
   const chunkLoop = source.indexOf('for (let chunkIdx = 0; chunkIdx < genChunks.length; chunkIdx++)');
   const chunkController = source.indexOf('const chunkController = new AbortController()', chunkLoop);
   const chunkCatch = source.indexOf('if (stalledOut !== null)', chunkController);
@@ -74,7 +75,7 @@ test('task generation watchdog isolates stalls to one chunk and consumes phase h
 });
 
 test('every anchor source is compressed before it is re-uploaded per shot', () => {
-  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const source = readTaskPageSource();
 
   // 锚图在每一张请求里都要重传。0731 线上实测：补齐路径（「生成剩余 N 张」）
   // 直接拿全尺寸结果图当锚，服务端收到 2926199B image/png 1792x2400，
@@ -101,7 +102,7 @@ test('every anchor source is compressed before it is re-uploaded per shot', () =
 });
 
 test('event watchdog does not count down while a large data: line is still arriving', () => {
-  const source = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const source = readTaskPageSource();
 
   // result 事件是一张 4~5MB base64 图，整张就是一条 data: 行。下载期间解析不出完整
   // 事件，lastEventAt 会冻住，事件看门狗就在「下载一张图」的过程中把连接掐了——
@@ -158,7 +159,7 @@ test('model face list uses thumbnails and selected originals are fetched by id',
 
 test('a user-chosen face is not mistaken for a redo anchor', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   // 单张重做回传的锚会让服务端加上「贴合已通过组图」的口径，对新任务是错的
   assert.match(routeSource, /isRegeneration: requestHasSceneGroupAnchor && anchorIsUserChosen !== true/);

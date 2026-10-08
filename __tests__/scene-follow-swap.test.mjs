@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { readTaskPageSource } from './_task-source.mjs';
 import test from 'node:test';
 import sharp from 'sharp';
 
@@ -181,7 +182,7 @@ test('no long upstream await is left without a data: heartbeat', () => {
 
 test('client event watchdog stays above the server single-shot ceiling', () => {
   const backendSource = fs.readFileSync('lib/image-backends.ts', 'utf8');
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   const serverMs = Number(backendSource.match(/const OPENAI_TIMEOUT_MS = ([\d_]+)/)[1].replace(/_/g, ''));
   const clientMs = Number(taskSource.match(/openai: ([\d_]+),/)[1].replace(/_/g, ''));
@@ -195,7 +196,7 @@ test('client event watchdog stays above the server single-shot ceiling', () => {
 });
 
 test('finalization recomputes the remaining count instead of reusing a mid-run snapshot', () => {
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   assert.match(taskSource, /const recovery = await recoverPendingImages\(taskId, expectedShotIndexes\)/);
   assert.match(taskSource, /const finalRemaining = outcome\.remaining\.length/);
@@ -244,7 +245,7 @@ test('garment analysis failure is no longer swallowed silently', () => {
 
 test('generated images are handed off by id, not pushed through SSE', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   // 4~5MB 的图作为一条 data: 行是 0731 客户「生成失败」的根因；改为只推 id。
   assert.doesNotMatch(routeSource, /push\('result', \{[\s\S]{0,120}imageData: result\.data/);
@@ -292,7 +293,7 @@ test('disconnect auto-continues once, only for stalls, and never for fatal error
 
 test('garment analysis is reused across chunks instead of re-run every time', () => {
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   // swap 模式原本每块都对同一张产品图重跑一次分析（6 张图＝6 次上游调用）
   assert.match(routeSource, /if \(sceneGroupMode === 'swap' && reusableGarmentDescription\)/);
@@ -305,7 +306,7 @@ test('garment analysis is reused across chunks instead of re-run every time', ()
 test('mixed-garment warning rides on the existing analysis call (no extra upstream cost)', () => {
   const aiSource = fs.readFileSync('lib/ai-assistant.ts', 'utf8');
   const routeSource = fs.readFileSync('app/api/generate/stream/route.ts', 'utf8');
-  const taskSource = fs.readFileSync('app/task/[id]/page.tsx', 'utf8');
+  const taskSource = readTaskPageSource();
 
   // 关键约束：不新增上游调用、不额外扣费 —— 其余产品图搭在已有的那次分析里一起送
   assert.match(aiSource, /extraImages: Array<\{ data: string; mimeType: string \}> = \[\]/);
