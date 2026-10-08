@@ -338,3 +338,14 @@ test('reconcile: a successful GenerationRecord means delivered -> mark fulfilled
   assert.deepEqual(reconcile.parseGenerationKey('u1:7:0:run-abcdefgh'), { taskId: 7, shotIndex: 0 });
   assert.equal(reconcile.parseGenerationKey('x:charge'), null);
 });
+
+test('同 runId 整次重放时不再为服装分析调用上游（部分重试仍分析）', async () => {
+  const fs = await import('node:fs');
+  const route = fs.readFileSync(new URL('../app/api/generate/stream/route.ts', import.meta.url), 'utf8');
+  // 产品图：所有镜次的幂等键都已 consume 才跳过分析
+  assert.match(route, /async function isFullGenerationReplay\(/);
+  assert.match(route, /const productFullReplay = runId\s*\?\s*await isFullGenerationReplay\(/);
+  assert.match(route, /if \(!productFullReplay\) \{\s*push\('status', \{ phase: 'analyzing'/);
+  // 单张场景图：首镜（唯一一镜）已 consume（preflight 返回 null）即整次重放
+  assert.match(route, /if \(preflightBalance !== null\) \{\s*push\('status', \{ phase: 'analyzing'/);
+});

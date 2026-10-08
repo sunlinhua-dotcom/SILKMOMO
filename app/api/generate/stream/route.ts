@@ -389,6 +389,18 @@ async function preflightBalanceCheck(
   return checkBalance(userId, costFen);
 }
 
+/**
+ * 整次请求是否都是「同 runId 重放」：所有镜次的幂等键都已有 consume。
+ * 是的话每一镜都只会走 handleIdempotentHit（补发 / 提示，永不出图），服装分析的结果用不上，
+ * 就不该再为它调一次上游（分析虽不计费，但重放本不该有任何上游调用）。
+ * 只要有一镜还没扣过费（部分重试），仍照常分析——那一镜出图要用分析结果。
+ */
+async function isFullGenerationReplay(userId: string, keys: Array<string | undefined>): Promise<boolean> {
+  if (keys.length === 0 || keys.some(key => !key)) return false;
+  const hits = await Promise.all(keys.map(key => hasGenerationConsume(userId, key as string)));
+  return hits.every(Boolean);
+}
+
 async function generationDeductionErrorMessage(
   userId: string,
   error: string | undefined,
@@ -670,22 +682,30 @@ export async function POST(req: NextRequest) {
             return;
           }
 
-          // AI 服装分析（可选，失败不阻塞）
+          // AI 服装分析（可选，失败不阻塞）。整次都是同 runId 重放时跳过：重放不出图，不该再有上游调用
           let garmentDescription: string | undefined;
-          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
-          try {
-            const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await withPhaseBeat(
-              push,
-              '正在分析服装特征',
-              {},
-              () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
-            );
-            if (analysis.description) {
-              garmentDescription = analysis.description;
+          const productFullReplay = runId
+            ? await isFullGenerationReplay(
+                auth.userId,
+                shotConfigs.map(shot => generationIdempotencyKey(auth.userId, taskId, shot.index, runId)),
+              )
+            : false;
+          if (!productFullReplay) {
+            push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+            try {
+              const { analyzeProductImage } = await import('@/lib/ai-assistant');
+              const analysis = await withPhaseBeat(
+                push,
+                '正在分析服装特征',
+                {},
+                () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+              );
+              if (analysis.description) {
+                garmentDescription = analysis.description;
+              }
+            } catch {
+              // 分析失败，沿用默认 prompt
             }
-          } catch {
-            // 分析失败，沿用默认 prompt
           }
 
           // 首图锚定。客户端分块生成时会把首块的模特图作为 anchorImage 回传,
@@ -1425,19 +1445,22 @@ export async function POST(req: NextRequest) {
           // AI 服装分析放在扣费之前：分析上游挂起/失败时钱还没扣，
           // 不会出现"已扣费却卡在分析阶段"的资金悬置窗口（与产品图分支顺序一致）
           let garmentDescription: string | undefined;
-          push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
-          try {
-            const { analyzeProductImage } = await import('@/lib/ai-assistant');
-            const analysis = await withPhaseBeat(
-              push,
-              '正在分析服装特征',
-              {},
-              () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
-            );
-            if (analysis.description) garmentDescription = analysis.description;
-            else console.log('[scene] 服装分析未返回描述，本次 prompt 缺 garmentDescription（出图对衣服的还原会变差）');
-          } catch (err) {
-            console.log('[scene] 服装分析异常，本次 prompt 缺 garmentDescription:', err instanceof Error ? err.message : err);
+          // 单张场景图只有一个幂等键：preflightBalance 为 null ＝ 首镜已有 consume ＝ 整次是同 runId 重放，跳过分析
+          if (preflightBalance !== null) {
+            push('status', { phase: 'analyzing', message: '正在分析服装特征...' });
+            try {
+              const { analyzeProductImage } = await import('@/lib/ai-assistant');
+              const analysis = await withPhaseBeat(
+                push,
+                '正在分析服装特征',
+                {},
+                () => analyzeProductImage(productImages[0].data, productImages[0].mimeType),
+              );
+              if (analysis.description) garmentDescription = analysis.description;
+              else console.log('[scene] 服装分析未返回描述，本次 prompt 缺 garmentDescription（出图对衣服的还原会变差）');
+            } catch (err) {
+              console.log('[scene] 服装分析异常，本次 prompt 缺 garmentDescription:', err instanceof Error ? err.message : err);
+            }
           }
 
           push('status', { phase: 'generating', current: 1, total: 1, shotIndex: 0, message: '正在生成场景图...' });
