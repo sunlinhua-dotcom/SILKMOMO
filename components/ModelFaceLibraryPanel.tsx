@@ -4,8 +4,9 @@
 // 0906 板块拆分：本文件整段从 app/lookbook/page.tsx 搬出。三个 interface 与两个常量原先
 // 也定义在那个页面里，跟着组件一起搬过来并导出，页面改成从这里 import。
 // 1008：操作按钮点击区 ≥40px 并移到缩略图下方、补 aria；命名改 Modal 输入框，删除改 useConfirm。
+// 1008 T5：「继续生成」先 useConfirm 写清张数与金额（价格取任务自带 costFen + 未扣费条目数，不硬编码），按钮标价。
 
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Pencil, Star, Trash2 } from 'lucide-react';
 import { getGenerationCostFen } from '@/lib/billing-constants';
 import { Modal } from '@/components/ui/Modal';
@@ -40,7 +41,10 @@ export interface ModelFaceJob {
   completedCount: number;
   failedCount: number;
   error?: string | null;
-  items: Array<{ id: string; status: string; error?: string | null }>;
+  /** 服务端任务行自带的单张价格（分）；缺失时回退 MODEL_FACE_PRICE_FEN */
+  costFen?: number;
+  /** billingStatus === 'uncharged' 才会在继续时扣费；其余（charged / kept / refund_pending）不会重复扣款 */
+  items: Array<{ id: string; status: string; billingStatus?: string; error?: string | null }>;
 }
 
 const ACTION_BTN_BASE =
@@ -79,6 +83,14 @@ export function ModelFaceLibraryPanel({
 }) {
   const confirm = useConfirm();
   const batchCostFen = MODEL_FACE_PRICE_FEN * MODEL_FACE_BATCH_SIZE;
+  const resumeLockRef = useRef(false);
+  const resumeQuote = useMemo(() => {
+    const remaining = (job?.items ?? []).filter(item => item.status === 'pending' || item.status === 'running');
+    // 没带 billingStatus 的旧数据按"未扣费"算，宁可多报也不少报
+    const uncharged = remaining.filter(item => (item.billingStatus ?? 'uncharged') === 'uncharged').length;
+    const unitFen = job?.costFen ?? MODEL_FACE_PRICE_FEN;
+    return { count: remaining.length, uncharged, totalFen: uncharged * unitFen };
+  }, [job]);
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const [renameSaving, setRenameSaving] = useState(false);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -106,6 +118,25 @@ export function ModelFaceLibraryPanel({
     if (ok) await onDelete(face.id);
   };
 
+  const handleResume = async () => {
+    if (resumeLockRef.current) return;
+    resumeLockRef.current = true;
+    try {
+      const { count, uncharged, totalFen } = resumeQuote;
+      const already = count - uncharged;
+      const ok = await confirm({
+        title: '继续生成模特脸？',
+        message: totalFen > 0
+          ? `将生成 ${count} 张 · 共 ¥${(totalFen / 100).toFixed(2)}，从账户余额扣除。${already > 0 ? `其中 ${already} 张此前已扣费，不会重复扣款。` : ''}`
+          : `将生成 ${count} 张 · 共 ¥0.00。这 ${count} 张此前已扣费，不会重复扣款。`,
+        confirmText: '确认继续',
+      });
+      if (ok) onResume();
+    } finally {
+      resumeLockRef.current = false;
+    }
+  };
+
   return (
     <div>
       <div className="flex items-start justify-between gap-3 mb-3">
@@ -121,7 +152,7 @@ export function ModelFaceLibraryPanel({
           disabled={loading || balanceFen === null || balanceFen < batchCostFen}
           className="shrink-0 min-h-10 text-xs px-3 rounded-lg border border-brand-strong text-brand-strong disabled:opacity-50"
         >
-          {loading ? '生成中…' : '再出 3 张'}
+          {loading ? '生成中…' : <>再出 3 张 · <span className="num">¥{(batchCostFen / 100).toFixed(2)}</span></>}
         </button>
       </div>
 
@@ -230,10 +261,10 @@ export function ModelFaceLibraryPanel({
       {job?.status === 'failed' && job.items.some(item => ['pending', 'running'].includes(item.status)) && (
         <button
           type="button"
-          onClick={onResume}
+          onClick={() => void handleResume()}
           className="mt-2 min-h-10 text-xs text-brand-strong underline underline-offset-2"
         >
-          继续生成
+          继续生成 · {resumeQuote.count} 张 · <span className="num">{resumeQuote.totalFen > 0 ? `¥${(resumeQuote.totalFen / 100).toFixed(2)}` : '不再扣费'}</span>
         </button>
       )}
       {balanceFen !== null && balanceFen < batchCostFen && (
