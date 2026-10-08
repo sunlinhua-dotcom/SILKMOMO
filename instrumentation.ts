@@ -6,6 +6,9 @@ export async function register() {
   const { startBillingReconciler } = await import('@/lib/billing-reconcile');
   startBillingReconciler();
   // 数据保留清理：启动 10 分钟后首跑、之后每 24 小时一次（RETENTION_DISABLED=1 关闭，RETENTION_DRY_RUN=1 只统计）
+  // 先注册额外清理任务（过期吊销令牌、过期限流计数），再起调度器，保证首跑前已就位
+  const { registerAuthRetentionTasks } = await import('@/lib/retention-tasks');
+  registerAuthRetentionTasks();
   const { startRetentionScheduler } = await import('@/lib/retention');
   startRetentionScheduler();
 }

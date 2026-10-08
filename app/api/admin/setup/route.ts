@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server';
 import { createHash, timingSafeEqual } from 'crypto';
 import prisma from '@/lib/prisma';
 import { hashPassword, signToken, setAuthCookie } from '@/lib/auth';
-import { rateLimit, getClientIp } from '@/lib/rate-limit';
+import { rateLimitAsync, getClientIp } from '@/lib/rate-limit';
 
 // 常量时间比较（先哈希再比较，同时避免长度泄露）
 function safeKeyCompare(a: string, b: string): boolean {
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
   try {
     // 防 setup key 暴力破解
     const ip = getClientIp(req);
-    const ipLimit = rateLimit(`admin-setup:${ip}`, 5, 60 * 60 * 1000);
+    const ipLimit = await rateLimitAsync(`admin-setup:${ip}`, 5, 60 * 60 * 1000);
     if (!ipLimit.allowed) {
       return NextResponse.json(
         { error: `请 ${ipLimit.retryAfterSec} 秒后再试` },

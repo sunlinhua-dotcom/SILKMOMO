@@ -51,8 +51,13 @@ export function revokeToken(jti: string, userId: string, expSec: number): Promis
 
 /**
  * 清理过期的吊销记录（expiresAt < now），分批删除，返回删除总数。
- * 注意：未接线——instrumentation.ts 的定时任务由主会话统一接入。
+ * 由 lib/retention-tasks.ts 接入每日保留清理。
  */
 export function purgeExpiredRevokedTokens(now: Date = new Date(), batchSize?: number): Promise<number> {
   return purgeExpiredFromStore(prismaStore, now, batchSize);
+}
+
+/** 统计已过期（将被 purgeExpiredRevokedTokens 删除）的吊销记录数，只读；供保留清理 dry-run 使用。 */
+export function countExpiredRevokedTokens(now: Date = new Date()): Promise<number> {
+  return prisma.revokedToken.count({ where: { expiresAt: { lt: now } } });
 }

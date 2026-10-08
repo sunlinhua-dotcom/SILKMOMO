@@ -51,7 +51,7 @@ export const persistentRateLimitAvailable = isPostgres;
 
 /**
  * 清理过期的限流计数（resetAt < now），分批删除，返回删除总数。
- * 注意：未接线——instrumentation.ts 的定时任务由主会话统一接入。
+ * 由 lib/retention-tasks.ts 接入每日保留清理。
  */
 export async function purgeExpiredRateLimitCounters(
   now: Date = new Date(),
@@ -71,4 +71,9 @@ export async function purgeExpiredRateLimitCounters(
     if (rows.length < batchSize) break;
   }
   return total;
+}
+
+/** 统计已过期（将被 purgeExpiredRateLimitCounters 删除）的限流计数行数，只读；供保留清理 dry-run 使用。 */
+export function countExpiredRateLimitCounters(now: Date = new Date()): Promise<number> {
+  return prisma.rateLimitCounter.count({ where: { resetAt: { lt: now } } });
 }
