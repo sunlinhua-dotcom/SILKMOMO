@@ -26,21 +26,21 @@ model User {
 
 // ═══ 交易流水表（Ledger 模式）═══
 model Transaction {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   userId         String
   type           String // "recharge" | "consume" | "refund" | "bonus"
   amountFen      Int // 金额（分）：正数=入账，负数=扣费
   balanceAfter   Int // 交易后余额快照
-  description    String   @default("") // 描述
+  description    String    @default("") // 描述
   apiModel       String? // API 模型名
   projectId      Int? // 关联的项目 ID
-  idempotencyKey String?  @unique // 后台任务计费事件键；普通流水为空
+  idempotencyKey String?   @unique // 后台任务计费事件键；普通流水为空
   // 履约时间：出图类 consume 在「结果已写入 pending」或「已成功推给客户端」时写入。
   // 为空 = 尚未履约（在途，或进程被杀的孤儿）。已履约的幂等命中绝不再出图；
   // 超窗口仍为空的由 lib/billing-reconcile.ts 清扫退款。
   // 非出图类 consume（AI 助手等）创建时即写入，历史 consume 由迁移回填为 createdAt。
   fulfilledAt    DateTime?
-  createdAt      DateTime @default(now())
+  createdAt      DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
 
@@ -179,20 +179,26 @@ enum ModelFaceBillingStatus {
   kept
 }
 
-/// 账号级御用 AI 模特脸库。项目目前没有对象存储，原图以 quality 88 JPEG
-/// 持久化；列表只读取约 256px 宽的 thumbnail，原图按 id 单独鉴权读取。
+/// 账号级御用 AI 模特脸库。原图以 quality 88 JPEG 持久化；列表只读取约 256px 宽的
+/// thumbnail，原图按 id 单独鉴权读取。
+/// 存储位置二选一（lib/model-face-storage.ts）：
+///   - 未配置对象存储 / 上传失败回退：base64 直接存 image、thumbnail 两列（历史行全是这种）；
+///   - 配置了 OBJECT_STORAGE_*（Cloudflare R2 等 S3 兼容存储）：对象放桶里，库里只存
+///     imageKey / thumbnailKey，image 与 thumbnail 置空。读取优先看 key。
 model ModelFace {
-  id          String   @id @default(cuid())
-  userId      String
-  image       String
-  thumbnail   String?
-  mimeType    String   @default("image/jpeg")
-  specIndex   Int
-  recipeLabel String
-  favorite    Boolean  @default(false)
-  name        String   @default("")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String   @id @default(cuid())
+  userId       String
+  image        String? // base64；有 imageKey 时为空
+  thumbnail    String? // base64；有 thumbnailKey 时为空
+  imageKey     String? // 对象存储 key：model-faces/<userId>/<faceId>/image.jpg
+  thumbnailKey String? // 对象存储 key：model-faces/<userId>/<faceId>/thumb.jpg
+  mimeType     String   @default("image/jpeg")
+  specIndex    Int
+  recipeLabel  String
+  favorite     Boolean  @default(false)
+  name         String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   user           User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
   generationItem ModelFaceGenerationItem?
