@@ -8,7 +8,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { analyzeProductImage, analyzeLookbookGroup, isAiAssistantConfigured } from '@/lib/ai-assistant';
 import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
-import { rateLimitByKey } from '@/lib/rate-limit';
+import { rateLimitByKeyAsync } from '@/lib/rate-limit';
 
 // 组图分析入参上限（前端可能上传很多张 lookbook，只需抽样若干张即可判品类；这里限体积/张数防滥用）
 const MAX_GROUP_IMAGES = 8;
@@ -50,7 +50,7 @@ export async function POST(req: Request) {
   }
 
   // 按用户限频
-  const rate = rateLimitByKey('ai-analyze', auth.userId, ANALYZE_RATE_MAX, ANALYZE_RATE_WINDOW_MS);
+  const rate = await rateLimitByKeyAsync('ai-analyze', auth.userId, ANALYZE_RATE_MAX, ANALYZE_RATE_WINDOW_MS);
   if (!rate.allowed) {
     return NextResponse.json(
       { error: `请求太频繁了，请 ${rate.retryAfterSec} 秒后再试` },

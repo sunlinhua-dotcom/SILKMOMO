@@ -11,6 +11,9 @@ import type { NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
 import { getJwtSecret } from './lib/jwt-secret';
 import { classifyPath, buildLoginRedirectPath } from './lib/auth-shared';
+// Next 16 的 proxy 固定跑在 Node.js 运行时（不是 Edge），可以访问 Prisma，所以吊销检查放在这里：
+// 页面和 API 都先过 proxy，被登出的令牌在入口就挡掉。
+import { isTokenRevoked } from './lib/token-revocation';
 
 const JWT_SECRET = getJwtSecret();
 // 品牌已更名 SILXINE;cookie 名保持不变,改名会强制所有用户掉登录
@@ -31,12 +34,22 @@ export async function proxy(req: NextRequest) {
     const existing = req.cookies.get(TOKEN_NAME)?.value;
     if (existing) {
       try {
-        await jwtVerify(existing, JWT_SECRET);
-        return NextResponse.redirect(new URL('/', req.url));
+        const { payload } = await jwtVerify(existing, JWT_SECRET);
+        // 已登出（被吊销）的令牌不算已登录，否则 /login -> / -> /login 会死循环
+        if (!(await isTokenRevoked(payload.jti, payload.exp))) {
+          return NextResponse.redirect(new URL('/', req.url));
+        }
       } catch {
         // token 无效：当作未登录，放行到登录 / 注册页
       }
     }
+    return NextResponse.next();
+  }
+
+  // 登出永远放行，不要求当前令牌有效：它只会清 cookie 并吊销一枚已验签的令牌，不授予任何权限。
+  // 否则令牌已被吊销 / 已过期 / cookie 已没了的情况下（例如两个标签页先后点退出），
+  // 第二次登出会被下面的鉴权挡成 401，客户端误报“退出登录失败”。路由自己校验 cookie，重复登出幂等。
+  if (pathname === '/api/auth/logout') {
     return NextResponse.next();
   }
 
@@ -56,6 +69,11 @@ export async function proxy(req: NextRequest) {
 
   try {
     const { payload } = await jwtVerify(token, JWT_SECRET);
+    // 已被登出吊销：与过期 token 同样处理（API 401、页面跳登录并清 cookie）。
+    // 老 token（无 jti）直接通过；查库失败 fail-open，取舍见 lib/token-revocation-core.ts。
+    if (await isTokenRevoked(payload.jti, payload.exp)) {
+      throw new Error('token revoked');
+    }
     const role = payload.role as string;
 
     // 管理员页面权限检查

@@ -6,7 +6,7 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { deductCustom, refundBalance } from '@/lib/billing';
 import { PRICING } from '@/lib/billing-constants';
-import { rateLimitByKey } from '@/lib/rate-limit';
+import { rateLimitByKeyAsync } from '@/lib/rate-limit';
 
 // 输入上限：正常使用（一句话 + 一行配置摘要）远低于这些值
 const MAX_MESSAGE_LENGTH = 2000;
@@ -101,7 +101,7 @@ export async function POST(req: Request) {
   }
 
   // 按用户限频（先于扣费，被拒的请求不产生任何费用）
-  const rate = rateLimitByKey('ai-chat', auth.userId, CHAT_RATE_MAX, CHAT_RATE_WINDOW_MS);
+  const rate = await rateLimitByKeyAsync('ai-chat', auth.userId, CHAT_RATE_MAX, CHAT_RATE_WINDOW_MS);
   if (!rate.allowed) {
     return chatError(`请求太频繁了，请 ${rate.retryAfterSec} 秒后再试`, 429, {
       'Retry-After': String(rate.retryAfterSec),
