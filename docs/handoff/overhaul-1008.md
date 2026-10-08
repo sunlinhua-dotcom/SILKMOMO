@@ -65,6 +65,24 @@ f202531 ui             设计 token、对比度修正与共享组件底座
 c746315 security       鉴权与 API 加固
 ```
 
+## 部署：镜像与健康检查（T6）
+
+**镜像瘦身**：runner 阶段不再带整份生产 `node_modules`。现在只有 Next standalone（自带 tracing 出的最小 `node_modules`，含 sharp 的 `linuxmusl-x64` 二进制）、`.next/static`、`public`，加一个独立的 `/app/prisma-cli/`（只含 `prisma migrate deploy` 需要的依赖闭包、迁移文件和 `prisma.config.ts`）。`linux/amd64` 实测镜像占用：改前 1.37 GB（压缩后内容约 298 MB），改后 356 MB（压缩后内容约 84 MB）。目标 300MB 量级里基础镜像 `node:20-alpine` 自己就占约 193MB，剩下的 163MB 是服务本体（约 40MB）和 prisma CLI（约 70MB，其中仅 `schema-engine` 二进制就有 21MB）。
+
+**Prisma 版本锁定**：`package.json` 里 `prisma`、`@prisma/client`、`@prisma/adapter-pg`、`@prisma/adapter-better-sqlite3` 都改为精确版本（无 `^`），`package-lock.json` 解析版本不变（7.6.0 / 7.6.0 / 7.6.0 / 7.7.0）。runner 里的 CLI 就是 lock 里的这一份，不会在构建时联网重新解析。
+
+**部署前后要注意**：
+- 容器里不再有 `/app/prisma`、`/app/node_modules/.bin/prisma`。需要在线上容器手动跑迁移时：`cd /app/prisma-cli && node node_modules/prisma/build/index.js migrate deploy`。
+- 启动流程不变：先 `migrate deploy`，成功后 `exec node server.js`，以非 root `node` 运行，`docker stop` 能在 1 秒内优雅退出（收到 SIGTERM，退出码 0）。
+- 迁移 `20261008000000_billing_fulfillment_and_indexes` 在空库上随容器启动自动应用成功（见回报里的验证记录）。
+
+**Zeabur 健康检查（联网查文档，2026-10-08）**：
+- Zeabur 官方《Health Checks》文档**没有**提到会读取 Dockerfile 的 `HEALTHCHECK`，也没写可以用 `zbpack.json` 或其它仓库内配置文件设置健康检查；按文档理解，文档对 Dockerfile 的 `HEALTHCHECK` 是否生效没有说明，不要指望它决定是否切流量。
+- Zeabur 默认是 **TCP 端口探测**（间隔 10 秒、超时 5 秒、连续失败 3 次判不健康）。新部署通过探测才会切流量，不通过则旧部署继续服务。对本应用，端口一监听就算通过，**此时数据库迁移已完成**（迁移在 `node server.js` 之前），所以默认 TCP 探测已经能保证“迁移失败 = 新版本不上线”。
+- 想让 Zeabur 探 `/api/health`（同时确认数据库可连），只能在控制台配，仓库里无法配置：服务 → **Settings（设置）** → **Health Check（健康检查）** 栏 → 路径填 `/api/health` → 保存后重新部署。接口返回 2xx 视为健康（本应用库不通时返回 503）。应用已按 Zeabur 要求监听 `0.0.0.0:$PORT`（`HOSTNAME=0.0.0.0`，PORT 缺省 8080）。
+- 取舍：HTTP 探测把“数据库偶发不通”也算成不健康，可能让一次短暂的库抖动延长发布时间；没有强需求可以保持默认 TCP 探测。
+- 文档：<https://zeabur.com/docs/en-US/operations/monitoring/health-checks>（中文版 <https://zeabur.com/docs/zh-CN/operations/monitoring/health-checks>）。
+
 ## 回滚方式
 1. **代码**：回到基线 `07daced`（部署该 commit 或在主干上 revert 本分支合并提交）。**先回滚代码，再回滚数据库。**
 2. **数据库**：执行 `docs/handoff/rollback-1008.sql`（一个事务：恢复被删索引、删除新增索引、`DROP COLUMN "fulfilledAt"`），然后按文件头注释删除 `_prisma_migrations` 里 `20261008000000_billing_fulfillment_and_indexes` 这条记录，否则以后 `migrate deploy` 会误以为已应用。
