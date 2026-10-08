@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 // 简单内存级 rate limiter — 不需要 Redis，单进程足够
 // 重启进程会清空（这是缺点，但比没有好；超出的请求会被 429 拒绝）
 interface Bucket {
@@ -129,6 +131,153 @@ export function bumpRateLimit(key: string, windowMs: number): void {
 /** 清空某个 key 的计数（如登录成功后解除该「用户名+IP」的失败计数） */
 export function resetRateLimit(key: string): void {
   buckets.delete(key);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 持久化限流（多实例共享）
+//
+// 上面的同步 rateLimit / isRateLimited / bumpRateLimit / resetRateLimit 是进程内内存实现，
+// 保留作为 DB 不可用时的回退（以及 app/api/admin/setup 这类仍在用同步 API 的调用点）。
+// 下面的 *Async 版本把「计数型」限流落到 PostgreSQL 表 RateLimitCounter：固定窗口，
+// 一条原子 INSERT ... ON CONFLICT DO UPDATE ... RETURNING 完成「窗口过期则重置、否则 +1」，多实例共享计数。
+//
+// 回退：存储不可用（本地 sqlite / 未配库）或执行出错时，自动退回内存实现；
+// 出错只告警（按 60 秒节流，不刷屏），不让限流故障变成接口故障。
+//
+// 与内存版的语义差异：内存版是滑动窗口，持久版是固定窗口（窗口从第一次计数起算，到点整体重置）。
+// 不属于这里的：lib/generation-concurrency.ts 的「每人同时最多 N 条生成」是并发信号量，
+// 不是计数窗口，故意保持进程内（单实例假设），不走本存储。
+// ═══════════════════════════════════════════════════════════════════
+
+/** 固定窗口计数存储。ttlMs = 距窗口结束还剩多少毫秒（用存储侧时钟算，避免多实例时钟漂移）。 */
+export interface RateLimitStore {
+  /** 计 1 次：窗口已过期则重置为 1，否则 +1；返回计数后的状态 */
+  hit(key: string, windowMs: number): Promise<{ count: number; ttlMs: number }>;
+  /** 只读：窗口未过期返回当前状态，否则 null */
+  peek(key: string): Promise<{ count: number; ttlMs: number } | null>;
+  /** 清掉某个 key */
+  reset(key: string): Promise<void>;
+}
+
+// undefined = 尚未解析；null = 明确无持久存储（走内存）
+let activeStore: RateLimitStore | null | undefined;
+let storeLoading: Promise<RateLimitStore | null> | null = null;
+
+/** 仅测试用：注入存储（null = 强制内存，undefined = 恢复默认解析） */
+export function __setRateLimitStore(store: RateLimitStore | null | undefined): void {
+  activeStore = store;
+  storeLoading = null;
+}
+
+async function resolveStore(): Promise<RateLimitStore | null> {
+  if (activeStore !== undefined) return activeStore;
+  if (!storeLoading) {
+    storeLoading = import('./rate-limit-store.ts')
+      .then(m => (m.persistentRateLimitAvailable ? m.prismaRateLimitStore : null))
+      .catch(() => null)
+      .then(s => {
+        if (activeStore === undefined) activeStore = s;
+        return activeStore ?? null;
+      });
+  }
+  return storeLoading;
+}
+
+/**
+ * 存库的 key：`<scope>:<sha256 前 32 位>`。scope 取原 key 第一个冒号前的部分（login / register / ai-chat …），
+ * 便于运维按类别排查；用户名、IP 等不以明文落库。
+ */
+export function storageKey(key: string): string {
+  const scope = key.split(':', 1)[0].slice(0, 32) || 'k';
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 32);
+  return `${scope}:${digest}`;
+}
+
+const FALLBACK_WARN_INTERVAL_MS = 60_000;
+let lastFallbackWarnAt = 0;
+let fallbackWarn: (msg: string, err: unknown) => void = (msg, err) => console.warn(msg, err);
+
+/** 仅测试用：替换告警输出，并清掉节流计时 */
+export function __setFallbackWarn(fn: ((msg: string, err: unknown) => void) | null): void {
+  fallbackWarn = fn ?? ((msg, err) => console.warn(msg, err));
+  lastFallbackWarnAt = 0;
+}
+
+function warnFallback(err: unknown) {
+  const now = Date.now();
+  if (now - lastFallbackWarnAt < FALLBACK_WARN_INTERVAL_MS) return;
+  lastFallbackWarnAt = now;
+  const detail = err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200);
+  fallbackWarn('[rate-limit] 持久化限流不可用，已退回进程内内存计数：', detail);
+}
+
+/** 把存储状态换算成与内存版一致的结果（count 已包含本次） */
+function toResult(count: number, ttlMs: number, max: number): RateLimitResult {
+  if (count > max) {
+    return { allowed: false, remaining: 0, retryAfterSec: Math.max(1, Math.ceil(ttlMs / 1000)) };
+  }
+  return { allowed: true, remaining: max - count, retryAfterSec: 0 };
+}
+
+/** 持久化版 rateLimit：每次调用计 1 次，超过 max 拒绝 */
+export async function rateLimitAsync(key: string, max: number, windowMs: number): Promise<RateLimitResult> {
+  const store = await resolveStore();
+  if (store) {
+    try {
+      const { count, ttlMs } = await store.hit(key, windowMs);
+      return toResult(count, ttlMs, max);
+    } catch (err) {
+      warnFallback(err);
+    }
+  }
+  return rateLimit(key, max, windowMs);
+}
+
+/** 持久化版 rateLimitByKey：key 带 scope 命名空间 */
+export function rateLimitByKeyAsync(scope: string, id: string, max: number, windowMs: number): Promise<RateLimitResult> {
+  return rateLimitAsync(`${scope}:${id}`, max, windowMs);
+}
+
+/** 持久化版 isRateLimited：只检查不计数（计数 >= max 即拒绝，与内存版一致） */
+export async function isRateLimitedAsync(key: string, max: number, windowMs: number): Promise<RateLimitResult> {
+  const store = await resolveStore();
+  if (store) {
+    try {
+      const row = await store.peek(key);
+      if (!row || row.count < max) return { allowed: true, remaining: max - (row?.count ?? 0), retryAfterSec: 0 };
+      return { allowed: false, remaining: 0, retryAfterSec: Math.max(1, Math.ceil(row.ttlMs / 1000)) };
+    } catch (err) {
+      warnFallback(err);
+    }
+  }
+  return isRateLimited(key, max, windowMs);
+}
+
+/** 持久化版 bumpRateLimit：记一次失败（配合 isRateLimitedAsync） */
+export async function bumpRateLimitAsync(key: string, windowMs: number): Promise<void> {
+  const store = await resolveStore();
+  if (store) {
+    try {
+      await store.hit(key, windowMs);
+      return;
+    } catch (err) {
+      warnFallback(err);
+    }
+  }
+  bumpRateLimit(key, windowMs);
+}
+
+/** 持久化版 resetRateLimit：同时清内存兜底桶，避免回退期间残留的计数卡住用户 */
+export async function resetRateLimitAsync(key: string): Promise<void> {
+  resetRateLimit(key);
+  const store = await resolveStore();
+  if (store) {
+    try {
+      await store.reset(key);
+    } catch (err) {
+      warnFallback(err);
+    }
+  }
 }
 
 /**

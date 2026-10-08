@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword, signToken, setAuthCookie } from '@/lib/auth';
-import { rateLimit, getClientIp } from '@/lib/rate-limit';
+import { rateLimitAsync, getClientIp } from '@/lib/rate-limit';
 import { validateRegisterInput } from '@/lib/auth-shared';
 
 
@@ -12,7 +12,7 @@ export async function POST(req: Request) {
   try {
     // 防灌库：每个 IP 每小时最多 5 次注册
     const ip = getClientIp(req);
-    const ipLimit = rateLimit(`register:ip:${ip}`, 5, 60 * 60 * 1000);
+    const ipLimit = await rateLimitAsync(`register:ip:${ip}`, 5, 60 * 60 * 1000);
     if (!ipLimit.allowed) {
       return NextResponse.json(
         { error: `注册过于频繁，请 ${ipLimit.retryAfterSec} 秒后再试` },

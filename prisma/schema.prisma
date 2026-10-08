@@ -249,3 +249,27 @@ model ModelFaceGenerationItem {
   @@index([attemptedAt])
   @@index([createdAt])
 }
+
+// ═══ 已吊销的登录令牌（登出即失效）═══
+// 登出时把 JWT 的 jti 写进来；proxy / lib/auth 校验时按主键查询。
+// 故意不加 User 外键：用户删除不应牵动登出记录；行到 expiresAt（= JWT 自然过期时间）后即可清掉。
+// 不带 jti 的老 token（上线前签发）不进这张表，继续有效到自然过期。
+model RevokedToken {
+  jti       String   @id
+  userId    String
+  expiresAt DateTime // JWT 的 exp；过期后令牌本身已失效，purgeExpiredRevokedTokens 负责清理
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt]) // 过期清理：where expiresAt < now
+}
+
+// ═══ 持久化限流计数器（固定窗口，多实例共享）═══
+// key = scope + 哈希（不存明文用户名 / IP）；窗口过期由下一次计数原子重置，
+// purgeExpiredRateLimitCounters 清理陈旧行。
+model RateLimitCounter {
+  key     String   @id
+  count   Int
+  resetAt DateTime // 窗口结束时间
+
+  @@index([resetAt]) // 过期清理：where resetAt < now
+}

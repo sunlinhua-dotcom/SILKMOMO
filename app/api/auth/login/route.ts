@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { verifyPassword, signToken, setAuthCookie } from '@/lib/auth';
 import {
-  isRateLimited, bumpRateLimit, resetRateLimit, rateLimitByKey, getClientIp, loginLockKey,
+  isRateLimitedAsync, bumpRateLimitAsync, resetRateLimitAsync, rateLimitByKeyAsync, getClientIp, loginLockKey,
 } from '@/lib/rate-limit';
 import { validateLoginInput } from '@/lib/auth-shared';
 
@@ -37,12 +37,12 @@ export async function POST(req: Request) {
     }
     const { username, password } = input.value;
 
-    // 防暴力破解。IP 取值见 lib/rate-limit.ts 的 extractClientIp（Zeabur 反代下取 XFF 从右数第 1 段）。
+    // 防暴力破解。计数落 PostgreSQL（多实例共享，DB 出错自动退回内存），见 lib/rate-limit.ts 的 *Async。IP 取值见 lib/rate-limit.ts 的 extractClientIp（Zeabur 反代下取 XFF 从右数第 1 段）。
     // 失败锁定只统计「失败」尝试：IP 失败桶用 isRateLimited（只查不计），
     // 否则成功登录也会消耗配额，共享出口 IP（公司 / 家庭 NAT）下正常用户会被一起挡住。
     const ip = getClientIp(req);
 
-    const rate = rateLimitByKey('login-rate', ip, IP_RATE_MAX, IP_RATE_WINDOW_MS);
+    const rate = await rateLimitByKeyAsync('login-rate', ip, IP_RATE_MAX, IP_RATE_WINDOW_MS);
     if (!rate.allowed) {
       return NextResponse.json(
         { error: `请求过于频繁，请 ${rate.retryAfterSec} 秒后再试` },
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
     }
 
     const ipKey = `login:ip:${ip}`;
-    const ipLimit = isRateLimited(ipKey, IP_LOCK_MAX, IP_LOCK_WINDOW_MS);
+    const ipLimit = await isRateLimitedAsync(ipKey, IP_LOCK_MAX, IP_LOCK_WINDOW_MS);
     if (!ipLimit.allowed) {
       return NextResponse.json(
         { error: `登录尝试过于频繁，请 ${ipLimit.retryAfterSec} 秒后再试` },
@@ -59,7 +59,7 @@ export async function POST(req: Request) {
       );
     }
     const userKey = loginLockKey(username, ip);
-    const userLimit = isRateLimited(userKey, USER_IP_LOCK_MAX, USER_IP_LOCK_WINDOW_MS);
+    const userLimit = await isRateLimitedAsync(userKey, USER_IP_LOCK_MAX, USER_IP_LOCK_WINDOW_MS);
     if (!userLimit.allowed) {
       return NextResponse.json(
         { error: `该账号暂时无法从当前网络登录，请 ${userLimit.retryAfterSec} 秒后再试` },
@@ -72,11 +72,11 @@ export async function POST(req: Request) {
     const user = await prisma.user.findUnique({ where: { username } });
     const valid = await verifyPassword(password, user ? user.passwordHash : DUMMY_HASH);
     if (!user || !valid) {
-      bumpRateLimit(userKey, USER_IP_LOCK_WINDOW_MS);
-      bumpRateLimit(ipKey, IP_LOCK_WINDOW_MS); // 只对失败计数
+      await bumpRateLimitAsync(userKey, USER_IP_LOCK_WINDOW_MS);
+      await bumpRateLimitAsync(ipKey, IP_LOCK_WINDOW_MS); // 只对失败计数
       return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
     }
-    resetRateLimit(userKey);
+    await resetRateLimitAsync(userKey);
 
     // 签发 JWT
     const token = await signToken({
