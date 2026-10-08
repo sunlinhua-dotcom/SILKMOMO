@@ -349,3 +349,26 @@ test('同 runId 整次重放时不再为服装分析调用上游（部分重试�
   // 单张场景图：首镜（唯一一镜）已 consume（preflight 返回 null）即整次重放
   assert.match(route, /if \(preflightBalance !== null\) \{\s*push\('status', \{ phase: 'analyzing'/);
 });
+
+test('组图分支同 runId 整次重放时跳过所有生图前置上游调用（复用 isFullGenerationReplay，部分重试不变）', async () => {
+  const fs = await import('node:fs');
+  const route = fs.readFileSync(new URL('../app/api/generate/stream/route.ts', import.meta.url), 'utf8');
+  // 只有一份实现，组图分支复用它，不另起炉灶
+  assert.equal((route.match(/function isFullGenerationReplay\(/g) || []).length, 1);
+  const group = route.slice(route.indexOf('===== [C] 组图分支 · 开始'), route.indexOf('===== [C] 组图分支 · 结束'));
+  assert.ok(group.length > 1000);
+  // 判据：所有目标镜次的幂等键都已 consume（targetIndexes 全覆盖，无 runId 一律 false）
+  assert.match(group, /const groupFullReplay = runId\s*\?\s*await isFullGenerationReplay\(\s*auth\.userId,\s*targetIndexes\.map\(idx => generationIdempotencyKey\(auth\.userId, taskId, idx, runId\)\)/);
+  assert.match(group, /:\s*false;/);
+  // 各个上游调用点都被它挡住：swap 服装分析 / 肤色分析 / 身份锚生成 / products 逐组分析
+  assert.match(group, /else if \(sceneGroupMode === 'swap' && !groupFullReplay\) \{\s*push\('status', \{ phase: 'analyzing', message: '正在分析服装特征/);
+  assert.match(group, /modelIdentityMode === 'follow_scene' && sceneRefImages\[0\] && !clientClosed && !anchorImage && !groupFullReplay/);
+  assert.match(group, /shouldUseSceneGroupAnchor && !anchorImage && !clientClosed && !groupFullReplay\) \{\s*push\('status', \{ phase: 'analyzing', message: '正在创建新模特身份锚/);
+  assert.match(group, /if \(sceneGroupMode === 'products' && !groupFullReplay\) \{\s*push\('status', \{\s*phase: 'analyzing'/);
+  // 重放时也不能重发御用脸 anchor 事件（客户端收到会覆盖本地已存的锚）
+  assert.match(group, /modelIdentityMode === 'fresh' && !anchorImage && !clientClosed && !groupFullReplay/);
+  // 客户端带回的服装分析复用分支保持在最前，不受影响
+  assert.match(group, /if \(sceneGroupMode === 'swap' && reusableGarmentDescription\) \{/);
+  // 逐张仍走扣费 → 幂等命中处理，重放的补发 / 提示路径没被绕开
+  assert.match(group, /if \(deduction\.idempotent && idempotencyKey\) \{[\s\S]*?handleIdempotentHit\(/);
+});

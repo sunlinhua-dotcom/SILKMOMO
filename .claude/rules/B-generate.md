@@ -34,6 +34,7 @@ paths:
 - **Gemini 原生协议的密钥一律走请求头 `x-goog-api-key`，不许再拼 `?key=`**（URL 会随 fetch 异常、中转站日志外泄）；OpenAI 兼容协议走 `Authorization: Bearer`。1008 已用 apiyi 零成本探针实测：生图模型与 Lite 模型「正确密钥放请求头 + 非法请求体」得 400（鉴权通过），「错误密钥放请求头」得 401，说明中转站认请求头。`__tests__/upstream-auth.test.mjs` 守着这条（含源码扫描）。
 - **上游地址环境变量**：`GEMINI_BASE_URL`（Gemini 生图，不带 `/v1beta`，默认 `https://api.apiyi.com`）、`OPENAI_IMAGE_BASE_URL`（GPT 生图，默认随令牌：独立令牌 `https://api.302.ai`，否则同 Gemini）、`AI_ASSISTANT_BASE_URL`（分析/对话回退，**带 `/v1beta`**，默认 `https://api.apiyi.com/v1beta`）。都不设就与线上现状完全一致。
 - 已删除 `app/actions/generate.ts`（死代码），不要恢复。
+- **同 runId 整次重放（所有目标镜次的幂等键都已 consume）不得有任何上游调用**：产品图 `productFullReplay`、单张场景图 `preflightBalance === null`、组图 `groupFullReplay`，都复用同一个 `isFullGenerationReplay`。新加生图前置的上游调用要挂在这些判据下；`__tests__/generation-billing-replay.test.mjs` 有源码断言。
 - 生产主图通道是 302.ai 的 `gpt-image-2`，换通道要连着 D 板块的锚图通道一起评估。
 
 ## 测试与验收
