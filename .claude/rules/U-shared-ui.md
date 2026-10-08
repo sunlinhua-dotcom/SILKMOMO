@@ -24,6 +24,9 @@ paths:
   - "hooks/useBalance.ts"
   - "hooks/useBrandMemory.ts"
   - "hooks/useProductAnalysis.ts"
+  - "hooks/useLeaveGuard.ts"
+  - "lib/leave-guard.ts"
+  - "__tests__/leave-guard.test.mjs"
   - "lib/contact.ts"
   - "lib/format-time.ts"
   - "lib/models.ts"
@@ -44,6 +47,7 @@ paths:
 - `components/useRadioGroup.ts` + 各 `*Selector.tsx` — 单选组 `radiogroup` 方向键、多选 `aria-pressed`、40px 点击区。
 - `components/ResultGallery.tsx`、`ImageLightbox.tsx`、`TimeMachine.tsx`、`UserNav.tsx`、`WorkspaceSwitcher.tsx`、`ContactAdmin.tsx`、`Logo.tsx`、`ModelQuickPicker.tsx`、`ProductShotModule.tsx`、`SceneShotModule.tsx`、`ModelIcons.tsx`、`StyleIcons.tsx`。
 - `hooks/useBalance.ts` — 余额共享 store（模块级单例，状态 loading / ready / error / unauthenticated，聚焦刷新节流 30s），导航与各页共用；`hooks/useBrandMemory.ts`、`useProductAnalysis.ts`。
+- `hooks/useLeaveGuard.ts` + `lib/leave-guard.ts` — 「进行中离开拦截」：`useLeaveGuard(active, message)` 在 active 时拦刷新/关闭（beforeunload）、同源站内链接（document 捕获阶段 + `ConfirmDialog`，确认后 `router.push`）、浏览器后退（pushState 哨兵 + popstate）；active 结束/卸载时清监听并 `history.back()` 掉哨兵，不留多余历史记录。链接过滤规则是纯函数 `decideLeaveGuardLink`（有单测）。目前接入：任务页；组图页待接。
 - `lib/contact.ts` — 管理员联系方式常量 `ADMIN_WECHAT`（原先硬编码在首页充值弹窗）；`lib/format-time.ts` — 相对时间文案 `formatRelativeTime`（任务列表/流水等共用，原先各处重复）。
 - `lib/models.ts` — 预设模特与体型/肤色参数配置（前后端共用）。
 
@@ -57,8 +61,9 @@ paths:
 - **固定底栏的页面要设 `--mobile-cta-h`**，否则 Toast/弹窗会被底栏盖住。
 - **余额是三态**，别把「读取失败」渲染成 0 或「余额不足」——会诱导用户误充值/误放弃。
 - **花钱按钮必须标价**，涉及扣费的操作先走 `ConfirmDialog`（UI 约定，与 F 板块的服务端扣费互补）。
+- **离开拦截的确认文案必须对照服务端真实行为写**：客户端断开后，`app/api/generate/stream/route.ts` 会让当前这一张照常跑完并写入 pending（已扣费、回来补拉），但还没开始的镜次停止、不扣费。别写成「全部都会继续生成」或「已扣费的图会丢」。
 - Modal 的 `closeOnOverlay`、焦点陷阱、键盘 Esc 是无障碍约定，别在业务页里自己再写一个遮罩。
 
 ## 测试与验收
-- `node --test __tests__/format-time.test.mjs`；其余靠 `npx tsc --noEmit` + `npm run lint` + 手机宽度（390px）实机看。
+- `node --test __tests__/format-time.test.mjs __tests__/leave-guard.test.mjs`；其余靠 `npx tsc --noEmit` + `npm run lint` + 手机宽度（390px）实机看。
 - 手工验收：弹窗 Tab 不逃出、Esc 关闭、关闭后焦点回到触发按钮；选择器方向键可切换。

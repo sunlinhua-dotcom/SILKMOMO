@@ -46,6 +46,7 @@ import { useConfirm } from '@/components/ui/ConfirmDialog';
 import { useToast } from '@/components/ui/Toast';
 import { ContactAdmin } from '@/components/ContactAdmin';
 import { useBalance, refreshBalance } from '@/hooks/useBalance';
+import { useLeaveGuard } from '@/hooks/useLeaveGuard';
 import { GenerationProgress } from '@/components/task/GenerationProgress';
 import { RotatingTips } from '@/components/task/RotatingTips';
 import { InputThumb } from '@/components/task/InputThumb';
@@ -71,6 +72,10 @@ const IDEMPOTENT_NOTICE_PATTERN = /已生成并交付过|上一次请求仍在�
 /** 「余额不足，去充值」按钮的统一样式（警告色底，白字对比度 ≥4.9:1） */
 const RECHARGE_BUTTON_CLASS =
   'inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-[var(--color-warning)] px-6 py-3 text-sm font-medium text-white transition-opacity hover:opacity-90 sm:w-auto';
+
+/** 生成中离开页面的确认文案：对照服务端「客户端断开」行为写（当前镜次跑完入缓冲，后续镜次停止） */
+const LEAVE_GENERATING_MESSAGE =
+  '现在离开会中断本页与服务器的连接。正在生成的这一张会在服务器上继续完成，已扣费的图不会丢，回到本任务页会自动补回；还没开始的镜次会停止（不扣费），需要回来点“生成剩余”继续。';
 
 function formatYuan(fen: number): string {
   return `¥${(fen / 100).toFixed(2)}`;
@@ -563,17 +568,10 @@ export default function TaskDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generating]);
 
-  // 生成中离开 / 刷新页面会中断这条连接：加浏览器原生的离开提醒，生成结束后移除。
-  // （图已生成但没送达的话，重进任务页会自动补拉，不会白扣费。）
-  useEffect(() => {
-    if (!generating) return;
-    const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [generating]);
+  // 生成中离开会中断这条 SSE 连接：刷新 / 关闭 / 站内链接 / 浏览器后退都先让用户确认（见 hooks/useLeaveGuard）。
+  // 文案对照服务端 app/api/generate/stream/route.ts：客户端断开后，当前这一张照常跑完并写入交接缓冲（已扣费、
+  // 回来会补拉），但还没开始的镜次会停止、不扣费。
+  useLeaveGuard(generating, LEAVE_GENERATING_MESSAGE);
 
   // 组件卸载时清理 SSE 连接，避免泄漏
   useEffect(() => {
