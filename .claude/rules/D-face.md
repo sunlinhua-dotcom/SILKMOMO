@@ -29,6 +29,7 @@ paths:
 - **`gemini-3-pro-image` 当锚会把成图带偏白**。默认锚模型是 `gemini-3.1-flash-image-preview`（环境变量 `DERIVED_ANCHOR_MODEL`），不要"升级"到 pro。
 - **肤色指令看起来重复，但不能删**。删过，成图立刻偏色。
 - 脸图属于用户隐私素材，调试时不要把图落到仓库里，放 `verify/`。
+- **脸库面板里每个会扣费的入口都要先确认并标价**：「再出 3 张」的确认在 `app/lookbook/page.tsx` 的 `submitFaceJob`，「继续生成」的确认在面板内；继续时只有 `billingStatus === 'uncharged'` 的条目才会扣费（单价取任务自带 `costFen`），金额别按剩余条数硬乘。
 
 ## 测试与验收
 - `npm run test:face`

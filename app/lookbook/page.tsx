@@ -713,7 +713,7 @@ export default function LookbookStudio() {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 sm:pt-10 pb-[calc(var(--mobile-cta-h,0px)+16px)] space-y-6 sm:space-y-8">
+      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 sm:pt-10 pb-[calc(var(--mobile-cta-h,0px)+16px)] space-y-4 sm:space-y-8">
         {/* 双工作台入口：手机一行紧凑链接（同首页），≥sm 保持原卡片 */}
         <nav aria-label="工作台切换" className="sm:hidden grid grid-cols-2 gap-2">
           <Link
@@ -1043,8 +1043,9 @@ export default function LookbookStudio() {
         />
 
         {/* ⑦ 摘要 + 生成 CTA */}
-        <div ref={mobileCtaRef} className="sticky bottom-0 pt-2 pb-4 bg-gradient-to-t from-[var(--color-background)] via-[var(--color-background)] to-transparent">
-          <p className="text-xs text-[var(--color-text-muted)] text-center mb-2">
+        {/* 手机：实色底栏（带上边线）通栏贴边，不再用渐变半透明去压正文提示；高度已收紧，量过首屏提示底边在它之上。≥sm 保持原渐变。 */}
+        <div ref={mobileCtaRef} className="sticky bottom-0 -mx-4 px-4 pt-2 pb-3 border-t border-[var(--color-border-light)] bg-[var(--color-background)] sm:mx-0 sm:px-0 sm:pb-4 sm:border-t-0 sm:bg-transparent sm:bg-gradient-to-t sm:from-[var(--color-background)] sm:via-[var(--color-background)] sm:to-transparent">
+          <p className="text-xs text-[var(--color-text-muted)] text-center mb-1.5 sm:mb-2">
             {mode === 'swap' ? (
               <>
                 已上传 {groupGarmentImages.length} 张产品参考图
@@ -1073,7 +1074,7 @@ export default function LookbookStudio() {
               type="button"
               onClick={handleGenerate}
               disabled={isGenerating || !loggedIn || !canGenerate || ctaGuideLabel !== null}
-              className={`w-full flex items-center justify-center gap-2 rounded-xl py-4 text-sm font-medium transition-all duration-300 btn-primary ${
+              className={`w-full flex items-center justify-center gap-2 rounded-xl py-3 sm:py-4 min-h-12 text-sm font-medium transition-all duration-300 btn-primary ${
                 (isGenerating || !canGenerate || ctaGuideLabel !== null) ? 'opacity-60 cursor-not-allowed' : ''
               }`}
             >
@@ -1103,7 +1104,7 @@ export default function LookbookStudio() {
             <p role="alert" className="mt-2 text-center text-xs text-danger">{prepareError}</p>
           )}
           {!canGenerate && loggedIn && isBalanceSufficient && (
-            <p className="text-[11px] text-[var(--color-text-muted)] text-center mt-2">
+            <p className="text-[11px] text-[var(--color-text-muted)] text-center mt-1 sm:mt-2">
               {customSizeError
                 ? customSizeError
                 : mode === 'products'
