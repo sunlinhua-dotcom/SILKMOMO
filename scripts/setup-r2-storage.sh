@@ -60,12 +60,12 @@ s3_call() { # 用法：s3_call <方法> <对象 key> [上传文件]  → 打印 
 explain_http() { # <步骤> <状态码>
   local step="$1" code="$2" body=""
   [ -s "$TMPDIR_WORK/resp" ] && body="$(grep -o '<Code>[^<]*</Code>' "$TMPDIR_WORK/resp" | head -1 | sed 's/<[^>]*>//g')"
-  printf '\n\033[31m自检失败：%s 返回 HTTP %s%s\033[0m\n' "$step" "$code" "${body:+（$body）}" >&2
+  printf '\n\033[31m自检失败：%s 返回 HTTP %s%s\033[0m\n' "$step" "$code" "${body:+（${body}）}" >&2
   case "$code" in
     000) info "连不上 R2：检查网络；如果开了代理，确认 *.r2.cloudflarestorage.com 能直连或走代理。curl 报错：$(head -c 200 "$TMPDIR_WORK/curl.err")" >&2 ;;
     403) info "鉴权失败。常见原因：1) Access Key ID 或 Secret 抄错/多了空格；2) 令牌权限不是『Object Read & Write』；" >&2
-         info "3) 令牌限定的桶不是 $ST_BUCKET；4) 令牌已过期或被吊销。可回后台重新创建一个令牌再来。" >&2 ;;
-    404) info "找不到桶或路径。常见原因：Account ID 不对（endpoint 里的那一串）、桶名不是 $ST_BUCKET。" >&2 ;;
+         info "3) 令牌限定的桶不是 ${ST_BUCKET}；4) 令牌已过期或被吊销。可回后台重新创建一个令牌再来。" >&2 ;;
+    404) info "找不到桶或路径。常见原因：Account ID 不对（endpoint 里的那一串）、桶名不是 ${ST_BUCKET}。" >&2 ;;
     *)   info "常见原因：Account ID 不对、令牌没限定到该桶、系统时间偏差过大（签名带时间戳，差超过 15 分钟会被拒）。" >&2 ;;
   esac
 }
@@ -121,7 +121,7 @@ ACCOUNT_IDS="$(printf '%s' "$WHOAMI" | grep -oE '[0-9a-f]{32}' | sort -u)"
 ACCOUNT_COUNT="$(printf '%s\n' "$ACCOUNT_IDS" | grep -c .)"
 if [ "$ACCOUNT_COUNT" = "1" ]; then
   ACCOUNT_ID="$ACCOUNT_IDS"
-  info "Cloudflare Account ID：$ACCOUNT_ID（自动识别）"
+  info "Cloudflare Account ID：${ACCOUNT_ID}（自动识别）"
 else
   info "这个登录下有多个账号，请从下面选一个粘贴 Account ID："
   printf '%s\n' "$ACCOUNT_IDS" | sed 's/^/    /'
@@ -238,6 +238,6 @@ if [[ "$SAVE" =~ ^[Yy]$ ]]; then
       printf 'OBJECT_STORAGE_REGION=%s\n' "$ST_REGION"
     } > "$ENVFILE" )
   chmod 600 "$ENVFILE"
-  ok "已写入 $ENVFILE。以后跑迁移：DATABASE_URL='...' node --env-file=$ENVFILE scripts/model-face-storage-migrate.mjs --to-r2"
+  ok "已写入 ${ENVFILE}。以后跑迁移：DATABASE_URL='...' node --env-file=$ENVFILE scripts/model-face-storage-migrate.mjs --to-r2"
 fi
 say "全部完成。"
