@@ -155,14 +155,23 @@ cat <<EOF
   （页面里还有一个 Token value 和 jurisdiction 地址，这里都用不到）
 EOF
 echo
-read -r -p "  粘贴 Access Key ID 后回车：" ST_KEY_ID
+read -r -p "  粘贴 Access Key ID（页面上「访问密钥 ID」，32 位较短那串）后回车：" ST_KEY_ID
 [ -n "$ST_KEY_ID" ] || die "Access Key ID 不能为空"
 echo "  下面输入 Secret Access Key：输入时屏幕不显示任何字符是正常的，粘贴后直接回车。"
-read -r -s -p "  粘贴 Secret Access Key 后回车：" ST_SECRET
+read -r -s -p "  粘贴 Secret Access Key（页面上「机密访问密钥」，64 位较长那串）后回车：" ST_SECRET
 echo
 [ -n "$ST_SECRET" ] || die "Secret Access Key 不能为空"
 ST_KEY_ID="$(printf '%s' "$ST_KEY_ID" | tr -d '[:space:]')"
 ST_SECRET="$(printf '%s' "$ST_SECRET" | tr -d '[:space:]')"
+# R2 的 Access Key ID 是 32 位、Secret 是 64 位；最常见的错是两个粘反，或把 cfat_ 开头的「令牌值」当成其中一个
+if [ "${#ST_KEY_ID}" -eq 64 ] && [ "${#ST_SECRET}" -eq 32 ]; then
+  die "两个密钥粘反了：Access Key ID 应是较短的 32 位那串（页面上「访问密钥 ID」），Secret 是 64 位那串（「机密访问密钥」）。重新运行 silkmomo-r2 即可，什么都没写入。"
+fi
+case "$ST_KEY_ID$ST_SECRET" in
+  *cfat_*) die "粘进去的是「令牌值」（cfat_ 开头），这里用不到。请用页面上「访问密钥 ID」和「机密访问密钥」两栏。重新运行 silkmomo-r2 即可。" ;;
+esac
+[ "${#ST_KEY_ID}" -eq 32 ] || die "Access Key ID 长度是 ${#ST_KEY_ID} 位，R2 的应是 32 位（页面上「访问密钥 ID」那栏）。重新运行 silkmomo-r2 即可，什么都没写入。"
+[ "${#ST_SECRET}" -eq 64 ] || die "Secret Access Key 长度是 ${#ST_SECRET} 位，R2 的应是 64 位（页面上「机密访问密钥」那栏）。重新运行 silkmomo-r2 即可，什么都没写入。"
 
 ST_ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
 ST_BUCKET="$BUCKET"
