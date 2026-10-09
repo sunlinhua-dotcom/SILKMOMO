@@ -109,13 +109,27 @@ say "第 1 步：检查 Cloudflare 登录并创建私有桶 ${BUCKET}"
 command -v npx >/dev/null 2>&1 || die "找不到 npx，请先安装 Node.js"
 command -v zeabur >/dev/null 2>&1 || die "找不到 zeabur 命令行，请先安装并 zeabur auth login"
 
-WHOAMI="$("${WRANGLER[@]}" whoami </dev/null 2>&1 | strip_ansi)"
-if ! printf '%s' "$WHOAMI" | grep -q "You are logged in"; then
+SKIP_BUCKET_STEP=0
+WHOAMI=""
+for _try in 1 2 3; do
+  WHOAMI="$("${WRANGLER[@]}" whoami </dev/null 2>&1 | strip_ansi)"
+  printf '%s' "$WHOAMI" | grep -q "You are logged in" && break
+  printf '%s' "$WHOAMI" | grep -qiE "fetch request failed|connectivity|ETIMEDOUT|ECONNRESET|ENOTFOUND" || break
+  info "连不上 Cloudflare 接口（网络问题，不是没登录），3 秒后重试（${_try}/3）……"
+  sleep 3
+done
+if printf '%s' "$WHOAMI" | grep -q "You are logged in"; then
+  ok "wrangler 已登录"
+elif printf '%s' "$WHOAMI" | grep -qiE "fetch request failed|connectivity|ETIMEDOUT|ECONNRESET|ENOTFOUND"; then
+  info "多次重试仍连不上 Cloudflare 接口（多半是代理/网络抖动）。跳过第 1 步的建桶检查——"
+  info "桶 ${BUCKET} 若之前已建好就没关系，第 3 步的自检会直接验证它能不能读写。"
+  SKIP_BUCKET_STEP=1
+  WHOAMI="${R2_ACCOUNT_ID:-daa2fe5189037606cccf23fcf8ad9e0d}"
+else
   info "wrangler 还没有登录 Cloudflare。请先运行下面这条（会打开浏览器让你授权），然后重新运行 silkmomo-r2："
   info "    npx -y wrangler@4 login"
   exit 1
 fi
-ok "wrangler 已登录"
 
 ACCOUNT_IDS="$(printf '%s' "$WHOAMI" | grep -oE '[0-9a-f]{32}' | sort -u)"
 ACCOUNT_COUNT="$(printf '%s\n' "$ACCOUNT_IDS" | grep -c .)"
@@ -129,8 +143,11 @@ else
   printf '%s' "$ACCOUNT_ID" | grep -qE '^[0-9a-f]{32}$' || die "Account ID 应是 32 位小写十六进制"
 fi
 
-BUCKETS="$("${WRANGLER[@]}" r2 bucket list </dev/null 2>&1 | strip_ansi)" || true
-if printf '%s' "$BUCKETS" | grep -qE "^name:[[:space:]]+${BUCKET}[[:space:]]*$"; then
+BUCKETS=""
+[ "$SKIP_BUCKET_STEP" = "1" ] || BUCKETS="$("${WRANGLER[@]}" r2 bucket list </dev/null 2>&1 | strip_ansi)" || true
+if [ "$SKIP_BUCKET_STEP" = "1" ]; then
+  info "（已跳过建桶检查）"
+elif printf '%s' "$BUCKETS" | grep -qE "^name:[[:space:]]+${BUCKET}[[:space:]]*$"; then
   ok "桶 ${BUCKET} 已存在，跳过创建"
 elif printf '%s' "$BUCKETS" | grep -qE '^name:|Listing buckets'; then
   info "创建私有桶 ${BUCKET}（默认不开公开访问，也不要去开）……"
