@@ -3,7 +3,7 @@
 #   1) 重置某个已有管理员的密码（推荐）
 #   2) 新建一个管理员账号
 # 密码只在本机用 bcryptjs（cost 12，与 lib/auth.ts 一致）哈希，线上数据库只收到哈希；脚本不打印密码。
-# 线上写库经 `zeabur service exec` 在 postgresql 服务容器里跑 psql，本机不需要数据库连接串。
+# 线上读写库经 `zeabur service exec` 在应用容器里用自带的 pg 模块执行，本机不需要数据库连接串。
 #
 # 安装成短命令：ln -sf /Volumes/ProjectsAPFS/SILKMOMO/scripts/admin-account.sh ~/.local/bin/silkmomo-admin
 # 本地测试：SILKMOMO_ADMIN_PSQL="psql -d <临时库>" silkmomo-admin（不连 Zeabur）
@@ -17,7 +17,9 @@ while [ -L "$SOURCE" ]; do
 done
 ROOT_DIR="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-PG_SERVICE_ID="${PG_SERVICE_ID:-69cf9956c5d57fa53f0665b2}"
+APP_SERVICE_ID="${APP_SERVICE_ID:-69cf9a88e701eccde6eb8e48}"
+# 容器里执行的 SQL 小程序：argv[1] 是 SQL，结果每行用 | 连接；出错打印 ERROR 开头的一行
+NODE_SQL='const {Client}=require("/app/node_modules/pg");const c=new Client({connectionString:process.env.DATABASE_URL,connectionTimeoutMillis:10000,statement_timeout:15000});c.connect().then(()=>c.query({text:process.argv[1],rowMode:"array"})).then(r=>{for(const row of r.rows)console.log(row.map(v=>v instanceof Date?v.toISOString():String(v)).join("|"));return c.end();}).catch(e=>{console.log("ERROR "+(e.code||"")+" "+e.message);process.exit(1);});'
 ZEABUR_ENV_ID="${ZEABUR_ENV_ID:-69cf91d39c2b3309e23e2c4e}"
 LOCAL_PSQL="${SILKMOMO_ADMIN_PSQL:-}"
 LOGIN_URL="https://silkmomo.zeabur.app/login"
@@ -34,20 +36,19 @@ run_sql() {
     # shellcheck disable=SC2086
     out="$($LOCAL_PSQL -X -q -v ON_ERROR_STOP=1 -At -c "$sql" 2>&1)"; rc=$?
   else
-    # 容器里用它自己的 POSTGRES_* 变量连本机库（密码不经过本机）；-w 永不交互等密码，
-    # 否则认证不过时 psql 会挂住，Zeabur 那头表现为 504 超时。
-    # zeabur exec 出错时退出码仍可能是 0，所以还要按输出判断；504 / 超时自动重试。
+    # 在应用容器（silkmomo）里用它自带的 pg 模块和 DATABASE_URL 连库：数据库地址和密码都不经过本机。
+    # （早先在 postgresql 容器里跑 psql 会挂住，Zeabur 那头表现为 504 超时，已弃用。）
+    # zeabur exec 出错时退出码仍可能是 0，所以按输出判断；504 / 超时自动重试。
     local attempt
     for attempt in 1 2 3; do
-      # shellcheck disable=SC2016  # $1 / $POSTGRES_* 要在容器里展开
-      out="$(zeabur service exec --id "$PG_SERVICE_ID" --env-id "$ZEABUR_ENV_ID" -i=false -- \
-        sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-${PASSWORD:-}}" PGCONNECT_TIMEOUT=10 psql -X -q -w -h 127.0.0.1 -U "${POSTGRES_USER:-${POSTGRES_USERNAME:-root}}" -d "${POSTGRES_DB:-${POSTGRES_DATABASE:-zeabur}}" -v ON_ERROR_STOP=1 -At -c "$1"' _ "$sql" 2>&1)"; rc=$?
-      out="$(printf '%s\n' "$out" | grep -vE '^\s*(INFO|WARN)\b|A new version of Zeabur CLI|github.com/zeabur/cli/releases' || true)"
-      if printf '%s' "$out" | grep -qE '(^|\s)ERROR\b|execute command failed|psql: error|FATAL:|could not connect'; then
+      out="$(zeabur service exec --id "$APP_SERVICE_ID" --env-id "$ZEABUR_ENV_ID" -i=false -- \
+        node -e "$NODE_SQL" "$sql" 2>&1)"; rc=$?
+      out="$(printf '%s\n' "$out" | grep -vE '^[[:space:]]*(.\[[0-9;]*m)?(INFO|WARN)|A new version of Zeabur CLI|github.com/zeabur/cli/releases' || true)"
+      if printf '%s' "$out" | grep -qE 'ERROR|execute command failed|Cannot find module'; then
         rc=1
       fi
       [ "$rc" -eq 0 ] && break
-      printf '%s' "$out" | grep -qiE '504|timeout|timed out|EOF|connection reset' || break
+      printf '%s' "$out" | grep -qiE '504|timeout|timed out|ETIMEDOUT|ECONNRESET' || break
       [ "$attempt" -lt 3 ] && { info "Zeabur 那头超时，3 秒后重试（${attempt}/3）……" >&2; sleep 3; }
     done
   fi
