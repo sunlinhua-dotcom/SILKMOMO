@@ -39,6 +39,7 @@ paths:
 - **孤儿清扫退款前必须查 pending 与成功的 `GenerationRecord`**：只看 `fulfilledAt` 为空会误退「已交付但标记没写上」的单子；改清扫判据时这两个查询不能省。退款本身走现有幂等路径（先认领流水再入账），多实例同时清扫不会重复退。
 - **管理员充值服务端幂等**：请求带 `requestId`（UUID）时 `Transaction.idempotencyKey = admin-recharge:<requestId>`，加余额 + 写流水在同一事务里，命中唯一约束（P2002）不再加钱，回第一次的结果并带 `duplicate: true`（HTTP 200）；同 requestId 换用户/金额回 409；非法格式 400；不带 requestId 的老请求保持旧行为但打告警。前端每次「用户 + 金额」意图生成一个 requestId，重试复用。改动后跑 `node --test __tests__/admin-recharge.test.mjs`。
 - **`Transaction` 永不被保留清理删除**（账务，见 Z 板块的 retention）。
+- **定价底线：每张图售价 ≥ 上游成本 3 倍**（10-15 用户定）。成本口径写在 `lib/billing-constants.ts` 注释里（kie 1 credit ≈ $0.005，Gemini $0.045/次，汇率 7.25）；改上游、改分辨率映射或 kie 调价时先重算。组图每组额外一张 Gemini 身份锚（约 ¥0.33）不单独收费，草稿档小组图会被摊薄。
 - 任何改动都必须跑 `npm run test:billing`，这套测试是防赔钱的。
 
 ## 测试与验收

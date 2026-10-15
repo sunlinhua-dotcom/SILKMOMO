@@ -8,14 +8,14 @@ export const PRICING = {
   // ── 生图（gemini-3.1-flash-image-preview）──
   // 每次 API 调用成本（美元）
   costUSD: 0.045,
-  // 售价倍率
-  markup: 2,
+  // 售价倍率（10-15 用户定：所有出图售价 ≥ 上游成本 3 倍）
+  markup: 3,
   // 售价（美元）
-  sellUSD: 0.09,
+  sellUSD: 0.135,
   // 人民币汇率（大约）
   exchangeRate: 7.25,
-  // 每次 API 调用价格（分）：$0.09 × 7.25 = ¥0.6525 ≈ 65分
-  pricePerCallFen: 65,
+  // 每次 API 调用价格（分）：$0.135 × 7.25 = ¥0.98，取整 ¥1.00
+  pricePerCallFen: 100,
   // 展示价格（元）
   get pricePerCallYuan() {
     return (this.pricePerCallFen / 100).toFixed(2);
@@ -42,13 +42,15 @@ export const GPT_IMAGE_QUALITY_OPTIONS: Array<{
   etaSeconds: number;
   etaLabel: string;
 }> = [
-  { id: 'low', label: '草稿', priceFen: 50, etaSeconds: 35, etaLabel: '约35秒' },
+  { id: 'low', label: '草稿', priceFen: 70, etaSeconds: 35, etaLabel: '约35秒' },
   { id: 'medium', label: '标准', priceFen: 120, etaSeconds: 90, etaLabel: '约90秒' },
   { id: 'high', label: '高清', priceFen: 350, etaSeconds: 150, etaLabel: '约150秒' },
 ];
 
+// GPT 通道（kie GPT-Image-2.5 Flare）成本：1 credit ≈ $0.005；1K=6、2K=10、4K=16 credits
+// ≈ ¥0.22 / ¥0.36 / ¥0.58。售价须 ≥ 3 倍：草稿 ¥0.70（3.2×）、标准 ¥1.20（3.3×）、高清 ¥3.50（6×）。
 export const GPT_IMAGE_PRICES_FEN: Record<GenerationQuality, number> = {
-  low: 50,
+  low: 70,
   medium: 120,
   high: 350,
 };
