@@ -51,6 +51,8 @@ run_sql() {
       printf '%s' "$out" | grep -qiE '504|timeout|timed out|ETIMEDOUT|ECONNRESET' || break
       [ "$attempt" -lt 3 ] && { info "Zeabur 那头超时，3 秒后重试（${attempt}/3）……" >&2; sleep 3; }
     done
+    # 远端输出可能带 CRLF，不去掉 \r 时 "0\r" != "0"、"admin\r" != "admin"
+    out="$(printf '%s' "$out" | tr -d '\r')"
   fi
   printf '%s' "$out"
   return $rc
@@ -95,8 +97,8 @@ else
   read -r -p "  新管理员的用户名（2–32 位字母、数字、_ 或 -）：" USERNAME
   USERNAME="$(printf '%s' "$USERNAME" | tr -d '[:space:]')"
   [[ "$USERNAME" =~ ^[a-zA-Z0-9_-]{2,32}$ ]] || die "用户名只能是 2–32 位字母、数字、_ 或 -"
-  EXISTS="$(run_sql "SELECT count(*) FROM \"User\" WHERE username = '${USERNAME}';")" || die "查询失败：$EXISTS"
-  [ "$EXISTS" = "0" ] || die "用户名「${USERNAME}」已被占用，换一个重跑即可"
+  EXISTING_ROLE="$(run_sql "SELECT role FROM \"User\" WHERE username = '${USERNAME}';")" || die "查询失败：$EXISTING_ROLE"
+  [ -z "$EXISTING_ROLE" ] || die "用户名「${USERNAME}」已被占用（现有账号角色：${EXISTING_ROLE}），换一个重跑即可"
 fi
 ok "用户名：${USERNAME}"
 
