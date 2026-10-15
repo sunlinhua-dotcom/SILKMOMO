@@ -34,10 +34,22 @@ run_sql() {
     # shellcheck disable=SC2086
     out="$($LOCAL_PSQL -X -q -v ON_ERROR_STOP=1 -At -c "$sql" 2>&1)"; rc=$?
   else
-    # shellcheck disable=SC2016  # $1 / $POSTGRES_* 要在容器里展开
-    out="$(zeabur service exec --id "$PG_SERVICE_ID" --env-id "$ZEABUR_ENV_ID" -i=false -- \
-      sh -c 'psql -X -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-zeabur}" -v ON_ERROR_STOP=1 -At -c "$1"' _ "$sql" 2>&1)"; rc=$?
-    out="$(printf '%s\n' "$out" | grep -vE '^\s*(INFO|WARN)\b|A new version of Zeabur CLI|github.com/zeabur/cli/releases' || true)"
+    # 容器里用它自己的 POSTGRES_* 变量连本机库（密码不经过本机）；-w 永不交互等密码，
+    # 否则认证不过时 psql 会挂住，Zeabur 那头表现为 504 超时。
+    # zeabur exec 出错时退出码仍可能是 0，所以还要按输出判断；504 / 超时自动重试。
+    local attempt
+    for attempt in 1 2 3; do
+      # shellcheck disable=SC2016  # $1 / $POSTGRES_* 要在容器里展开
+      out="$(zeabur service exec --id "$PG_SERVICE_ID" --env-id "$ZEABUR_ENV_ID" -i=false -- \
+        sh -c 'PGPASSWORD="${POSTGRES_PASSWORD:-${PASSWORD:-}}" PGCONNECT_TIMEOUT=10 psql -X -q -w -h 127.0.0.1 -U "${POSTGRES_USER:-${POSTGRES_USERNAME:-root}}" -d "${POSTGRES_DB:-${POSTGRES_DATABASE:-zeabur}}" -v ON_ERROR_STOP=1 -At -c "$1"' _ "$sql" 2>&1)"; rc=$?
+      out="$(printf '%s\n' "$out" | grep -vE '^\s*(INFO|WARN)\b|A new version of Zeabur CLI|github.com/zeabur/cli/releases' || true)"
+      if printf '%s' "$out" | grep -qE '(^|\s)ERROR\b|execute command failed|psql: error|FATAL:|could not connect'; then
+        rc=1
+      fi
+      [ "$rc" -eq 0 ] && break
+      printf '%s' "$out" | grep -qiE '504|timeout|timed out|EOF|connection reset' || break
+      [ "$attempt" -lt 3 ] && { info "Zeabur 那头超时，3 秒后重试（${attempt}/3）……" >&2; sleep 3; }
+    done
   fi
   printf '%s' "$out"
   return $rc
