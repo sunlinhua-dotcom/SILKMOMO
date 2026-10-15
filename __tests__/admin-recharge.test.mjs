@@ -185,10 +185,10 @@ test('request body: illegal requestId is a 400, missing requestId is allowed as 
 });
 
 test('request body: amount and user rules are unchanged (>= 150 yuan, multiples of 75 yuan)', () => {
-  for (const amountFen of [0, 7500, 14999, 15001, 22501, 15000.5, '15000', null, undefined, -15000]) {
+  for (const amountFen of [0, 7500, 14999, 15001, 22501, 40050, 15000.5, '15000', null, undefined, -15000]) {
     assert.equal(core.parseAdminRechargeBody({ userId: 'u1', amountFen }).ok, false, `amount ${String(amountFen)}`);
   }
-  for (const amountFen of [15000, 22500, 30000]) {
+  for (const amountFen of [15000, 22500, 30000, 40000]) {
     assert.equal(core.parseAdminRechargeBody({ userId: 'u1', amountFen }).ok, true, `amount ${amountFen}`);
   }
   for (const userId of ['', undefined, 5, null]) {

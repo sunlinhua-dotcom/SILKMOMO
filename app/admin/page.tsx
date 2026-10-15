@@ -34,11 +34,11 @@ interface RechargeTarget {
 
 const PAGE_SIZE = 50;
 
-// 充值规则：起充额取自套餐表里最小的一档；步长与 POST /api/admin/users 的校验一致（¥75 倍数）
+// 充值规则：起充额取自套餐表里最小的一档；步长与 POST /api/admin/users 的校验一致（整元）
 const MIN_RECHARGE_FEN = Math.min(...RECHARGE_PACKAGES.map(p => p.amountFen));
-const RECHARGE_STEP_FEN = 7500;
+const RECHARGE_STEP_FEN = 100;
 const yuan = (fen: number) => String(fen / 100);
-const RECHARGE_RULE_TEXT = `最低充值 ¥${yuan(MIN_RECHARGE_FEN)}，且必须是 ¥${yuan(RECHARGE_STEP_FEN)} 的倍数`;
+const RECHARGE_RULE_TEXT = `最低充值 ¥${yuan(MIN_RECHARGE_FEN)}，且必须是整元`;
 
 const formatFen = (fen: number) => `¥${(fen / 100).toFixed(2)}`;
 

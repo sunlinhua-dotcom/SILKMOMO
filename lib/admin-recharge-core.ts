@@ -26,7 +26,7 @@ export function adminRechargeKey(requestId: string): string {
 }
 
 export const MIN_ADMIN_RECHARGE_FEN = 15000;
-export const ADMIN_RECHARGE_STEP_FEN = 7500;
+export const ADMIN_RECHARGE_STEP_FEN = 100;
 
 export type AdminRechargeBodyResult =
   | { ok: true; input: AdminRechargeInput; legacy: boolean }
@@ -45,7 +45,7 @@ export function parseAdminRechargeBody(body: unknown): AdminRechargeBodyResult {
     || typeof amountFen !== 'number' || !Number.isInteger(amountFen)
     || amountFen < MIN_ADMIN_RECHARGE_FEN || amountFen % ADMIN_RECHARGE_STEP_FEN !== 0
   ) {
-    return { ok: false, status: 400, error: '最低充值 ¥150，且必须是 ¥75 的倍数' };
+    return { ok: false, status: 400, error: '最低充值 ¥150，且必须是整元' };
   }
 
   let requestId: string | undefined;

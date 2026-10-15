@@ -42,13 +42,13 @@ export const GPT_IMAGE_QUALITY_OPTIONS: Array<{
   etaSeconds: number;
   etaLabel: string;
 }> = [
-  { id: 'low', label: '草稿', priceFen: 40, etaSeconds: 35, etaLabel: '约35秒' },
+  { id: 'low', label: '草稿', priceFen: 50, etaSeconds: 35, etaLabel: '约35秒' },
   { id: 'medium', label: '标准', priceFen: 120, etaSeconds: 90, etaLabel: '约90秒' },
   { id: 'high', label: '高清', priceFen: 350, etaSeconds: 150, etaLabel: '约150秒' },
 ];
 
 export const GPT_IMAGE_PRICES_FEN: Record<GenerationQuality, number> = {
-  low: 40,
+  low: 50,
   medium: 120,
   high: 350,
 };
