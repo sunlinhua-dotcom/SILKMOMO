@@ -2,6 +2,8 @@
 paths:
   - "app/api/generate/stream/route.ts"
   - "lib/image-backends.ts"
+  - "lib/kie-image.ts"
+  - "scripts/setup-kie-image.sh"
   - "lib/postprocess.ts"
   - "lib/reference-image-normalizer.ts"
   - "lib/generation-record.ts"
@@ -14,7 +16,9 @@ paths:
 
 ## 文件清单（改这个板块只读这些）
 - `app/api/generate/stream/route.ts` — 1500+ 行的 SSE 主路由，**按路标取段**：`grep -n "===== \[" app/api/generate/stream/route.ts`，产品图分支和组图分支各自成段。
-- `lib/image-backends.ts` — 各家出图通道的封装与选择（590 行）。
+- `lib/image-backends.ts` — 各家出图通道的封装与选择（含 GPT 通道的 302 / kie 提供方选择、错误分类、余额不足识别）。
+- `lib/kie-image.ts` — kie.ai GPT-Image-2.5 Flare 客户端（上传 → createTask → 轮询 → 下载；纯逻辑、不 import 项目内模块，可被 node:test 直接加载）。
+- `scripts/setup-kie-image.sh` — 用户一键配置命令（装成 `silkmomo-kie`）：自检 key、写 Zeabur 变量、可选重新部署。
 - `lib/reference-image-normalizer.ts` — 参考图尺寸诚实化 / 压缩，依赖原生 `sharp`。
 - `lib/postprocess.ts` — 出图后处理。
 - `lib/generation-record.ts` — 生成记录落库。
@@ -35,7 +39,17 @@ paths:
 - **上游地址环境变量**：`GEMINI_BASE_URL`（Gemini 生图，不带 `/v1beta`，默认 `https://api.apiyi.com`）、`OPENAI_IMAGE_BASE_URL`（GPT 生图，默认随令牌：独立令牌 `https://api.302.ai`，否则同 Gemini）、`AI_ASSISTANT_BASE_URL`（分析/对话回退，**带 `/v1beta`**，默认 `https://api.apiyi.com/v1beta`）。都不设就与线上现状完全一致。
 - 已删除 `app/actions/generate.ts`（死代码），不要恢复。
 - **同 runId 整次重放（所有目标镜次的幂等键都已 consume）不得有任何上游调用**：产品图 `productFullReplay`、单张场景图 `preflightBalance === null`、组图 `groupFullReplay`，都复用同一个 `isFullGenerationReplay`。新加生图前置的上游调用要挂在这些判据下；`__tests__/generation-billing-replay.test.mjs` 有源码断言。
-- 生产主图通道是 302.ai 的 `gpt-image-2`，换通道要连着 D 板块的锚图通道一起评估。
+- 生产主图通道：配了 `KIE_API_KEY` 时是 kie.ai GPT-Image-2.5 Flare；没配（或 `OPENAI_IMAGE_PROVIDER=302`）回落 302.ai 的 `gpt-image-2`。换通道要连着 D 板块的锚图通道一起评估。
+
+## GPT 通道的 kie.ai 提供方（1015，302 余额耗尽后切换）
+- **提供方选择**（`lib/kie-image.ts` 的 `resolveOpenAIProvider`，进程启动时定一次，改变量要重新部署）：`OPENAI_IMAGE_PROVIDER` 显式写 `302` / `kie` 时照办；没写时 **配了 `KIE_API_KEY` 就用 kie**，没配就是 302 且行为与改造前完全一致。显式 `kie` 却没 key 会报 config 错（不会悄悄回落去打余额耗尽的 302）。**回滚 = Zeabur 加 `OPENAI_IMAGE_PROVIDER=302`（或删 `KIE_API_KEY`）后重新部署。**
+- **变量**：`KIE_API_KEY`（必需）；可选 `KIE_IMAGE_MODEL_I2I`（默认 `gpt-image-2-5-flare-image-to-image`）/ `KIE_IMAGE_MODEL_T2I`（默认 `gpt-image-2-5-flare-text-to-image`）/ `KIE_IMAGE_RESOLUTION`（`1K|2K|4K`，默认 `2K`，对应 6 / 10 / 16 credits）/ `KIE_BASE_URL`（默认 `https://api.kie.ai`）/ `KIE_UPLOAD_URL`（默认 `https://kieai.redpandaai.co/api/file-base64-upload`，完整地址）/ `KIE_POLL_INTERVAL_MS`（默认 2500）。一键配置命令 `silkmomo-kie`（`scripts/setup-kie-image.sh`）只写 `KIE_API_KEY`。
+- **对外接口不变**：backend 名仍是 `openai`、前端「GPT」引擎选项、`generateImage` 入参出参、计费 / 幂等 / 交接缓冲 / 看门狗都没动。有参考图 → i2i（最多 16 张 `input_urls`，顺序与 302 的 `image[]` 一致，prompt 沿用「参考图角色」标注）；没有参考图（脸库候选脸）→ t2i。`BackendResult.model` 与生成记录里的上游模型名是 kie 的真实模型 id；脸库计费归因用 `resolveApiModel('openai', { textOnly: true })`。
+- **画幅映射**：项目的 `1:1 / 3:4 / 4:3 / 9:16 / 16:9` 原样传；其它比例取最接近的 kie 允许值（`mapAspectToKie`）；非 1K 时不会选 `27:16 / 16:27 / 9:8 / 8:9`（这四个 kie 只有 1K）。`quality`（草稿 / 标准 / 高清）对 kie 通道**不起作用**（分辨率统一由 `KIE_IMAGE_RESOLUTION` 定），`maskImage` 也被忽略（出图路由从不传它）。出图尺寸诚实化（`normalizeGeneratedImage` 按声明尺寸裁切 / 缩放）在 kie 之后照常生效。
+- **超时**：kie 总预算（上传 + 建任务 + 轮询 + 下载）= `min(调用方 timeoutMs ?? 300s, OPENAI_TIMEOUT_MS=360s)`，**永远不超过 GPT 服务端单张上限**，所以 E 板块「客户端看门狗必须大于服务端超时」的约束不变（单测 + `scene-follow-swap.test.mjs` 守着）。轮询间隔 2.5s，单次请求 15s，轮询偶发网络 / 5xx / 429 / 422 容忍连续 6 次；超时不重试。`BackendInput.signal` 取消后立刻停止轮询；**出图路由故意不传 signal**——客户端断线后结果仍要落 pending 供重连取走。
+- **错误映射**：沿用 `errorKind / httpStatus / detail`；原文只进脱敏后的 `detail` / 日志。新增 `errorKind: 'upstream_quota'`（上游余额不足）：302 的 HTTP 401 + `err_code -10004`「Insufficient account balance」、kie 的 `code/HTTP 402` 或余额字样，统一给用户「出图服务暂时不可用，请稍后重试」（路由追加「（已自动退款）」），不说鉴权失败；服务端日志打 `[upstream-quota]`，**看到它就是该去 kie / 302 充值了**。kie 任务 `state=fail`：审核类归 `moderation`，余额类归 `upstream_quota`，其余「出图服务生成失败」。
+- **坑（都已在 `kie-image.ts` 处理，别拆）**：① 所有请求带浏览器 UA，否则 Cloudflare 403 error code 1010；② 上传域名是 `kieai.redpandaai.co`，文档写的 `api.kie.ai` 上传地址 404；③ `resultJson` 是 JSON 字符串，要二次 parse；④ 结果图在临时 CDN（约 3 天失效），必须当场下载成字节，且下载请求**不带 Authorization**；⑤ `aspect_ratio` 实际必填；⑥ **createTask 非幂等、没有 idempotency key**：请求发出后失败（超时 / 5xx / 断连）**不重投**，只在 DNS / 连接阶段失败或 429（被拒收）时重试一次，否则会重复建单重复扣 credits；⑦ 上传文件名必须随机（UUID）——同名可能在 kie 临时空间互相覆盖，把别的用户的参考图串过来；⑧ 参考图会以公网临时 URL 在 kie 保留约 3 天（隐私面，含脸库 / 场景图）；⑨ 异步任务制：进程在轮询中被杀 = 任务已建单、可能已扣 credits 但结果丢了（用户这边由孤儿清扫退款）；⑩ kie 1K 下 Flare 只出约 1360×768，2K 实际像素以真出图为准，别凭记忆算裁切。
+- **测试**：`__tests__/image-backends.test.mjs`（provider 选择、比例映射、resultJson、余额不足、轮询超时、取消、不重投）；端到端用 mock kie（带调用计数与鉴权 / UA / 参数断言）+ 临时库，不花钱。
 
 ## 测试与验收
 - `npm run test:image`；护栏逻辑见 `__tests__/generation-billing-replay.test.mjs` 与 `lib/generation-concurrency.ts` 注释

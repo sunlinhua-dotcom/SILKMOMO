@@ -8,10 +8,21 @@
  * Gemini 默认走 GEMINI_BASE_URL / GEMINI_API_KEY。
  * GPT 图像通道默认走 302.AI 官转，可用 OPENAI_IMAGE_API_KEY 配独立令牌；
  * 模型默认用 gpt-image-2（独立令牌）或 gpt-image-2-all（兼容旧共享令牌），可被 OPENAI_IMAGE_MODEL 覆盖。
+ *
+ * GPT 通道的上游提供方（lib/kie-image.ts 的 resolveOpenAIProvider）：
+ *   配了 KIE_API_KEY 且未显式写 OPENAI_IMAGE_PROVIDER=302 → kie.ai GPT-Image-2.5 Flare（异步任务制）；
+ *   否则 → 302.ai（原行为，一字不变）。对外接口（backend 名 'openai'、入参出参）两种提供方完全一致。
  */
 
 import { normalizeGenerationQuality, type GenerationQuality } from './billing-constants';
 import { normalizeReferenceImage } from './reference-image-normalizer';
+import {
+  KIE_DEFAULT_TIMEOUT_MS,
+  KieError,
+  readKieConfig,
+  resolveOpenAIProvider,
+  runKieImageTask,
+} from './kie-image';
 
 export interface ImageInput {
   data: string;     // base64
@@ -36,6 +47,11 @@ export interface BackendInput {
   promptPurpose?: 'compose' | 'faceswap' | 'derived-anchor';
   timeoutMs?: number;
   allowRetryOn5xx?: boolean;
+  /**
+   * 调用方取消信号（目前仅 kie 通道遵守：取消后立刻停止轮询）。出图路由故意不传它——
+   * 客户端断线后结果仍要落 pending 供重连取走，不能中途取消上游任务。
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -48,6 +64,7 @@ export type BackendErrorKind =
   | 'rate_limit'           // 上游 429
   | 'upstream_unavailable' // 上游 5xx
   | 'upstream_rejected'    // 上游其它 4xx
+  | 'upstream_quota'       // 上游账户余额 / 额度不足（302 的 -10004、kie 的 402 等）：运维要去充值，不是用户的问题
   | 'moderation'           // 上游或模型的内容审核 / 安全策略拒绝
   | 'bad_response'         // 响应无法解析 / 缺少图片
   | 'download';            // 兜底按 URL 取图失败
@@ -89,6 +106,13 @@ export function normalizeBackend(input?: string | null): ImageBackend {
   return DEFAULT_BACKEND;
 }
 
+// GPT 通道的上游提供方，进程内固定（改环境变量要重启 / 重新部署才生效，与其它模块级配置一致）。
+const OPENAI_PROVIDER = resolveOpenAIProvider(process.env);
+export function getOpenAIProvider(): 'kie' | '302' {
+  return OPENAI_PROVIDER;
+}
+const KIE_API_KEY_ENV = process.env.KIE_API_KEY || '';
+
 const APIYI_BASE = process.env.GEMINI_BASE_URL || 'https://api.apiyi.com';
 const API_KEY = process.env.GEMINI_API_KEY || '';
 
@@ -111,11 +135,16 @@ const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
 export const DERIVED_ANCHOR_MODEL = process.env.DERIVED_ANCHOR_MODEL || 'gemini-3.1-flash-image-preview';
 // 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
 // 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
-const OPENAI_MODEL =
-  process.env.OPENAI_IMAGE_MODEL || (HAS_DEDICATED_OPENAI_KEY ? 'gpt-image-2' : 'gpt-image-2-all');
+// kie 提供方下，归因用的模型名是 kie 的 Flare 模型（图生图为默认；纯文生用 resolveApiModel 的 textOnly）。
+const KIE_STATIC_CONFIG = readKieConfig(process.env);
+const OPENAI_MODEL = OPENAI_PROVIDER === 'kie'
+  ? KIE_STATIC_CONFIG.modelI2I
+  : process.env.OPENAI_IMAGE_MODEL || (HAS_DEDICATED_OPENAI_KEY ? 'gpt-image-2' : 'gpt-image-2-all');
 
 // 计费归因用：调用方（route.ts）不要再自己硬编码模型名，否则这里一改就对不上账。
-export function resolveApiModel(backend: ImageBackend): string {
+// textOnly：本次调用没有任何参考图（脸库候选脸）。kie 的图生图 / 文生图是两个模型 id，归因要如实。
+export function resolveApiModel(backend: ImageBackend, opts?: { textOnly?: boolean }): string {
+  if (backend === 'openai' && opts?.textOnly && OPENAI_PROVIDER === 'kie') return KIE_STATIC_CONFIG.modelT2I;
   return backend === 'openai' ? OPENAI_MODEL : GEMINI_MODEL;
 }
 
@@ -142,13 +171,34 @@ export function sanitizeError(msg: string): string {
   let out = msg;
   if (API_KEY) out = out.split(API_KEY).join('***');
   if (OPENAI_API_KEY && OPENAI_API_KEY !== API_KEY) out = out.split(OPENAI_API_KEY).join('***');
+  if (KIE_API_KEY_ENV) out = out.split(KIE_API_KEY_ENV).join('***');
   return out
     .replace(/([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"'<>]+/gi, '$1***')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+\/=-]{8,}/gi, '$1***')
     // 常见令牌形态：sk-… / pk-… / rk-…（OpenAI、302、apiyi 等）、Google AIza…、GitHub gh?_…
     .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, '***')
     .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, '***')
-    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '***');
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '***')
+    // 签名 URL 的 query（S3 / GCS / Azure SAS 等）：保留参数名，值一律打码
+    .replace(/([?&](?:X-Amz-[A-Za-z0-9-]+|X-Goog-[A-Za-z0-9-]+|Signature|Expires|AWSAccessKeyId|GoogleAccessId|sig|sv|se|sp|sr|st|skoid|sktid)=)[^&\s"'<>]+/gi, '$1***');
+}
+
+// 上游账户余额 / 额度不足：302 回 HTTP 401 + err_code -10004「Insufficient account balance」，kie 回 code 402。
+const QUOTA_RE = /-10004|insufficient[_ ](?:account[_ ])?(?:balance|credits?|funds|quota)|(?:balance|credits?)\s+(?:is\s+)?(?:insufficient|not enough|exhausted|too low)|not enough (?:balance|credits?)|out of credits|余额不足|余额已用完|欠费/i;
+
+const QUOTA_USER_MESSAGE = '出图服务暂时不可用，请稍后重试';
+
+/** 余额不足：给用户的文案不提余额、不说鉴权失败；运维在服务端日志里能一眼看到该充值了。 */
+function quotaFailure(backend: ImageBackend, status: number | undefined, errorText: string): BackendResult {
+  console.error(`[upstream-quota] backend=${backend} provider=${OPENAI_PROVIDER} 上游账户余额不足，出图已失败并退款，请尽快充值`);
+  return {
+    success: false,
+    error: QUOTA_USER_MESSAGE,
+    errorKind: 'upstream_quota',
+    httpStatus: status,
+    detail: sanitizeError(errorText.slice(0, 300)),
+    backend,
+  };
 }
 
 const MODERATION_RE = /moderation|content[_ -]?policy|safety[_ -]?(?:system|violation)|sensitive|审核|违规|敏感/i;
@@ -158,6 +208,9 @@ function httpFailure(backend: ImageBackend, status: number, errorText: string): 
   const detail = sanitizeError(errorText.slice(0, 300));
   let errorKind: BackendErrorKind;
   let error: string;
+  if (status === 402 || QUOTA_RE.test(errorText)) {
+    return quotaFailure(backend, status, errorText);
+  }
   if (status === 429) {
     errorKind = 'rate_limit';
     error = '出图服务繁忙，请求过于频繁（上游 429），请稍后重试';
@@ -234,14 +287,17 @@ export async function generateImage(
   backendOverride?: ImageBackend | string | null
 ): Promise<BackendResult> {
   const backend = normalizeBackend(backendOverride ?? null);
-  const requiredKey = backend === 'openai' ? OPENAI_API_KEY : API_KEY;
+  const requiredKey = backend === 'openai'
+    ? (OPENAI_PROVIDER === 'kie' ? readKieConfig(process.env).apiKey : OPENAI_API_KEY)
+    : API_KEY;
   if (!requiredKey) {
     return { success: false, error: 'API Key 未配置', errorKind: 'config', backend };
   }
   const normalizedInput = await normalizeBackendReferenceImages(input);
-  return backend === 'openai'
-    ? generateWithOpenAI(normalizedInput)
-    : generateWithGemini(normalizedInput);
+  if (backend === 'openai') {
+    return OPENAI_PROVIDER === 'kie' ? generateWithKie(normalizedInput) : generateWithOpenAI(normalizedInput);
+  }
+  return generateWithGemini(normalizedInput);
 }
 
 /** 参考图归一化并发度：sharp 吃 CPU + libuv 线程池，3 路足够把一组图的 4~6 张重复图压到最短。 */
@@ -558,9 +614,11 @@ async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Prom
   return badResponse('openai', 'OpenAI 未返回图片数据');
 }
 
-async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<BackendResult> {
-  // 收集所有参考图（OpenAI 上限 16 张）
-  const refImages: Array<{ img: ImageInput; tag: string }> = [];
+type TaggedRef = { img: ImageInput; tag: string };
+
+/** 收集送给 GPT 通道的参考图（顺序即 image[] / input_urls 顺序，上限 16 张）。302 与 kie 共用。 */
+function collectReferenceImages(input: BackendInput): TaggedRef[] {
+  const refImages: TaggedRef[] = [];
   if (input.sceneAsEditBase) {
     // 组图（换装）模式：底图排在最前——/v1/images/edits 的 image[] 首图作为主编辑底图，
     // anchor 紧跟第二位，优先锁新模特身份；不传 model/bg 参考图避免干扰底图。
@@ -576,16 +634,11 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
     (input.accessoryImages || []).forEach(img => refImages.push({ img, tag: 'accessory' }));
     if (input.anchorImage) refImages.push({ img: input.anchorImage, tag: 'anchor' });
   }
+  return refImages.slice(0, 16);
+}
 
-  const limited = refImages.slice(0, 16);
-
-  // 没有任何参考图 = 纯文生图。edits 端点要求至少一张输入图，走这里会被上游判参数错误
-  // （0802 脸库实测 403 err_code:-10003），必须改走 generations。
-  if (limited.length === 0) {
-    return generateWithOpenAIText(input, retryCount);
-  }
-
-  // 在 prompt 里给参考图分组打标，弥补 multipart 不能传图标签的限制
+/** 在 prompt 里给参考图分组打标，弥补 multipart / input_urls 不能传图标签的限制。 */
+function buildTaggedReferencePrompt(input: BackendInput, limited: TaggedRef[]): string {
   const roleText = (tag: string, purpose: BackendInput['promptPurpose'] = 'compose') => {
     switch (tag) {
       case 'product':
@@ -610,10 +663,22 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
         return tag;
     }
   };
-  const taggedPrompt = `${input.prompt}
+  return `${input.prompt}
 
 Reference image roles (in order of upload):
 ${limited.map((r, i) => `  ${i + 1}. ${roleText(r.tag, input.promptPurpose)}`).join('\n')}`;
+}
+
+async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<BackendResult> {
+  const limited = collectReferenceImages(input);
+
+  // 没有任何参考图 = 纯文生图。edits 端点要求至少一张输入图，走这里会被上游判参数错误
+  // （0802 脸库实测 403 err_code:-10003），必须改走 generations。
+  if (limited.length === 0) {
+    return generateWithOpenAIText(input, retryCount);
+  }
+
+  const taggedPrompt = buildTaggedReferencePrompt(input, limited);
 
   // 参考图 base64 → Blob 只做一次：重试（网络抖动 / 503 / 429）复用同一批 Blob，
   // 不再为每次重试重新 Buffer.from + new Blob 拷贝几十 MB 的数据。
@@ -730,4 +795,61 @@ async function postOpenAIEdits(
   }
 
   return badResponse('openai', 'OpenAI 未返回 b64_json 或 url');
+}
+
+// ═══════════════════════════════════════════════
+// kie.ai GPT-Image-2.5 Flare 通道（异步任务制，替代 302 的 gpt-image-2）
+// ═══════════════════════════════════════════════
+
+/** KieError → 现有错误分类（errorKind / httpStatus / detail）。原文只进脱敏后的 detail，不下发给用户。 */
+function kieFailure(err: unknown, timeoutSec: number): BackendResult {
+  if (!(err instanceof KieError)) return networkFailure('openai', err, timeoutSec);
+  const raw = err.raw ?? err.message;
+  const detail = sanitizeError(raw).slice(0, 300);
+  switch (err.kind) {
+    case 'config':
+      return { success: false, error: 'API Key 未配置', errorKind: 'config', backend: 'openai' };
+    case 'timeout':
+      return { success: false, error: `网络连接失败（超时 ${timeoutSec}s），请稍后重试`, errorKind: 'timeout', detail, backend: 'openai' };
+    case 'cancelled':
+      return { success: false, error: '出图请求已取消', errorKind: 'network', detail: 'cancelled', backend: 'openai' };
+    case 'network':
+      return { success: false, error: '网络连接失败，请稍后重试', errorKind: 'network', detail, backend: 'openai' };
+    case 'http':
+      // 余额不足（402 / 余额字样）在 httpFailure 里统一识别
+      return httpFailure('openai', err.status ?? 502, raw);
+    case 'task_failed':
+      if (QUOTA_RE.test(raw)) return quotaFailure('openai', undefined, raw);
+      if (MODERATION_RE.test(raw)) {
+        return { success: false, error: '图片或描述可能触发内容审核，请更换参考图后重试', errorKind: 'moderation', detail, backend: 'openai' };
+      }
+      return { success: false, error: '出图服务生成失败，请稍后重试', errorKind: 'upstream_rejected', detail, backend: 'openai' };
+    case 'download':
+      return { success: false, error: '下载图片失败，请稍后重试', errorKind: 'download', httpStatus: err.status, detail, backend: 'openai' };
+    default:
+      return badResponse('openai', '出图服务返回了无法解析的响应，请稍后重试', raw);
+  }
+}
+
+async function generateWithKie(input: BackendInput): Promise<BackendResult> {
+  const config = readKieConfig(process.env);
+  const limited = collectReferenceImages(input);
+  // 总预算 = 调用方给的（脸库 330s）或 kie 默认（300s），且绝不超过 GPT 通道服务端单张上限——
+  // 客户端事件看门狗（400s）是按这个上限定的，kie 轮询不能把它顶穿。
+  const budgetMs = Math.min(input.timeoutMs ?? KIE_DEFAULT_TIMEOUT_MS, OPENAI_TIMEOUT_MS);
+  try {
+    const run = await runKieImageTask({
+      config,
+      // 有参考图：沿用 302 edits 同款「参考图角色」标注；纯文生图：原样 prompt
+      prompt: limited.length ? buildTaggedReferencePrompt(input, limited) : input.prompt,
+      aspectRatio: input.aspectRatio,
+      refs: limited.map(r => ({ data: r.img.data, mimeType: r.img.mimeType })),
+      timeoutMs: budgetMs,
+      signal: input.signal,
+    });
+    return { success: true, data: run.data, backend: 'openai', model: run.model };
+  } catch (err) {
+    logUpstreamError('openai', err);
+    return kieFailure(err, Math.round(budgetMs / 1000));
+  }
 }

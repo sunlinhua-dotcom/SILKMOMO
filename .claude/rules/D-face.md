@@ -35,7 +35,7 @@ paths:
 - **`gemini-3-pro-image` 当锚会把成图带偏白**。默认锚模型是 `gemini-3.1-flash-image-preview`（环境变量 `DERIVED_ANCHOR_MODEL`），不要"升级"到 pro。
 - **肤色指令看起来重复，但不能删**。删过，成图立刻偏色。
 - 脸图属于用户隐私素材，调试时不要把图落到仓库里，放 `verify/`。
-- **派生身份锚走 Gemini 协议**（`lib/image-backends.ts` 的 `DERIVED_ANCHOR_MODEL`），密钥在请求头 `x-goog-api-key`；脸库候选脸走 OpenAI 兼容的 `/v1/images/generations`（Bearer）。上游地址变量见 B 板块（`GEMINI_BASE_URL` / `OPENAI_IMAGE_BASE_URL`）。
+- **派生身份锚走 Gemini 协议**（`lib/image-backends.ts` 的 `DERIVED_ANCHOR_MODEL`），密钥在请求头 `x-goog-api-key`；脸库候选脸走 GPT 通道的纯文生图分支——与主图**共用同一 key / 同一提供方开关**（`generateImage(…, 'openai')`，没有参考图）：302 提供方是 `/v1/images/generations`（Bearer），配了 `KIE_API_KEY` 时是 kie 的文生图模型（`gpt-image-2-5-flare-text-to-image`，无 `input_urls`），计费归因用 `resolveApiModel('openai', { textOnly: true })`。上游地址 / 提供方变量见 B 板块（`GEMINI_BASE_URL` / `OPENAI_IMAGE_BASE_URL` / `KIE_*`）。派生身份锚仍是 Gemini（apiyi），不受 kie 开关影响。
 - **脸库面板里每个会扣费的入口都要先确认并标价**：「再出 3 张」的确认在 `app/lookbook/page.tsx` 的 `submitFaceJob`，「继续生成」的确认在面板内；继续时只有 `billingStatus === 'uncharged'` 的条目才会扣费（单价取任务自带 `costFen`），金额别按剩余条数硬乘。
 
 ## 脸图存储：数据库 or Cloudflare R2（1008 批次 C，可开关、可回滚）

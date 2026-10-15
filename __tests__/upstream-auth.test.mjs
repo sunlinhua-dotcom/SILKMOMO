@@ -122,6 +122,11 @@ async function loadBackends(env) {
     /import \{ normalizeReferenceImage \} from '\.\/reference-image-normalizer';/,
     'const normalizeReferenceImage = async input => input;',
   );
+  const kieSource = ts.transpileModule(fs.readFileSync('lib/kie-image.ts', 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+  }).outputText;
+  const kieUrl = `data:text/javascript;base64,${Buffer.from(kieSource).toString('base64')}`;
+  source = source.replace(/import \{([^}]*)\} from '\.\/kie-image';/, (_m, names) => `const {${names}} = await import(${JSON.stringify(kieUrl)});`);
   // 模块级常量在 import 时读环境变量，且 data: URL 会被缓存——加 nonce 保证每次都是全新实例。
   const output = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },

@@ -388,7 +388,8 @@ async function runModelFaceJob(jobId: string): Promise<void> {
         deduct: () => chargeModelFaceItem(
           item.id,
           `御用 AI 模特脸 · ${RECIPE_LABELS[item.specIndex]}`,
-          resolveApiModel('openai'),
+          // 候选脸是纯文生图：kie 通道下它是文生图模型，不是图生图模型
+          resolveApiModel('openai', { textOnly: true }),
         ),
         markAttempt: () => markModelFaceAttempt(item.id, job.userId),
         generate: async () => {

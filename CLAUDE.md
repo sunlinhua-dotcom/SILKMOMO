@@ -28,7 +28,7 @@
 - **密钥只走环境变量**，不进代码、不进日志、不进提交。
 - **本地端口固定 `4605`**；被占用时用 `PORT=4699` 起临时实例，不要改默认值。
 - **大素材放 `refs/`**，不要塞进 `public/` 或组件里。
-- **生产出图通道**：主图走 302.ai 的 `gpt-image-2`；派生身份锚走 apiyi 的 `gemini-3.1-flash-image-preview`。换通道要先看 B / D 两个板块的坑清单。
+- **生产出图通道**：主图走 kie.ai GPT-Image-2.5 Flare（配了 `KIE_API_KEY` 时；否则回落 302.ai 的 `gpt-image-2`，`OPENAI_IMAGE_PROVIDER=302` 可强制回滚）；派生身份锚走 apiyi 的 `gemini-3.1-flash-image-preview`。换通道要先看 B / D 两个板块的坑清单。
 
 ## 规则文件怎么用（实测口径）
 
