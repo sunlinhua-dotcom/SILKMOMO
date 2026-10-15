@@ -849,3 +849,67 @@ test('kie 总预算不超过 GPT 服务端单张上限（客户端看门狗按�
   const kieSrc = fs.readFileSync('lib/kie-image.ts', 'utf8');
   assert.doesNotMatch(kieSrc, /^import /m);
 });
+
+test('画质档 → kie 分辨率：草稿 1K / 标准 2K / 高清 4K；无 quality 或未知值 2K；覆盖变量优先', () => {
+  const cfg = kie.readKieConfig({ KIE_API_KEY: 'k' });
+  assert.equal(cfg.resolutionOverride, undefined);
+  assert.equal(kie.resolveKieResolution('low', cfg), '1K');
+  assert.equal(kie.resolveKieResolution('medium', cfg), '2K');
+  assert.equal(kie.resolveKieResolution('high', cfg), '4K');
+  assert.equal(kie.resolveKieResolution(undefined, cfg), '2K');
+  assert.equal(kie.resolveKieResolution('ultra', cfg), '2K');
+  assert.equal(kie.resolveKieResolution(null, cfg), '2K');
+  // KIE_IMAGE_RESOLUTION 设了合法值 = 全局覆盖；非法值 = 当没设
+  for (const forced of ['1K', '2K', '4K']) {
+    const o = kie.readKieConfig({ KIE_API_KEY: 'k', KIE_IMAGE_RESOLUTION: forced });
+    assert.equal(o.resolutionOverride, forced);
+    for (const q of ['low', 'medium', 'high', undefined]) assert.equal(kie.resolveKieResolution(q, o), forced);
+  }
+  const bad = kie.readKieConfig({ KIE_API_KEY: 'k', KIE_IMAGE_RESOLUTION: '8K' });
+  assert.equal(bad.resolutionOverride, undefined);
+  assert.equal(kie.resolveKieResolution('high', bad), '4K');
+});
+
+test('只支持 1K 的四个比例被精确点名时分辨率降到 1K；其它比例保持原分辨率', () => {
+  for (const r of ['27:16', '16:27', '9:8', '8:9']) {
+    assert.deepEqual(kie.resolveKieSize(r, '4K'), { aspectRatio: r, resolution: '1K' });
+    assert.deepEqual(kie.resolveKieSize(r, '2K'), { aspectRatio: r, resolution: '1K' });
+  }
+  assert.deepEqual(kie.resolveKieSize('16:9', '4K'), { aspectRatio: '16:9', resolution: '4K' });
+  assert.deepEqual(kie.resolveKieSize('5:4', '4K'), { aspectRatio: '4:3', resolution: '4K' });
+  assert.deepEqual(kie.resolveKieSize('3:4', '1K'), { aspectRatio: '3:4', resolution: '1K' });
+});
+
+test('kie 出图：quality 草稿 / 标准 / 高清分别以 1K / 2K / 4K 提交；无 quality 与脸库文生图保持 2K', async () => {
+  await withKie({}, async mod => {
+    const cases = [['low', '1K'], ['medium', '2K'], ['high', '4K'], [undefined, '2K']];
+    for (const [quality, expected] of cases) {
+      const fake = fakeKie();
+      await withMockedNetwork(fake.handler, async () => {
+        const result = await mod.generateImage(i2iInput({ quality }), 'openai');
+        assert.equal(result.success, true);
+        assert.equal(fake.rec.creates[0].input.resolution, expected, `quality=${quality}`);
+      });
+    }
+    // 脸库候选脸：纯文生图 + quality medium
+    const face = fakeKie();
+    await withMockedNetwork(face.handler, async () => {
+      await mod.generateImage({ prompt: 'portrait', aspectRatio: '3:4', productImages: [], quality: 'medium', timeoutMs: 330_000 }, 'openai');
+      assert.equal(face.rec.creates[0].input.resolution, '2K');
+    });
+  });
+  // 覆盖变量优先于画质档
+  await withKie({ KIE_IMAGE_RESOLUTION: '1K' }, async mod => {
+    const fake = fakeKie();
+    await withMockedNetwork(fake.handler, async () => {
+      await mod.generateImage(i2iInput({ quality: 'high' }), 'openai');
+      assert.equal(fake.rec.creates[0].input.resolution, '1K');
+    });
+  });
+});
+
+test('4K 的时间预算：按 2K 实测（图生图约 40s）的 2 倍估约 80s，远低于 kie 默认预算 300s 与服务端上限 360s', () => {
+  const estimated4kSeconds = 40 * 2 + 20; // 2 倍生成耗时 + 上传 / 下载余量
+  assert.ok(estimated4kSeconds * 1000 < kie.KIE_DEFAULT_TIMEOUT_MS);
+  assert.ok(kie.KIE_DEFAULT_TIMEOUT_MS <= 360_000);
+});

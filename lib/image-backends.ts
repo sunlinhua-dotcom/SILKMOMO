@@ -843,6 +843,8 @@ async function generateWithKie(input: BackendInput): Promise<BackendResult> {
       // 有参考图：沿用 302 edits 同款「参考图角色」标注；纯文生图：原样 prompt
       prompt: limited.length ? buildTaggedReferencePrompt(input, limited) : input.prompt,
       aspectRatio: input.aspectRatio,
+      // 草稿 / 标准 / 高清 → 1K / 2K / 4K（KIE_IMAGE_RESOLUTION 设了则全局覆盖；无 quality = 2K）
+      quality: input.quality,
       refs: limited.map(r => ({ data: r.img.data, mimeType: r.img.mimeType })),
       timeoutMs: budgetMs,
       signal: input.signal,

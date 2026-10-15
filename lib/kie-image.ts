@@ -59,7 +59,10 @@ export interface KieConfig {
   uploadUrl: string;
   modelI2I: string;
   modelT2I: string;
+  /** 无画质档 / 无覆盖时的分辨率（KIE_IMAGE_RESOLUTION 合法则取它，否则 2K）。 */
   resolution: KieResolution;
+  /** KIE_IMAGE_RESOLUTION 显式设了合法值 = 全局覆盖：无视用户选的画质档。 */
+  resolutionOverride?: KieResolution;
   pollIntervalMs: number;
 }
 
@@ -79,8 +82,28 @@ export function readKieConfig(env: EnvLike = process.env): KieConfig {
     modelI2I: (env.KIE_IMAGE_MODEL_I2I || '').trim() || KIE_DEFAULT_MODEL_I2I,
     modelT2I: (env.KIE_IMAGE_MODEL_T2I || '').trim() || KIE_DEFAULT_MODEL_T2I,
     resolution: res === '1K' || res === '2K' || res === '4K' ? res : KIE_DEFAULT_RESOLUTION,
+    resolutionOverride: res === '1K' || res === '2K' || res === '4K' ? res : undefined,
     pollIntervalMs: Number.isFinite(poll) && poll >= 20 ? Math.min(poll, 30_000) : KIE_DEFAULT_POLL_INTERVAL_MS,
   };
+}
+
+// ───────────────────────── 画质档 → 分辨率 ─────────────────────────
+
+/** 用户选的画质档（GenerationQuality：low=草稿 / medium=标准 / high=高清）→ kie 分辨率。 */
+export const KIE_QUALITY_RESOLUTION: Readonly<Record<'low' | 'medium' | 'high', KieResolution>> = {
+  low: '1K',
+  medium: '2K',
+  high: '4K',
+};
+
+/**
+ * 本次调用的分辨率：KIE_IMAGE_RESOLUTION 设了 → 全局覆盖；否则按画质档映射；
+ * 没有画质档（脸库候选脸以外的无 quality 调用、未知值）→ 2K。
+ */
+export function resolveKieResolution(quality: unknown, cfg: Pick<KieConfig, 'resolution' | 'resolutionOverride'>): KieResolution {
+  if (cfg.resolutionOverride) return cfg.resolutionOverride;
+  if (quality === 'low' || quality === 'medium' || quality === 'high') return KIE_QUALITY_RESOLUTION[quality];
+  return KIE_DEFAULT_RESOLUTION;
 }
 
 // ───────────────────────── 比例映射 ─────────────────────────
@@ -114,6 +137,16 @@ export function mapAspectToKie(aspect: string | undefined, resolution: KieResolu
     if (Math.abs(Math.log(c[1] / ratio)) < Math.abs(Math.log(best[1] / ratio))) best = c;
   }
   return best[0];
+}
+
+/**
+ * 比例 + 分辨率一起定：只支持 1K 的四个比例（27:16 / 16:27 / 9:8 / 8:9）被精确点名时，
+ * 分辨率降到 1K（与 kiekie 的现有规则一致）；其它比例按 mapAspectToKie 取最接近且支持该分辨率的。
+ */
+export function resolveKieSize(aspect: string | undefined, resolution: KieResolution): { aspectRatio: string; resolution: KieResolution } {
+  const raw = (aspect || '').trim();
+  if (KIE_RATIOS_1K_ONLY.some(([name]) => name === raw)) return { aspectRatio: raw, resolution: '1K' };
+  return { aspectRatio: mapAspectToKie(raw, resolution), resolution };
 }
 
 // ───────────────────────── 错误 ─────────────────────────
@@ -416,6 +449,8 @@ export interface KieRunParams {
   /** 项目画幅（1:1 / 3:4 / 4:3 / 9:16 / 16:9），内部映射成 kie 允许值。 */
   aspectRatio: string;
   refs: readonly KieRefImage[];
+  /** 用户选的画质档（low / medium / high）；缺省 = 2K。KIE_IMAGE_RESOLUTION 设了则无视它。 */
+  quality?: string;
   /** 总预算（上传 + 建任务 + 轮询 + 下载）。 */
   timeoutMs: number;
   signal?: AbortSignal;
@@ -433,14 +468,15 @@ export async function runKieImageTask(p: KieRunParams): Promise<KieRunResult> {
   if (!cfg.apiKey) throw new KieError('config', 'KIE_API_KEY 未配置');
   const ctx: Ctx = { cfg, deadlineAt: Date.now() + p.timeoutMs, signal: p.signal };
   const model = p.refs.length ? cfg.modelI2I : cfg.modelT2I;
+  const size = resolveKieSize(p.aspectRatio, resolveKieResolution(p.quality, cfg));
   const input: Record<string, unknown> = {
     prompt: p.prompt,
-    aspect_ratio: mapAspectToKie(p.aspectRatio, cfg.resolution),
-    resolution: cfg.resolution,
+    aspect_ratio: size.aspectRatio,
+    resolution: size.resolution,
   };
   if (p.refs.length) input.input_urls = await uploadReferences(p.refs, ctx);
   const taskId = await createTask(model, input, ctx);
-  console.log(`[kie] create ok taskId=${taskId} model=${model} refs=${p.refs.length} ratio=${String(input.aspect_ratio)} res=${cfg.resolution}`);
+  console.log(`[kie] create ok taskId=${taskId} model=${model} refs=${p.refs.length} ratio=${String(input.aspect_ratio)} res=${size.resolution}`);
   const done = await pollTask(taskId, ctx);
   const data = await downloadImage(done.urls[0], ctx);
   console.log(`[kie] done taskId=${taskId} costTime=${done.costTime ?? '?'}s`);
