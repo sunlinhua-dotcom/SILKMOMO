@@ -39,7 +39,7 @@ paths:
 - **上游地址环境变量**：`GEMINI_BASE_URL`（Gemini 生图，不带 `/v1beta`，默认 `https://api.apiyi.com`）、`OPENAI_IMAGE_BASE_URL`（GPT 生图，默认随令牌：独立令牌 `https://api.302.ai`，否则同 Gemini）、`AI_ASSISTANT_BASE_URL`（分析/对话回退，**带 `/v1beta`**，默认 `https://api.apiyi.com/v1beta`）。都不设就与线上现状完全一致。
 - 已删除 `app/actions/generate.ts`（死代码），不要恢复。
 - **同 runId 整次重放（所有目标镜次的幂等键都已 consume）不得有任何上游调用**：产品图 `productFullReplay`、单张场景图 `preflightBalance === null`、组图 `groupFullReplay`，都复用同一个 `isFullGenerationReplay`。新加生图前置的上游调用要挂在这些判据下；`__tests__/generation-billing-replay.test.mjs` 有源码断言。
-- 生产主图通道：配了 `KIE_API_KEY` 时是 kie.ai GPT-Image-2.0（10-16 起；10-15 至 10-16 是 2.5 Flare）；没配（或 `OPENAI_IMAGE_PROVIDER=302`）回落 302.ai 的 `gpt-image-2`。换通道要连着 D 板块的锚图通道一起评估。
+- 生产主图通道：**10-16 起回到 302.ai 官转 `gpt-image-2`**（Zeabur 显式 `OPENAI_IMAGE_PROVIDER=302`，一键命令 `silkmomo-302` = `scripts/setup-302-image.sh`，写 key / 提供方 / 模型 / base 四个变量并重新部署）。经过：10-15 302 余额耗尽切 kie 2.5 Flare → 客户嫌斑驳 → 10-16 改 kie 2.0 → 客户仍觉得不如原来 → 当天切回 302。`KIE_API_KEY` 保留作备用。302 每次成功出图打 `[302-usage]` 日志（输入 / 输出 token），**按它核对售价 ≥ 成本 3 倍**（F 板块），302 价目：图片输出约 $30 / 1M token、图片输入约 $8 / 1M。换通道要连着 D 板块的锚图通道一起评估。
 
 ## GPT 通道的 kie.ai 提供方（1015，302 余额耗尽后切换）
 - **提供方选择**（`lib/kie-image.ts` 的 `resolveOpenAIProvider`，进程启动时定一次，改变量要重新部署）：`OPENAI_IMAGE_PROVIDER` 显式写 `302` / `kie` 时照办；没写时 **配了 `KIE_API_KEY` 就用 kie**，没配就是 302 且行为与改造前完全一致。显式 `kie` 却没 key 会报 config 错（不会悄悄回落去打余额耗尽的 302）。**回滚 = Zeabur 加 `OPENAI_IMAGE_PROVIDER=302`（或删 `KIE_API_KEY`）后重新部署。**

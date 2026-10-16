@@ -585,6 +585,7 @@ async function generateWithOpenAIText(input: BackendInput, retryCount = 0): Prom
     return networkFailure('openai', read.err, timeoutSec);
   }
   const data = read.data;
+  log302Usage(data, 'generations', input.quality, 0);
 
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
   const b64 = items?.[0]?.b64_json;
@@ -695,6 +696,21 @@ async function generateWithOpenAI(input: BackendInput, retryCount = 0): Promise<
   return postOpenAIEdits(input, taggedPrompt, imageParts, maskPart, retryCount);
 }
 
+/**
+ * 302 官转按 token 实扣费：把响应里的 usage 打一行日志，用来按真实成本核对「售价 ≥ 成本 3 倍」（F 板块定价底线）。
+ * 只记数字，不含提示词与图片；没有 usage 字段时不打。
+ */
+function log302Usage(data: Record<string, unknown> | null, kind: 'edits' | 'generations', quality: unknown, refs: number): void {
+  const usage = data?.usage as {
+    input_tokens?: number;
+    output_tokens?: number;
+    input_tokens_details?: { image_tokens?: number; text_tokens?: number };
+  } | undefined;
+  if (!usage) return;
+  console.log(`[302-usage] ${kind} model=${OPENAI_MODEL} quality=${normalizeGenerationQuality(quality)} refs=${refs} `
+    + `in=${usage.input_tokens ?? '?'} in_img=${usage.input_tokens_details?.image_tokens ?? '?'} out=${usage.output_tokens ?? '?'}`);
+}
+
 interface OpenAIFilePart { blob: Blob; filename: string }
 
 async function postOpenAIEdits(
@@ -761,6 +777,7 @@ async function postOpenAIEdits(
     return networkFailure('openai', read.err, timeoutSec);
   }
   const data = read.data;
+  log302Usage(data, 'edits', input.quality, imageParts.length);
 
   const items = data?.data as Array<{ b64_json?: string; url?: string }> | undefined;
   const b64 = items?.[0]?.b64_json;
