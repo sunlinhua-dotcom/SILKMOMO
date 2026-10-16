@@ -1,5 +1,5 @@
 /**
- * kie.ai GPT-Image-2.5 Flare 出图客户端（异步任务制）。
+ * kie.ai GPT-Image 出图客户端（异步任务制）；默认 GPT-Image-2.0（10-16 起，2.5 Flare 皮肤 / 面料斑驳，客户投诉）。
  *
  * 纯逻辑、不 import 任何项目模块（可被 node:test 直接加载）。流程：
  *   参考图 → 上传换公网 URL → createTask → 轮询 recordInfo → 下载结果图字节。
@@ -21,12 +21,17 @@ export type KieResolution = '1K' | '2K' | '4K';
 
 export const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai';
 export const KIE_DEFAULT_UPLOAD_URL = 'https://kieai.redpandaai.co/api/file-base64-upload';
-export const KIE_DEFAULT_MODEL_I2I = 'gpt-image-2-5-flare-image-to-image';
-export const KIE_DEFAULT_MODEL_T2I = 'gpt-image-2-5-flare-text-to-image';
+// 10-16 从 2.5 Flare 改回 2.0：同提示词同参考图对照，Flare / Sunburst 的皮肤与面料都有斑驳的色块纹理，
+// 2.0 干净，与 302 时期的观感一致（证据 verify/blotch-1016/）。要试 2.5 用 KIE_IMAGE_MODEL_* 覆盖。
+export const KIE_DEFAULT_MODEL_I2I = 'gpt-image-2-image-to-image';
+export const KIE_DEFAULT_MODEL_T2I = 'gpt-image-2-text-to-image';
 export const KIE_DEFAULT_RESOLUTION: KieResolution = '2K';
 export const KIE_DEFAULT_POLL_INTERVAL_MS = 2_500;
-/** kie 总预算默认值（上传 + 建任务 + 轮询 + 下载）。调用方会再与服务端单张上限取小。 */
-export const KIE_DEFAULT_TIMEOUT_MS = 300_000;
+/**
+ * kie 总预算默认值（上传 + 建任务 + 轮询 + 下载）。调用方会再与服务端单张上限取小。
+ * 10-16 由 300s 提到 360s（= OPENAI_TIMEOUT_MS）：kie 上的 2.0 平时 43–90s，但排队时实测过单张 400s。
+ */
+export const KIE_DEFAULT_TIMEOUT_MS = 360_000;
 export const KIE_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 

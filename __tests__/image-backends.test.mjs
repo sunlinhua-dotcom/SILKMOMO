@@ -510,7 +510,7 @@ test('provider：无 KIE key 时 generateImage 仍打 302 edits，kie 完全不�
 test('kie 配置默认值与环境变量覆盖', () => {
   const d = kie.readKieConfig({ KIE_API_KEY: 'k' });
   assert.deepEqual([d.baseUrl, d.uploadUrl, d.modelI2I, d.modelT2I, d.resolution, d.pollIntervalMs],
-    ['https://api.kie.ai', 'https://kieai.redpandaai.co/api/file-base64-upload', 'gpt-image-2-5-flare-image-to-image', 'gpt-image-2-5-flare-text-to-image', '2K', 2500]);
+    ['https://api.kie.ai', 'https://kieai.redpandaai.co/api/file-base64-upload', 'gpt-image-2-image-to-image', 'gpt-image-2-text-to-image', '2K', 2500]);
   const o = kie.readKieConfig({ KIE_API_KEY: 'k', KIE_BASE_URL: 'http://127.0.0.1:1/', KIE_UPLOAD_URL: 'http://127.0.0.1:2/up', KIE_IMAGE_MODEL_I2I: 'm1', KIE_IMAGE_MODEL_T2I: 'm2', KIE_IMAGE_RESOLUTION: '4k' });
   assert.deepEqual([o.baseUrl, o.uploadUrl, o.modelI2I, o.modelT2I, o.resolution], ['http://127.0.0.1:1', 'http://127.0.0.1:2/up', 'm1', 'm2', '4K']);
   assert.equal(kie.readKieConfig({ KIE_BASE_URL: 'ftp://x' }).baseUrl, 'https://api.kie.ai');
@@ -550,12 +550,12 @@ test('kie 图生图：上传 → 建任务 → 轮询 → 下载字节，请求�
       }, 'openai');
       assert.equal(result.success, true, JSON.stringify(result));
       assert.equal(result.backend, 'openai');
-      assert.equal(result.model, 'gpt-image-2-5-flare-image-to-image');
+      assert.equal(result.model, 'gpt-image-2-image-to-image');
       assert.deepEqual(Buffer.from(result.data, 'base64'), Buffer.from(PNG_BYTES));
       assert.equal(fake.rec.uploads.length, 5);
       assert.equal(fake.rec.creates.length, 1);
       const c = fake.rec.creates[0];
-      assert.equal(c.model, 'gpt-image-2-5-flare-image-to-image');
+      assert.equal(c.model, 'gpt-image-2-image-to-image');
       assert.equal(c.input.aspect_ratio, '16:9');
       assert.equal(c.input.resolution, '2K');
       assert.equal(c.input.input_urls.length, 5);
@@ -604,16 +604,16 @@ test('kie 纯文生图（脸库候选脸）：不上传、走 t2i 模型、promp
     await withMockedNetwork(fake.handler, async () => {
       const result = await mod.generateImage({ prompt: 'portrait only', aspectRatio: '3:4', productImages: [], quality: 'medium', timeoutMs: 330_000 }, 'openai');
       assert.equal(result.success, true);
-      assert.equal(result.model, 'gpt-image-2-5-flare-text-to-image');
+      assert.equal(result.model, 'gpt-image-2-text-to-image');
       assert.equal(fake.rec.uploads.length, 0);
       const c = fake.rec.creates[0];
-      assert.equal(c.model, 'gpt-image-2-5-flare-text-to-image');
+      assert.equal(c.model, 'gpt-image-2-text-to-image');
       assert.equal(c.input.prompt, 'portrait only');
       assert.equal('input_urls' in c.input, false);
       assert.equal(c.input.aspect_ratio, '3:4');
     });
-    assert.equal(mod.resolveApiModel('openai'), 'gpt-image-2-5-flare-image-to-image');
-    assert.equal(mod.resolveApiModel('openai', { textOnly: true }), 'gpt-image-2-5-flare-text-to-image');
+    assert.equal(mod.resolveApiModel('openai'), 'gpt-image-2-image-to-image');
+    assert.equal(mod.resolveApiModel('openai', { textOnly: true }), 'gpt-image-2-text-to-image');
     assert.equal(mod.resolveApiModel('gemini', { textOnly: true }), 'gemini-3.1-flash-image-preview');
   });
 });

@@ -47,7 +47,7 @@ export const GPT_IMAGE_QUALITY_OPTIONS: Array<{
   { id: 'high', label: '高清', priceFen: 350, etaSeconds: 150, etaLabel: '约150秒' },
 ];
 
-// GPT 通道（kie GPT-Image-2.5 Flare）成本：1 credit ≈ $0.005；1K=6、2K=10、4K=16 credits
+// GPT 通道（kie GPT-Image-2.0，与 2.5 同价）成本：1 credit ≈ $0.005；1K=6、2K=10、4K=16 credits
 // ≈ ¥0.22 / ¥0.36 / ¥0.58。售价须 ≥ 3 倍：草稿 ¥0.70（3.2×）、标准 ¥1.20（3.3×）、高清 ¥3.50（6×）。
 export const GPT_IMAGE_PRICES_FEN: Record<GenerationQuality, number> = {
   low: 70,

@@ -10,7 +10,7 @@
  * 模型默认用 gpt-image-2（独立令牌）或 gpt-image-2-all（兼容旧共享令牌），可被 OPENAI_IMAGE_MODEL 覆盖。
  *
  * GPT 通道的上游提供方（lib/kie-image.ts 的 resolveOpenAIProvider）：
- *   配了 KIE_API_KEY 且未显式写 OPENAI_IMAGE_PROVIDER=302 → kie.ai GPT-Image-2.5 Flare（异步任务制）；
+ *   配了 KIE_API_KEY 且未显式写 OPENAI_IMAGE_PROVIDER=302 → kie.ai GPT-Image（默认 2.0，异步任务制）；
  *   否则 → 302.ai（原行为，一字不变）。对外接口（backend 名 'openai'、入参出参）两种提供方完全一致。
  */
 
@@ -135,7 +135,7 @@ const GEMINI_MODEL = 'gemini-3.1-flash-image-preview';
 export const DERIVED_ANCHOR_MODEL = process.env.DERIVED_ANCHOR_MODEL || 'gemini-3.1-flash-image-preview';
 // 模型默认随 key 走：独立 GPT 令牌支持 gpt-image-2；主令牌走 gpt-image-2-all。
 // 两者都可被 OPENAI_IMAGE_MODEL 覆盖。
-// kie 提供方下，归因用的模型名是 kie 的 Flare 模型（图生图为默认；纯文生用 resolveApiModel 的 textOnly）。
+// kie 提供方下，归因用的模型名是 kie 的实际模型（默认 2.0）（图生图为默认；纯文生用 resolveApiModel 的 textOnly）。
 const KIE_STATIC_CONFIG = readKieConfig(process.env);
 const OPENAI_MODEL = OPENAI_PROVIDER === 'kie'
   ? KIE_STATIC_CONFIG.modelI2I
@@ -798,7 +798,7 @@ async function postOpenAIEdits(
 }
 
 // ═══════════════════════════════════════════════
-// kie.ai GPT-Image-2.5 Flare 通道（异步任务制，替代 302 的 gpt-image-2）
+// kie.ai GPT-Image 通道（异步任务制，替代 302 的 gpt-image-2；默认 2.0）
 // ═══════════════════════════════════════════════
 
 /** KieError → 现有错误分类（errorKind / httpStatus / detail）。原文只进脱敏后的 detail，不下发给用户。 */
